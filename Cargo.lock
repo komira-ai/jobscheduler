@@ -1515,7 +1515,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
- "cap",
  "clap",
  "hyper",
  "hyper-util",

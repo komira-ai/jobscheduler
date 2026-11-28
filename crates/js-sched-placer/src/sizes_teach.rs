@@ -10,19 +10,28 @@
 //! any host is known, once one is). So after a start a job books from its class's recent runs,
 //! else its fallback's, else its client's, at the first pass, and the cold size only for a
 //! class, a fallback and a client with no run among them. The reads of the ended jobs come
-//! later, a page at a time ([`Teaching::read_page`]): the freed allocations newest free first,
+//! later, a page at a time ([`Teaching::read_page`]): the freed allocations oldest free first,
 //! one scan of their entries and batched reads of their rows a page, outside the engine's lock,
-//! while the passes place. [`SchedPlacer::teach`] drops the interim history and teaches the
-//! history, under the lock, every ended job that was read, in the order the jobs ended (and of
-//! two that ended at once, of their ids), and after them the runs the passes held, in the order
-//! the passes freed them: the order a server that read everything before its first pass
-//! teaches them in, so the history once taught is the same.
+//! while the passes place. Each page is taught as it is read, under the lock for that page
+//! alone, in the order its jobs ended (and of two that ended at once, of their ids), to the
+//! teaching's own copy of the history (the history as the teaching began, its summaries, its
+//! profiles and the runs it waits for a host to judge), which no pass sizes from; the page is
+//! then dropped. So a teaching holds one page of ended jobs at most, whatever the history the
+//! store keeps (seven days of a farm's jobs held at once came to gigabytes), and the passes are
+//! never held for more than a page. [`SchedPlacer::teach`] drops the interim history, makes the
+//! copy the history, and teaches after it the runs the passes held, in the order the passes
+//! freed them. The ended jobs are taught in the order they were freed, page by page, which is
+//! the order they ended but for a job freed a page or more after jobs that ended later (a host
+//! that reported its end late), taught where its free came; the passes of a server that saw it
+//! freed teach it there too.
 //!
-//! A job the passes still follow when the runs are taught (its allocation is live at the last
-//! pass, or a pass named it freed since the teaching began, its run held or still being read)
-//! is left out of the read, which may have found it already freed: the passes teach it, once. A teaching whose read failed or stopped before its
-//! last page teaches none of what it read, as a start whose read failed does, and still teaches
-//! the runs the passes held.
+//! A job the passes follow when its page is taught (its allocation is live at the last pass, or
+//! a pass named it freed since the teaching began, its run held) is left out of the page, which
+//! may have found it already freed: the passes teach it, once. A job freed after the teaching
+//! began is followed from its begin until the passes hand its run over, so a page never teaches
+//! it. A teaching whose read failed or stopped before its last page teaches none of what it
+//! read (its copy is dropped), as a start whose read failed does, and still teaches the runs the
+//! passes held.
 //!
 //! With the profiles in shadow, the runs the passes held are checked against their classes'
 //! profiles only when they are taught, so a teaching logs, after the ended jobs and before the
@@ -32,23 +41,27 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-use js_jobs::{Booked, IdSource, JobRecord, JobStore, JobStoreError, MAX_PAGE};
+use js_jobs::{Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError, MAX_PAGE};
 use js_state::ResumeToken;
 use js_types::sched::FarmTime;
 use tracing::warn;
 
-use super::Held;
+use super::profile::Profiles;
+use super::{Day, Held, JobSizes, Key, Run, Summaries};
 use crate::place::SchedPlacer;
 
 /// A teaching of the ended jobs, begun ([`SchedPlacer::begin_teaching`]) and not yet taught
-/// ([`SchedPlacer::teach`]): the ended jobs read so far, each with what its freed allocation
-/// booked, and where the next page of the read begins. While it is not taught every run a pass
-/// frees is held, so a teaching begun is always taught, read through or not.
+/// ([`SchedPlacer::teach`]): the history taught the pages read so far, and where the next page
+/// of the read begins. While it is not taught every run a pass frees is held, so a teaching
+/// begun is always taught, read through or not.
 #[derive(Debug)]
 #[must_use = "a teaching begun holds every freed run until it is taught"]
 pub struct Teaching {
-    /// The ended jobs whose allocations were freed, read so far, newest free first.
-    ended: Vec<(JobRecord, Booked)>,
+    /// The history as the teaching began, taught every ended job of the pages read so far.
+    history: History,
+    /// How many ended jobs of the pages read were taught, and how many of them taught a class a
+    /// memory sample ([`crate::sizes::JobSizes::observe`]).
+    ended: (usize, usize),
     /// Where the next page begins; `None` before the first page and after the last.
     resume: Option<ResumeToken>,
     /// How many pages were read.
@@ -61,23 +74,68 @@ pub struct Teaching {
     bridged: usize,
 }
 
+/// What a teaching teaches the ended jobs to, apart from the history the passes size from: the
+/// parts of [`JobSizes`] that teaching a run changes. Each page is taught by exchanging it with
+/// those parts for the page ([`History::exchange`]), so the history the passes size from does
+/// not change until the teaching is taught.
+#[derive(Debug)]
+struct History {
+    summaries: Summaries,
+    profiles: Option<Profiles>,
+    pending: Vec<(Key, Run, Day)>,
+}
+
+impl History {
+    /// The parts of `sizes` that teaching a run changes, as they stand.
+    fn of(sizes: &JobSizes) -> Self {
+        Self {
+            summaries: sizes.summaries.clone(),
+            profiles: sizes.profiles.clone(),
+            pending: sizes.pending.clone(),
+        }
+    }
+
+    /// Exchanges these parts with those of `sizes`.
+    fn exchange(&mut self, sizes: &mut JobSizes) {
+        std::mem::swap(&mut self.summaries, &mut sizes.summaries);
+        std::mem::swap(&mut self.profiles, &mut sizes.profiles);
+        std::mem::swap(&mut self.pending, &mut sizes.pending);
+    }
+}
+
 impl Teaching {
-    /// Reads the next page of the freed allocations `jobs` holds, newest free first (at most
-    /// [`MAX_PAGE`], [`JobStore::freed_page`]), keeping each ended job with what its allocation
-    /// booked. Answers whether a page remains; once none does, the teaching is read through and
-    /// a further call reads nothing.
+    /// Reads the next page of the freed allocations `jobs` holds, oldest free first (at most
+    /// [`MAX_PAGE`], [`JobStore::freed_page_oldest_first`]), and teaches each ended job of it
+    /// that the passes of `placer` do not follow, with what its allocation booked, in the order
+    /// the jobs ended, to the teaching's history; the page is not kept. The read is made outside
+    /// the engine's lock, the teaching under it. Answers whether a page remains; once none
+    /// does, the teaching is read through and a further call reads nothing.
     ///
     /// # Errors
-    /// The first [`JobStoreError`] of the page's reads; what the page read is not kept.
+    /// The first [`JobStoreError`] of the page's reads; nothing of the page is taught.
     pub fn read_page<S: js_state::Store, I: IdSource>(
         &mut self,
+        placer: &SchedPlacer,
         jobs: &JobStore<S, I>,
     ) -> Result<bool, JobStoreError> {
         if self.read {
             return Ok(false);
         }
-        let page = jobs.freed_page(self.resume.as_ref(), MAX_PAGE)?;
-        self.ended.extend(page.runs);
+        let page = jobs.freed_page_oldest_first(self.resume.as_ref(), MAX_PAGE)?;
+        let mut runs = page.runs;
+        runs.sort_by(end_order);
+        let mut engine = placer.engine();
+        let sizes = engine.sizes();
+        let followed: BTreeSet<JobId> = (sizes.live.keys())
+            .chain(sizes.held.iter().flat_map(|held| held.named.iter()))
+            .cloned()
+            .collect();
+        self.history.exchange(sizes);
+        for (job, booked) in runs.iter().filter(|(job, _)| !followed.contains(&job.id)) {
+            self.ended.0 += 1;
+            self.ended.1 += usize::from(sizes.observe(job, *booked));
+        }
+        self.history.exchange(sizes);
         self.pages += 1;
         self.resume = page.resume;
         self.read = self.resume.is_none();
@@ -178,7 +236,8 @@ impl SchedPlacer {
         }
         sizes.held = Some(held);
         Ok(Teaching {
-            ended: Vec::new(),
+            history: History::of(sizes),
+            ended: (0, 0),
             resume: None,
             pages: 0,
             read: false,
@@ -187,42 +246,36 @@ impl SchedPlacer {
         })
     }
 
-    /// Teaches the history `teaching` (the module docs): when it was read through, each ended
-    /// job it read that the passes do not follow, in the order the jobs ended; then each run the
-    /// passes held since it was begun, in the order they freed them. From then on each pass
+    /// Teaches the history `teaching` (the module docs): when it was read through, its history,
+    /// taught each ended job it read that the passes did not follow, page by page, becomes the
+    /// history; then each run the passes held since it was begun is taught, in the order they
+    /// freed them. From then on each pass
     /// teaches what it frees. With profiles kept (`Curves::Shadow`) it logs, between the two,
     /// that the shadow checks start: the classes profiled, the ended jobs taught and the
     /// seconds since the teaching was begun, on the placer's clock. Answers how many of the
     /// ended jobs read taught a class a memory sample ([`crate::sizes::JobSizes::observe`]); 0
     /// for a teaching not read through, which teaches the held runs alone.
-    pub fn teach(&self, teaching: Teaching) -> usize {
+    pub fn teach(&self, mut teaching: Teaching) -> usize {
         let mut engine = self.engine();
         let sizes = engine.sizes();
         let held = sizes.held.take().unwrap_or_default();
-        let followed: BTreeSet<_> = (sizes.live.keys())
-            .chain(held.named.iter())
-            .cloned()
-            .collect();
-        let mut ended = match teaching.read {
-            true => teaching.ended,
-            false => Vec::new(),
+        let (ended, taught) = match teaching.read {
+            true => {
+                teaching.history.exchange(sizes);
+                teaching.ended
+            }
+            false => (0, 0),
         };
-        ended.retain(|(job, _)| !followed.contains(&job.id));
-        ended.sort_by(end_order);
-        let taught = ended
-            .iter()
-            .filter(|(job, booked)| sizes.observe(job, *booked))
-            .count();
         let took = self.now().saturating_duration_since(teaching.begun_at);
-        sizes.log_checks_start(ended.len(), took);
+        sizes.log_checks_start(ended, took);
         for (job, booked) in &held.runs {
             let _ = sizes.observe_logged(job, *booked, true);
         }
         taught
     }
 
-    /// Teaches the history every ended job `jobs` holds whose allocation is freed, in the order
-    /// the jobs ended, at once: a teaching begun, read through and taught
+    /// Teaches the history every ended job `jobs` holds whose allocation is freed, oldest free
+    /// first and each page in the order its jobs ended: a teaching begun, read through and taught
     /// ([`SchedPlacer::begin_teaching`], [`Teaching::read_page`], [`SchedPlacer::teach`]).
     /// Answers how many runs taught a class a memory sample ([`crate::sizes::JobSizes::observe`]):
     /// a job that ended with no measured usage is read and not counted.
@@ -235,7 +288,7 @@ impl SchedPlacer {
     ) -> Result<usize, JobStoreError> {
         let mut teaching = self.begin_teaching(jobs, 0)?;
         let read = loop {
-            match teaching.read_page(jobs) {
+            match teaching.read_page(self, jobs) {
                 Ok(true) => {}
                 Ok(false) => break Ok(()),
                 Err(error) => break Err(error),

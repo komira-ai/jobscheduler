@@ -77,9 +77,6 @@ in-process = []
 # switches the farm-shaped server test prints (src/server_storm_tests.rs).
 nix = { workspace = true, features = ["fs", "resource"] }
 js-agent = { path = "../js-agent" }
-# The allocator of the server tests' binary, which counts the bytes live for the memory soak
-# (tests/server/memory_soak.rs).
-cap.workspace = true
 # `Candidate`, the host a placement test offers the engine (src/sched/jobs_tests.rs).
 js-provider = { path = "../js-provider" }
 # The output tails of the v1 acceptance target's jobs, which the job service's JSON carries
