@@ -225,7 +225,11 @@ fn a_job_another_server_queued_is_placed_and_started_on_a_beat_held_here() {
 /// the start that server wrote would wait for the host's next heartbeat. With the host's
 /// heartbeat held here, the other server queues a job too big for any pass to place (so this
 /// server places nothing) and places it on the host itself; the held beat is answered with its
-/// start.
+/// start. The other server places the job once this server's pass, which the queue's notice
+/// brings, has written the job's queue status: both write the job's row, each conditional on
+/// the version it read, so a placement read before that write would be refused as stale, as
+/// it is between any two servers. Once the status stands no later pass of this server writes
+/// the row again.
 #[test]
 fn a_start_another_server_wrote_ends_a_beat_held_here() {
     let (_database, url) = database();
@@ -242,6 +246,13 @@ fn a_start_another_server_wrote_ends_a_beat_held_here() {
             let (other, job, id) = (Arc::clone(&other), queued(&id, 16_000), id.clone());
             tokio::task::spawn_blocking(move || {
                 other.insert_queued(job).unwrap();
+                let unnoted = |other: &ServerJobs| {
+                    let job = other.get_job(&id).unwrap().unwrap();
+                    job.queue.code() == js_types::QueueCode::Unspecified
+                };
+                while unnoted(&other) {
+                    std::thread::yield_now();
+                }
                 let booked = Booked::Shape {
                     cpu_millis: 1500,
                     memory_bytes: 1 << 30,
