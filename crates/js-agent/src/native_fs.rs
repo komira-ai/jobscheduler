@@ -14,11 +14,13 @@
 //! - **A tree is a mount strictly below the trees root** ([`tree_rules`]): it is read-only,
 //!   mounted `no_exec`, and neither the root itself nor a path that only spells its way
 //!   below the root (through `..` or a link). It is the directory the provider answered for
-//!   this run, `<root>/mount-provider/<provider>/<run>/<index>` ([`PROVIDER_DIR`],
-//!   [`is_runs_tree`]), never another run's or a folder above one. A mount above the root is
-//!   refused, since its grant would open every run's trees. With a trees root, every run's
-//!   profile carries the root's rules, with no tree when the run mounts none, so a run
-//!   without a tree reads nothing below the root.
+//!   this run, `<root>/mount-provider/<provider>/<run>/<index>`, or
+//!   `<root>/mount-provider/<provider>/<run>/a<attempt>/<index>` for a source whose calls
+//!   named an attempt (the agent names one, from 1, in every call of a start's sources)
+//!   ([`PROVIDER_DIR`], [`is_runs_tree`]); never another run's, a folder above one or a path
+//!   below one. A mount above the root is refused, since its grant would open every run's
+//!   trees. With a trees root, every run's profile carries the root's rules, with no tree
+//!   when the run mounts none, so a run without a tree reads nothing below the root.
 
 use std::fs;
 use std::io;
@@ -33,7 +35,9 @@ use crate::lifecycle::{MountRoots, NativeRefusal};
 pub const TREES_ROOT_FLAG: &str = "--native-trees-root";
 
 /// The folder below the trees root in which the provider makes each run's trees:
-/// `<root>/mount-provider/<provider, hex>/<run, hex>/<index>`.
+/// `<root>/mount-provider/<provider, hex>/<run, hex>/<index>`, or
+/// `<root>/mount-provider/<provider, hex>/<run, hex>/a<attempt>/<index>` for a numbered
+/// attempt.
 pub const PROVIDER_DIR: &str = "mount-provider";
 
 /// Refuses a mount of a provider's tree whose mode is not read-only, `input-not-allowed`. A
@@ -204,9 +208,12 @@ impl TreeRules {
 }
 
 /// Whether `dir` (canonical) is a tree the provider answered for the run `run_id` below the
-/// trees root `root`: `<root>/mount-provider/<provider>/<run>/<index>`, where `<provider>` is
-/// lowercase hex, `<run>` is the hex of the name the agent gives the run in its provider
-/// calls (`js.<run_id>`) and `<index>` is a number.
+/// trees root `root`, in one of the provider's two shapes:
+/// `<root>/mount-provider/<provider>/<run>/<index>` for a source that names no attempt, and
+/// `<root>/mount-provider/<provider>/<run>/a<attempt>/<index>` for one that names attempt 1 or
+/// more. `<provider>` is lowercase hex, `<run>` is the hex of the name the agent gives the run
+/// in its provider calls (`js.<run_id>`), `<attempt>` is a number above 0 in decimal as the
+/// provider writes it (no leading zero) and `<index>` is a number.
 #[must_use]
 pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
     let Ok(below) = dir.strip_prefix(root) else {
@@ -226,8 +233,25 @@ pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     };
     let number = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
-    matches!(parts.as_slice(), [dir, provider, named, index]
-        if *dir == PROVIDER_DIR && hex(provider) && *named == run && number(index))
+    // `a` and the attempt as the provider names it: `a1`, `a2`, ..., never `a0` (attempt 0
+    // names no folder) nor a number with a leading zero.
+    let attempt = |text: &str| {
+        text.strip_prefix('a').is_some_and(|digits| {
+            digits
+                .parse::<u64>()
+                .is_ok_and(|n| n > 0 && n.to_string() == digits)
+        })
+    };
+    let runs = |dir: &str, provider: &str, named: &str| {
+        dir == PROVIDER_DIR && hex(provider) && named == run
+    };
+    match parts.as_slice() {
+        [dir, provider, named, index] => runs(dir, provider, named) && number(index),
+        [dir, provider, named, numbered, index] => {
+            runs(dir, provider, named) && attempt(numbered) && number(index)
+        }
+        _ => false,
+    }
 }
 
 /// The trees of the run `run_id`'s mounts below the trees root `root` (canonical): every
@@ -297,7 +321,8 @@ pub fn tree_rules(
                 dir,
                 format!(
                     "below the trees root {}, a job mounts only a tree the provider answered \
-                     for its own run ({PROVIDER_DIR}/<provider>/<run>/<index>)",
+                     for its own run ({PROVIDER_DIR}/<provider>/<run>/<index> or \
+                     {PROVIDER_DIR}/<provider>/<run>/a<attempt>/<index>)",
                     root.display()
                 ),
             ));
