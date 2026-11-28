@@ -13,6 +13,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,6 +25,7 @@ use js_agent::crun::{CrunRuntime, HostPorts, Reason};
 use js_agent::host_ports::Listen;
 use js_agent::lifecycle::{RunHandle, RunSpec, Runtime, Status, label};
 use js_agent_wire::{HostPort, PortProtocol, PortRange};
+use js_contain::oci::{SupervisorId, end_supervisor};
 use serde_json::{Value, json};
 
 use crate::node::{NoImages, Node, PID};
@@ -119,12 +121,17 @@ const TRIES: u32 = 1_000_000;
 
 /// The supervisor of a run a test started, held by a pidfd taken while it runs: dropped (the
 /// test passed or failed), it signals the supervisor's process group (the supervisor, the
-/// stand-in `crun` and what that started) SIGTERM, then SIGKILL after [`GRACE`], and waits up
-/// to [`ANSWER`] for the supervisor's end (the runtime's thread waits on it as its child, so
-/// it is reaped). One that outlives the kill fails the test, unless the test failed already.
-/// One that had ended before the guard was made has no pidfd, and nothing to end.
+/// stand-in `crun` and what that started) SIGTERM, then after [`GRACE`] ends it as the
+/// runtime ends one ([`end_supervisor`]: SIGKILL, unless the lease holds the exit record,
+/// which the supervisor writes before it exits, so that a kill does not cut short its exit
+/// and, in a coverage build, the profile it then writes), and waits up to [`ANSWER`] for the
+/// supervisor's end (the runtime's thread waits on it as its child, so it is reaped). One
+/// that outlives that fails the test, unless the test failed already. One that had ended
+/// before the guard was made has no pidfd, and nothing to end.
 struct Supervisor {
     pid: Pid,
+    id: SupervisorId,
+    lease: PathBuf,
     pidfd: Option<OwnedFd>,
 }
 
@@ -134,14 +141,26 @@ impl Supervisor {
         let text = std::fs::read_to_string(node.sidecar(&id.0)).expect("the sidecar");
         let json: Value = serde_json::from_str(&text).expect("json");
         let raw = json["supervisor"]["pid"]
-            .as_i64()
+            .as_u64()
             .expect("a supervisor pid");
+        let start = json["supervisor"]["start"]
+            .as_u64()
+            .expect("a supervisor start");
+        let supervisor = SupervisorId {
+            pid: u32::try_from(raw).expect("a pid"),
+            start,
+        };
         let pid = Pid::from_raw(i32::try_from(raw).expect("a pid")).expect("not 0");
         let pidfd = match rustix::process::pidfd_open(pid, PidfdFlags::empty()) {
             Err(rustix::io::Errno::SRCH) => None,
             opened => Some(opened.expect("a pidfd")),
         };
-        Self { pid, pidfd }
+        Self {
+            pid,
+            id: supervisor,
+            lease: node.lease_of(&id.0),
+            pidfd,
+        }
     }
 
     /// Whether the supervisor ends within `bound` (or had ended before the guard was made).
@@ -157,15 +176,17 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        for (signal, bound) in [(Signal::TERM, GRACE), (Signal::KILL, ANSWER)] {
-            if self.ends_within(Duration::ZERO) {
-                return;
-            }
-            // The group of a supervisor that has just ended may be gone: nothing to signal.
-            let _ = rustix::process::kill_process_group(self.pid, signal);
-            if self.ends_within(bound) {
-                return;
-            }
+        if self.ends_within(Duration::ZERO) {
+            return;
+        }
+        // The group of a supervisor that has just ended may be gone: nothing to signal.
+        let _ = rustix::process::kill_process_group(self.pid, Signal::TERM);
+        if self.ends_within(GRACE) {
+            return;
+        }
+        end_supervisor(self.id, &self.lease);
+        if self.ends_within(ANSWER) {
+            return;
         }
         if !std::thread::panicking() {
             panic!(

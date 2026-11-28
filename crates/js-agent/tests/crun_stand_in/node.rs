@@ -18,6 +18,7 @@ use js_agent::lifecycle::{
 use js_agent_wire::{HeartbeatReply, HeldState};
 use js_contain::OciConfig;
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
+use js_contain::oci::{SupervisorId, end_supervisor};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 
@@ -238,31 +239,57 @@ pub struct Node {
     pub digest: String,
 }
 
-/// A test that ends with a run still standing (passed or failed) leaves no process: the node
-/// ends, as it is dropped, the process group of every supervisor its ledger's sidecars name
-/// that is still a process of this node (its command line names the node's directory, so a pid
-/// a process of another test or of the host was given since is never signalled).
+/// A test that ends with a run still standing (passed or failed) leaves no process: the node,
+/// as it is dropped, ends the supervisor of every lease its ledger's sidecars name
+/// ([`Node::end_supervisors`]) and returns once each is gone. One that is only exiting is
+/// waited for too, so its process (in a coverage build, the profile it writes as it exits)
+/// is done before the test is.
 impl Drop for Node {
     fn drop(&mut self) {
-        let Ok(sidecars) = std::fs::read_dir(self.scratch.join("oci-labels")) else {
-            return;
-        };
-        let mine = self.dir.display().to_string();
-        for sidecar in sidecars.flatten() {
-            let pid = std::fs::read_to_string(sidecar.path())
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .and_then(|record| record["supervisor"]["pid"].as_i64())
-                .and_then(|raw| i32::try_from(raw).ok())
-                .and_then(rustix::process::Pid::from_raw);
-            let Some(pid) = pid else {
-                continue;
-            };
-            let line = std::fs::read(format!("/proc/{}/cmdline", pid.as_raw_nonzero()));
-            if line.is_ok_and(|line| String::from_utf8_lossy(&line).contains(&mine)) {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        for id in self.end_supervisors() {
+            while id.alive() {
+                std::thread::yield_now();
             }
         }
+    }
+}
+
+impl Node {
+    /// Ends the supervisor of every lease the ledger's sidecars name that is still a process
+    /// of this node (its command line names the node's directory, so a pid a process of
+    /// another test or of the host was given since is never signalled), as the runtime ends
+    /// one ([`end_supervisor`]): its process group is killed unless its lease holds its exit
+    /// record, which a supervisor writes as its run ends, before it exits. A kill then would
+    /// cut its exit short, and in a coverage build the profile it writes as it exits, which
+    /// then cannot be read and fails the merge of every other. Returns the supervisors it
+    /// named.
+    pub fn end_supervisors(&self) -> Vec<SupervisorId> {
+        let Ok(sidecars) = std::fs::read_dir(self.scratch.join("oci-labels")) else {
+            return Vec::new();
+        };
+        let mine = self.dir.display().to_string();
+        let mut named = Vec::new();
+        for sidecar in sidecars.flatten() {
+            let path = sidecar.path();
+            let record = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+            let id = record.and_then(|record| {
+                Some(SupervisorId {
+                    pid: u32::try_from(record["supervisor"]["pid"].as_u64()?).ok()?,
+                    start: record["supervisor"]["start"].as_u64()?,
+                })
+            });
+            let (Some(id), Some(name)) = (id, path.file_stem()) else {
+                continue;
+            };
+            let line = std::fs::read(format!("/proc/{}/cmdline", id.pid));
+            if line.is_ok_and(|line| String::from_utf8_lossy(&line).contains(&mine)) {
+                end_supervisor(id, &self.scratch.join(name));
+                named.push(id);
+            }
+        }
+        named
     }
 }
 
