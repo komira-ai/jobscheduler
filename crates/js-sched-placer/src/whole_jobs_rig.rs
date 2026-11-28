@@ -162,11 +162,9 @@ pub(crate) fn mark(
 }
 
 /// `mark`, waiting for its host's hello until `by_ms` ([`MarkRecord::hello_by`]).
-pub(crate) fn waiting(mark: MarkRecord, by_ms: u64) -> MarkRecord {
-    MarkRecord {
-        hello_by: Some(store(by_ms)),
-        ..mark
-    }
+pub(crate) fn waiting(mut mark: MarkRecord, by_ms: u64) -> MarkRecord {
+    mark.hello_by = Some(store(by_ms));
+    mark
 }
 
 /// The job tables over the in-memory fake, behind the wrapper that fails or races a commit.

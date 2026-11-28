@@ -143,10 +143,8 @@ async fn a_restored_mark_whose_host_never_says_hello_is_dropped_when_its_wait_en
         "{by:?} begun {begun:?}"
     );
     assert!(by <= now(&again).saturating_add(regain()), "{by:?}");
-    let unwaited = MarkRecord {
-        hello_by: None,
-        ..waiting.clone()
-    };
+    let mut unwaited = waiting.clone();
+    unwaited.hello_by = None;
     assert_eq!(unwaited, mark);
 
     again.advance(by.since(now(&again)).saturating_sub(SHY));
