@@ -182,11 +182,12 @@ fn nested(mounts: &[JobMount]) -> Result<(), NativeRefusal> {
 
 /// Resolves the mounts of `fs` for the run `run_id` and keeps the plans: `Ready`, or the
 /// refusal of the first mount that cannot be had, or of the set when its trees break the
-/// trees root's rules.
+/// trees root's rules for the agent named `agent` in its provider calls
+/// ([`native_fs::tree_rules`]).
 pub(super) fn resolve(
     (roots, put_root): (&[MountRoot], Option<&Path>),
     plans: &mut Plans,
-    run_id: &str,
+    (agent, run_id): (Option<&str>, &str),
     fs: &JobFs,
 ) -> FsPrepared {
     match fs
@@ -194,7 +195,7 @@ pub(super) fn resolve(
         .iter()
         .map(|mount| plan_of(roots, put_root, mount))
         .collect::<Result<Vec<_>, _>>()
-        .and_then(|list| with_trees(roots, run_id, list))
+        .and_then(|list| with_trees(roots, (agent, run_id), list))
     {
         Ok(list) => {
             plans.insert(run_id.to_owned(), list);
@@ -329,11 +330,12 @@ fn put_plan(
 }
 
 /// `list` with each tree marked by the trees root (the root of `roots` that is one), once
-/// the set is held to its rules for the run `run_id` ([`native_fs::tree_rules`]); `list` as
-/// it is when the agent has no trees root.
+/// the set is held to its rules for the run `run_id` of the agent named `agent` in its
+/// provider calls ([`native_fs::tree_rules`]); `list` as it is when the agent has no trees
+/// root.
 fn with_trees(
     roots: &[MountRoot],
-    run_id: &str,
+    (agent, run_id): (Option<&str>, &str),
     mut list: Vec<MountPlan>,
 ) -> Result<Vec<MountPlan>, NativeRefusal> {
     let Some(root) = roots.iter().find(|root| root.trees) else {
@@ -345,7 +347,7 @@ fn with_trees(
         .filter(|plan| plan.put.is_none())
         .map(|plan| (PathBuf::from(plan.host.as_str()), !plan.write, plan.no_exec))
         .collect();
-    let rules = native_fs::tree_rules(&root.path, run_id, &dirs)?;
+    let rules = native_fs::tree_rules(&root.path, agent, run_id, &dirs)?;
     for plan in &mut list {
         if rules
             .trees

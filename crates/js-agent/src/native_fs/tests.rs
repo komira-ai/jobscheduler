@@ -225,9 +225,13 @@ fn every_mount_root_but_the_trees_root_is_denied() {
 }
 
 /// The run the trees of [`trees`] are made for, and the folder of its trees as the provider
-/// names it: the hex of `js.r1`.
+/// names it: the hex of `js.r1`, in the folder of [`AGENT`].
 const OWN: &str = "r1";
-const RUN_DIR: &str = "mount-provider/aa/6a732e7231";
+const RUN_DIR: &str = "mount-provider/6a7a/6a732e7231";
+
+/// The name the agent gives itself in its provider calls (its host id), whose folder below
+/// `mount-provider` is its hex, `6a7a`: the folder [`RUN_DIR`] is in.
+const AGENT: &str = "jz";
 
 /// A trees root with run `r1`'s trees `a` (index 0) and `a1` (index 1), run `r2`'s tree `b`,
 /// a directory outside the root, and links: `root/up` to the outside directory, `outside/in`
@@ -248,7 +252,7 @@ fn trees(name: &str) -> Trees {
     let (a, a1, b) = (
         root.join(RUN_DIR).join("0"),
         root.join(RUN_DIR).join("1"),
-        root.join("mount-provider/aa/6a732e7232/0"),
+        root.join("mount-provider/6a7a/6a732e7232/0"),
     );
     let outside = base.join("outside");
     for path in [&a, &a1, &b, &outside] {
@@ -290,12 +294,15 @@ fn none(root: &Path) -> Result<TreeRules, NativeRefusal> {
 #[test]
 fn trees_below_the_root_are_taken_canonical() {
     let t = trees("native-fs-tree-rules");
-    assert_eq!(tree_rules(&t.root, OWN, &[]), none(&t.root));
-    assert_eq!(tree_rules(&t.root, OWN, &[kbf(&t.outside)]), none(&t.root));
+    assert_eq!(tree_rules(&t.root, Some(AGENT), OWN, &[]), none(&t.root));
+    assert_eq!(
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&t.outside)]),
+        none(&t.root)
+    );
     // A put target outside the root that the agent makes only at the commit.
     let put = t.outside.join("put/cas/b/build-1/0123abcd");
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&t.a), (put, false, true)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&t.a), (put, false, true)]),
         Ok(TreeRules {
             root: t.root.clone(),
             trees: vec![t.a.clone()],
@@ -314,7 +321,7 @@ fn trees_below_the_root_are_taken_canonical() {
         })
     );
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&t.outside.join("in"))]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&t.outside.join("in"))]),
         Ok(TreeRules {
             root: t.root.clone(),
             trees: vec![t.a.clone()],
@@ -344,16 +351,22 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
             t.outside.display()
         ))
     };
-    assert_eq!(tree_rules(&t.root, OWN, &[kbf(&up)]), not_below(&up));
-    assert_eq!(tree_rules(&t.root, OWN, &[kbf(&link)]), not_below(&link));
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&t.root)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&up)]),
+        not_below(&up)
+    );
+    assert_eq!(
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&link)]),
+        not_below(&link)
+    );
+    assert_eq!(
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&t.root)]),
         not_allowed(format!("{root}: the tree {root} is the mount root itself"))
     );
-    let provider = t.root.join("mount-provider/aa");
+    let provider = t.root.join("mount-provider/6a7a");
     for not_its_own in [&t.b, &t.root.join(RUN_DIR), &provider] {
         assert_eq!(
-            tree_rules(&t.root, OWN, &[kbf(&t.a), kbf(not_its_own)]),
+            tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&t.a), kbf(not_its_own)]),
             not_allowed(format!(
                 "{}: below the trees root {root}, a job mounts only a tree the provider \
                  answered for its own run (mount-provider/<provider>/<run>/<index> or \
@@ -365,18 +378,23 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
         );
     }
     assert_eq!(
-        tree_rules(&t.root, "r2", &[kbf(&t.b)]).map(|rules| rules.trees),
+        tree_rules(&t.root, Some(AGENT), "r2", &[kbf(&t.b)]).map(|rules| rules.trees),
         Ok(vec![t.b.clone()])
     );
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&t.a), (t.a1.clone(), false, true)]),
+        tree_rules(
+            &t.root,
+            Some(AGENT),
+            OWN,
+            &[kbf(&t.a), (t.a1.clone(), false, true)]
+        ),
         not_allowed(format!(
             "{}: a tree below the trees root {root} is mounted read-only only",
             t.a1.display()
         ))
     );
     assert_eq!(
-        tree_rules(&t.root, OWN, &[(t.a.clone(), true, false)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[(t.a.clone(), true, false)]),
         not_allowed(format!(
             "{}: a tree below the trees root {root} is mounted no_exec only: the profile \
              grants a tree reads only",
@@ -385,7 +403,7 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
     );
     let above = t.root.parent().unwrap().to_path_buf();
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&above)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&above)]),
         not_allowed(format!(
             "{}: holds the trees root {root}: its grant would open every run's trees",
             above.display()
@@ -396,7 +414,7 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
     fs::write(t.outside.join("file"), "").unwrap();
     let through_file = t.outside.join("file/x");
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&through_file)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&through_file)]),
         Err(NativeRefusal {
             code: refusal::INPUT_UNAVAILABLE,
             why: format!("{}: Not a directory (os error 20)", through_file.display()),
@@ -404,7 +422,7 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
     );
     let gone = t.root.join("mount-provider/gone");
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&gone)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&gone)]),
         Err(NativeRefusal {
             code: refusal::INPUT_UNAVAILABLE,
             why: format!("{}: No such file or directory (os error 2)", gone.display()),
@@ -416,57 +434,67 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
 /// in both of the provider's shapes (`<run>/<index>`, and `<run>/a<attempt>/<index>` for
 /// attempts 1, 44 and the largest), and not another run's (numbered or not), a folder above
 /// (the run's, or its attempt's), a deeper path (below a tree, or an attempt folder inside
-/// another), a provider part that is not lowercase hex, an index that is not a number,
+/// another), an index that is not a number,
 /// an attempt folder the provider never names (`a0`, `a`, `a01`, `a+3`, `A3`, `b3`, `ax`, one
 /// past the largest attempt), another first folder, or a path outside the root. Catches a
 /// check that takes any path below the root, one that a job could satisfy with another run's
 /// name, and the refusal of every tree of a numbered attempt, which every start the agent
-/// makes since it names attempts is.
+/// makes since it names attempts is. A provider folder that is not this agent's (uppercase,
+/// another agent's, or none) is refused by its own name: `agent_folder`.
 #[test]
 fn a_runs_tree_is_named_by_its_run() {
     let root = Path::new("/Volumes/tierstore");
     let at = |rest: &str| root.join(rest);
     for its in [
-        "mount-provider/aa/6a732e7231/0",
-        "mount-provider/0f9e/6a732e7231/12",
-        "mount-provider/aa/6a732e7231/a1/0",
-        "mount-provider/aa/6a732e7231/a44/0",
-        "mount-provider/aa/6a732e7231/a18446744073709551615/3",
+        "mount-provider/6a7a/6a732e7231/0",
+        "mount-provider/6a7a/6a732e7231/12",
+        "mount-provider/6a7a/6a732e7231/a1/0",
+        "mount-provider/6a7a/6a732e7231/a44/0",
+        "mount-provider/6a7a/6a732e7231/a18446744073709551615/3",
     ] {
-        assert!(is_runs_tree(root, "r1", &at(its)), "{its}");
+        assert_eq!(
+            check_runs_tree(root, Some(AGENT), "r1", &at(its)),
+            Ok(()),
+            "{its}"
+        );
     }
     for not_its in [
-        "mount-provider/aa/6a732e7232/0",
-        "mount-provider/aa/6a732e7231",
-        "mount-provider/aa/6a732e7231/0/sub",
-        "mount-provider/AA/6a732e7231/0",
-        "mount-provider//6a732e7231/0",
-        "mount-provider/aa/6a732e7231/x",
+        "mount-provider/6a7a/6a732e7232/0",
+        "mount-provider/6a7a/6a732e7231",
+        "mount-provider/6a7a/6a732e7231/0/sub",
+        "mount-provider/6a7a/6a732e7231/x",
         "trees/aa/6a732e7231/0",
-        "mount-provider/aa/6a732e7232/a1/0",
-        "mount-provider/AA/6a732e7231/a1/0",
+        "mount-provider/6a7a/6a732e7232/a1/0",
         "trees/aa/6a732e7231/a1/0",
-        "mount-provider/aa/6a732e7231/a1",
-        "mount-provider/aa/6a732e7231/a1/x",
-        "mount-provider/aa/6a732e7231/a1/0/sub",
-        "mount-provider/aa/6a732e7231/a1/a2/0",
-        "mount-provider/aa/6a732e7231/a0/0",
-        "mount-provider/aa/6a732e7231/a/0",
-        "mount-provider/aa/6a732e7231/a01/0",
-        "mount-provider/aa/6a732e7231/a+3/0",
-        "mount-provider/aa/6a732e7231/A3/0",
-        "mount-provider/aa/6a732e7231/b3/0",
-        "mount-provider/aa/6a732e7231/ax/0",
-        "mount-provider/aa/6a732e7231/a18446744073709551616/0",
-        "mount-provider/aa/6a732e7231/3/0",
+        "mount-provider/6a7a/6a732e7231/a1",
+        "mount-provider/6a7a/6a732e7231/a1/x",
+        "mount-provider/6a7a/6a732e7231/a1/0/sub",
+        "mount-provider/6a7a/6a732e7231/a1/a2/0",
+        "mount-provider/6a7a/6a732e7231/a0/0",
+        "mount-provider/6a7a/6a732e7231/a/0",
+        "mount-provider/6a7a/6a732e7231/a01/0",
+        "mount-provider/6a7a/6a732e7231/a+3/0",
+        "mount-provider/6a7a/6a732e7231/A3/0",
+        "mount-provider/6a7a/6a732e7231/b3/0",
+        "mount-provider/6a7a/6a732e7231/ax/0",
+        "mount-provider/6a7a/6a732e7231/a18446744073709551616/0",
+        "mount-provider/6a7a/6a732e7231/3/0",
     ] {
-        assert!(!is_runs_tree(root, "r1", &at(not_its)), "{not_its}");
+        assert_eq!(
+            check_runs_tree(root, Some(AGENT), "r1", &at(not_its)),
+            Err(NotRunsTree::NotTheRunsShape),
+            "{not_its}"
+        );
     }
-    assert!(!is_runs_tree(
-        root,
-        "r1",
-        Path::new("/elsewhere/mount-provider/aa/6a732e7231/0")
-    ));
+    assert_eq!(
+        check_runs_tree(
+            root,
+            Some(AGENT),
+            "r1",
+            Path::new("/elsewhere/mount-provider/6a7a/6a732e7231/0")
+        ),
+        Err(NotRunsTree::NotTheRunsShape)
+    );
 }
 
 /// Asserts, on directories made below a trees root, that the tree of a numbered attempt
@@ -483,7 +511,7 @@ fn a_numbered_attempts_tree_is_the_runs_and_nothing_beside_it_is() {
     let t = trees("native-fs-numbered");
     let root = t.root.display();
     let numbered = t.root.join(RUN_DIR).join("a44/0");
-    let other = t.root.join("mount-provider/aa/6a732e7232/a44/0");
+    let other = t.root.join("mount-provider/6a7a/6a732e7232/a44/0");
     let deeper = numbered.join("sub");
     for dir in [&numbered, &other, &deeper] {
         fs::create_dir_all(dir).unwrap();
@@ -493,7 +521,7 @@ fn a_numbered_attempts_tree_is_the_runs_and_nothing_beside_it_is() {
     let out = t.root.join(RUN_DIR).join("a44/2");
     symlink(&t.outside, &out).unwrap();
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&numbered), kbf(&t.a)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&numbered), kbf(&t.a)]),
         Ok(TreeRules {
             root: t.root.clone(),
             trees: vec![numbered.clone(), t.a.clone()],
@@ -510,14 +538,14 @@ fn a_numbered_attempts_tree_is_the_runs_and_nothing_beside_it_is() {
     let attempt_dir = t.root.join(RUN_DIR).join("a44");
     for refused in [&other, &attempt_dir, &deeper, &to_other] {
         assert_eq!(
-            tree_rules(&t.root, OWN, &[kbf(&numbered), kbf(refused)]),
+            tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&numbered), kbf(refused)]),
             not_its_own(refused),
             "{}",
             refused.display()
         );
     }
     assert_eq!(
-        tree_rules(&t.root, OWN, &[kbf(&out)]),
+        tree_rules(&t.root, Some(AGENT), OWN, &[kbf(&out)]),
         not_allowed(format!(
             "{}: the tree {} is not below the mount root {root}",
             out.display(),
@@ -687,3 +715,5 @@ fn the_rules_become_the_builders_trees_or_name_the_path() {
         "/Volumes/tierstore/a\nb: path contains a control character"
     );
 }
+
+mod agent_folder;

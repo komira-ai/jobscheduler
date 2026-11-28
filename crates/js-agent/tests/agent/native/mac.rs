@@ -56,6 +56,7 @@ impl MacRig {
         let launcher = Arc::new(SystemLauncher::at(env!("CARGO_BIN_EXE_js-agent")));
         let rt = NativeRuntime::over(Some(pool), launcher, config, TERM)
             .unwrap()
+            .with_provider_agent(super::PROVIDER_AGENT)
             .without_new_session();
         Self {
             rt,
@@ -510,8 +511,8 @@ fn tree_checks(name: &str, deny_root: bool, rel: &str) -> (Status, String) {
     });
     let root = fs::canonicalize(rig.dir.path("trees")).unwrap();
     let (own, other) = (
-        root.join("mount-provider/aa/6a732e7231").join(rel),
-        root.join("mount-provider/aa/6a732e7232").join(rel),
+        root.join("mount-provider/6a7a/6a732e7231").join(rel),
+        root.join("mount-provider/6a7a/6a732e7232").join(rel),
     );
     for (tree, text) in [(&own, "tree one\n"), (&other, "tree two\n")] {
         fs::create_dir_all(tree).unwrap();

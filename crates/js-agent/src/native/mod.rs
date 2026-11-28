@@ -304,6 +304,11 @@ pub struct NativeRuntime {
     /// When a process started, by which a supervisor is known again after a restart
     /// (`native/adopt.rs`).
     start_of: StartOf,
+    /// The name the agent gives itself in its mount providers' calls, its host id
+    /// ([`NativeRuntime::with_provider_agent`]): the provider makes this agent's trees in the
+    /// folder of that name below the trees root, and a run mounts no tree in another. None
+    /// until told: then no tree is a run's own.
+    provider_agent: Option<String>,
 }
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
@@ -413,7 +418,21 @@ impl NativeRuntime {
             series: Series::default(),
             mono_us: system_mono_clock(),
             start_of: Arc::new(crate::mac_supervisor::macos::start_of),
+            provider_agent: None,
         })
+    }
+
+    /// The same runtime, holding the trees of its runs below the trees root to the folder the
+    /// provider keeps for the agent named `agent` in its provider calls: the id the agent
+    /// registered under, which the agent's provider client sends as every call's
+    /// `Source.agent` (`crate::provider::ProviderClient`). The agent always tells it
+    /// (`platform/macos.rs`); a runtime never told takes no tree.
+    #[must_use]
+    pub fn with_provider_agent(self, agent: &str) -> Self {
+        Self {
+            provider_agent: Some(agent.to_owned()),
+            ..self
+        }
     }
 
     /// The account the last removal retired and what its retirement showed (the processes it
@@ -746,7 +765,8 @@ impl Runtime for NativeRuntime {
     fn resolve_fs(&mut self, run_id: &str, _image: &str, fs: &JobFs, _now_ms: u64) -> FsPrepared {
         let put_root = self.put.as_ref().map(|put| put.root.as_path());
         let roots = (self.config.mount_roots.as_slice(), put_root);
-        mounts::resolve(roots, &mut self.plans, run_id, fs)
+        let agent = self.provider_agent.as_deref();
+        mounts::resolve(roots, &mut self.plans, (agent, run_id), fs)
     }
 
     fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {
