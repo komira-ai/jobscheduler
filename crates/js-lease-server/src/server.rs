@@ -956,3 +956,7 @@ mod sizes_tests;
 #[cfg(test)]
 #[path = "server_listen_tests.rs"]
 mod listen_tests;
+
+#[cfg(test)]
+#[path = "server_storm_tests.rs"]
+mod storm_tests;
