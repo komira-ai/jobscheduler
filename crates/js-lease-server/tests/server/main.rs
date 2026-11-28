@@ -7,6 +7,11 @@
 //! drives the server in process instead: the live-log round trip against the S3-compatible
 //! test store with STS, `#[ignore]`d unless CI's `test` job, which runs the store, runs it.
 
+/// The process's allocator, counting the bytes live: what the soak's counts read
+/// (`memory_soak`). It counts only; its limit is the whole address space.
+#[global_allocator]
+static ALLOC: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, usize::MAX);
+
 mod accelerator_requests;
 mod admission;
 mod agents;
@@ -77,6 +82,7 @@ mod logs_round_trip;
 mod mac_native;
 mod mac_os_version;
 mod memory_percent;
+mod memory_soak;
 mod metrics_listen;
 mod pack_limit;
 mod placement;
