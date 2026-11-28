@@ -48,9 +48,8 @@ const GRACE: Duration = Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS);
 const NEVER: JobLimits = JobLimits {
     max_queue_wait: Duration::from_secs(365 * 24 * 3600),
     start_timeout: Duration::from_secs(365 * 24 * 3600),
-    capacity_requeues: JobLimits::DEFAULT.capacity_requeues,
-    capacity_refusal_bar: JobLimits::DEFAULT.capacity_refusal_bar,
     silence_limit: Duration::from_secs(365 * 24 * 3600),
+    ..JobLimits::DEFAULT
 };
 
 /// The job service over the rig's tables and clock, reading host silence from the hosts' rows

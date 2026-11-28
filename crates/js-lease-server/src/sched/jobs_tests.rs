@@ -32,7 +32,7 @@ use crate::clock::SharedClock;
 use crate::job_alloc::{Freed, free_allocation};
 use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
-use crate::per_job::{BeatContext, serve};
+use crate::per_job::{BeatContext, RowState, serve};
 use crate::sched::engine::Settings;
 use crate::sched::engine_rig::{GIB, T0, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
@@ -439,11 +439,11 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
         state: HeldState::Starting,
         result: None,
     }];
-    let clean = serve(&jobs, &context, &[], &[], 8, None).unwrap();
+    let clean = serve(&jobs, &context, (&[], &[]), 8, RowState::default()).unwrap();
     assert_eq!(clean.commands.len(), 1);
     assert!(matches!(clean.commands[0], Command::JobStart(_)));
     assert!(format!("{:?}", clean.commands[0]).contains("job_id: \"job-a\""));
-    let listed = serve(&jobs, &context, &holds, &[], 8, None).unwrap();
+    let listed = serve(&jobs, &context, (&holds, &[]), 8, RowState::default()).unwrap();
     assert!(listed.commands.is_empty());
     let step = jobs.get_allocation(&a).unwrap().unwrap().step;
     assert_eq!(step, AllocationStep::Booked);
@@ -525,7 +525,7 @@ fn only_absent_frees_an_allocation() {
                     state: HeldState::ExitedUnacked,
                     result: None,
                 }];
-                serve(&jobs, &context, &holds, &[], 8, None).unwrap();
+                serve(&jobs, &context, (&holds, &[]), 8, RowState::default()).unwrap();
             }
         }
         let placed = pass(&placer, &jobs, &["host-a"]);

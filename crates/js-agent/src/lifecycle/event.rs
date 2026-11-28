@@ -1,7 +1,7 @@
 //! What the lifecycle reports of what it did ([`Event`]), why it did not act on a start
 //! ([`Skip`]) and what it keeps for a person ([`Finding`]).
 
-use js_agent_wire::{JobUsage, StartSizing, Taint};
+use js_agent_wire::{JobUsage, StartSizing, StopReason, Taint};
 
 /// Something the agent keeps because it needs a person or a later step: a cleanup that
 /// failed, a check that found something, a container it could not account for. The text
@@ -243,6 +243,25 @@ pub enum Event {
         /// that no check found (a host job, a container that cannot be removed); the
         /// `cgroup-not-found` taint carries its message.
         detail: Option<String>,
+    },
+    /// The server stopped a job and said why ([`StopReason`]): pushed once, at the stop that
+    /// asks a job the agent runs or waits to start to stop, or at the first stop of a job it
+    /// does not hold. A stop that names no reason (from a server from before the field, or
+    /// carried by the dispatch queue) is not pushed; it stops the job all the same.
+    StopReasoned {
+        /// The job.
+        run_id: String,
+        /// Why the server stopped it.
+        reason: StopReason,
+    },
+    /// The jobs the agent holds that the server holds no record of
+    /// ([`HeartbeatReply::unknown_jobs`](js_agent_wire::HeartbeatReply::unknown_jobs)), in
+    /// the reply's order: they keep running, and the server places nothing more on the host
+    /// while it lists them. Pushed when the list changes, so an empty one says the server
+    /// knows every job again.
+    UnknownToServer {
+        /// The jobs.
+        run_ids: Vec<String>,
     },
     /// The slot is free again.
     SlotFreed {

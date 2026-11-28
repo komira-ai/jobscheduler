@@ -200,7 +200,7 @@ fn the_record_is_written_after_the_prepares_and_removed_after_release() {
     let record = h.dir.path("state/providers/j1.json");
     assert_eq!(
         fs::read_to_string(&record).unwrap(),
-        r#"{"sources":[{"provider":"tier","index":0},{"provider":"tier","index":1}]}"#
+        r#"{"attempt":1,"sources":[{"provider":"tier","index":0},{"provider":"tier","index":1}]}"#
     );
     let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&record), 0o600);

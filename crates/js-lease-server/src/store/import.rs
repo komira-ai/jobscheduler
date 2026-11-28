@@ -544,6 +544,7 @@ mod tests {
             names: StoreNames::Flags,
             locked: false,
             shared: None,
+            postgres: None,
         };
         store.fail_read_after(0);
         let refused = server

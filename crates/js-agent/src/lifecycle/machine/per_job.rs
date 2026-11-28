@@ -14,12 +14,12 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{
     CpuSeries, HeldJob, JobResult, JobResultAck, JobSpec, JobStartSpec, JobUsage, Limits,
-    LogReport, MemorySeries, RunResult, StartKind, StartSizing, limits,
+    LogReport, MemorySeries, RunResult, StartKind, StartSizing, StopReason, limits,
 };
 
 use super::Lifecycle;
 use super::RETIRED_CAP;
-use super::job::{Given, Keyed};
+use super::job::{Cause, Given, Keyed};
 use crate::lifecycle::{Event, JobFs, code};
 use crate::logs::Sink;
 
@@ -141,33 +141,62 @@ impl Lifecycle {
     /// retired at once, so the list in the state root names it before the stop is reported.
     /// A job the agent does not hold has every fence of its id retired (the stop names no
     /// allocation), so a later start of it runs nothing, and is listed in `retired_jobs`
-    /// until the server acknowledges it.
-    pub(super) fn stop_job(&mut self, job_id: &str) {
+    /// until the server acknowledges it. The stop's `reason`, when it names one, is reported
+    /// once ([`Event::StopReasoned`]); it changes nothing of what is stopped.
+    pub(super) fn stop_job(
+        &mut self,
+        job_id: &str,
+        reason: Option<StopReason>,
+        events: &mut Vec<Event>,
+    ) {
         let held = self
             .jobs
             .iter_mut()
             .find(|job| job.keyed == Keyed::Job && job.run_id == job_id);
-        match held {
+        let first = match held {
             Some(job) => {
-                job.request_stop(false);
+                let unasked = job.cause.is_none();
+                let live = job.request_stop_for(Cause::Stopped, false);
                 self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+                unasked & live
             }
             None => self.answer_stop(job_id),
+        };
+        if let Some(reason) = reason.filter(|_| first) {
+            events.push(Event::StopReasoned {
+                run_id: job_id.to_owned(),
+                reason,
+            });
         }
     }
 
-    /// Retires `job_id` and lists it in `retired_jobs`, once. The list keeps the newest
-    /// [`RETIRED_LISTED`] ids; an older one stays retired (the retired set is larger) and is
-    /// listed again when the server resends its stop.
-    fn answer_stop(&mut self, job_id: &str) {
+    /// Retires `job_id` and lists it in `retired_jobs`, once; whether this stop is the one
+    /// that listed it. The list keeps the newest [`RETIRED_LISTED`] ids; an older one stays
+    /// retired (the retired set is larger) and is listed again when the server resends its
+    /// stop.
+    fn answer_stop(&mut self, job_id: &str) -> bool {
         self.retired.insert(job_id);
         if self.answered.iter().any(|id| id == job_id) {
-            return;
+            return false;
         }
         self.answered.push(job_id.to_owned());
         if self.answered.len() > RETIRED_LISTED {
             self.answered.remove(0);
         }
+        true
+    }
+
+    /// Reports the jobs a heartbeat reply names unknown to the server (`unknown`) when they
+    /// differ from the last reply's ([`Event::UnknownToServer`]). They are not stopped: the
+    /// server holds no record of them, which is no reason to end them.
+    pub(super) fn note_unknown(&mut self, unknown: &[String], events: &mut Vec<Event>) {
+        if self.unknown_here == unknown {
+            return;
+        }
+        self.unknown_here = unknown.to_vec();
+        events.push(Event::UnknownToServer {
+            run_ids: self.unknown_here.clone(),
+        });
     }
 
     /// Drops the result of the job a `job_acks` entry names, on a verdict the agent knows.

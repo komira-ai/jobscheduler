@@ -491,6 +491,7 @@ fn host(entry: HostEntry, mut live: Live) -> wire::Host {
         cordon_expires_at_ms: entry.cordon.map(|cordon| cordon.expires_at_ms),
         taint_reason: entry.taint.map(|taint| taint.reason).unwrap_or_default(),
         agent_version: entry.agent_version.unwrap_or_default(),
+        orphans: entry.orphans,
     }
 }
 

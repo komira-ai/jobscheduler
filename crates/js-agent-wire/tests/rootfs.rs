@@ -582,7 +582,8 @@ fn an_unknown_layer_kind_or_mount_mode_reads_as_an_unknown_command() {
             vec![
                 Command::Unknown,
                 Command::JobStop {
-                    job_id: "job-0".into()
+                    job_id: "job-0".into(),
+                    reason: None,
                 },
                 Command::JobStart(Box::new(start())),
             ]

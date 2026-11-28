@@ -394,6 +394,7 @@ mod answers {
             cordon_expires_at_ms: Some(T0 + 300_000),
             taint_reason: "post-job-check-failed".to_owned(),
             agent_version: "0.1.0".to_owned(),
+            orphans: 2,
         }
     }
 

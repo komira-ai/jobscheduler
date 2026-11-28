@@ -18,7 +18,9 @@ and its build fails if an option's path names `agent` as its resource after `/v1
 The lease server has routes of its own under the same resources, with other bodies and
 other authentication: `GET /v1/hosts`, `GET` and `POST /v1/hosts/{target}` (which serves
 `POST /v1/hosts/{id}:cordon` and `:uncordon`), `GET /v1/pools`,
-`POST /v1/pools/{pool}/brake/reset`, `GET /v1/usage/nodes/{id}` and `GET /v1/usage/keys/{key}`.
+`POST /v1/pools/{pool}/brake/reset`, `GET /v1/hosts/{host}/orphans`,
+`POST /v1/hosts/{host}/orphans/{job_id}/end` (`docs/runbooks/orphan-jobs.md`), `GET /v1/usage/nodes/{id}`
+and `GET /v1/usage/keys/{key}`.
 The gateway's router holds `/v1/hosts`, `/v1/pools` and `/v1/usage` and every path below each
 (`/v1/hosts/{*rest}` and so on), so the two routers cannot be merged as they are: axum refuses
 the overlapping routes. The server that mounts the gateway beside those routes has to

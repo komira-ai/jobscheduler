@@ -403,7 +403,7 @@ impl PerJob {
         for command in commands {
             match command {
                 Command::JobStart(spec) => self.start(spec, capacity, &mut read, io),
-                Command::JobStop { job_id } => self.stop(job_id, &mut read, io),
+                Command::JobStop { job_id, .. } => self.stop(job_id, &mut read, io),
                 _ => {}
             }
         }

@@ -1,8 +1,10 @@
 //! A scrape: the snapshot read from the state `GET /v1/hosts` reads and from the job tables,
-//! rendered with the recorder's counts, and the router of the metrics listener.
+//! rendered with the recorder's counts and followed by the server's own work
+//! ([`super::work`]), and the router of the metrics listener.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -10,14 +12,16 @@ use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
+use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE, NodeRow};
 use js_registry::HostState;
 use js_sched_placer::curves::{CurveView, MemoryShadowView};
 use js_sched_placer::telemetry::Telemetry;
+use js_state::StoreTime;
 use tracing::warn;
 
 use super::Recorder;
 use super::render::{HostSeen, JobsSeen, Snapshot, Split, render};
+use super::work::{self, Work};
 use crate::api::{Peer, Shared, not_found, peer_may_read_status};
 use crate::hosts::{HostEntry, HostList, listing};
 use crate::job_store::ServerJobs;
@@ -47,11 +51,11 @@ async fn metrics(State(scrape): State<Arc<Scrape>>, peer: Peer) -> Response {
         return not_found();
     }
     match snapshot(&scrape.shared, MAX_PAGE).await {
-        Ok(seen) => (
-            [(CONTENT_TYPE, TEXT_FORMAT)],
-            render(&seen, &scrape.recorder),
-        )
-            .into_response(),
+        Ok(seen) => {
+            let mut text = render(&seen, &scrape.recorder);
+            work::write(&mut text, &Work::now(&scrape.shared, &scrape.recorder));
+            ([(CONTENT_TYPE, TEXT_FORMAT)], text).into_response()
+        }
         Err(error) => {
             warn!(%error, "a scrape could not read the job tables");
             let text = "the job tables could not be read\n";
@@ -108,7 +112,23 @@ fn read_jobs(
         }
     }
     seen.callbacks_pending(jobs.callbacks_pending()?);
+    let (at, rows) = jobs.nodes()?;
+    for (host, count, oldest) in orphans_seen(&rows, at) {
+        seen.orphans(&host, count, oldest);
+    }
     Ok((seen, jobs.live_allocations()?))
+}
+
+/// Each host of `rows` that holds orphans, in host order, with how many and how long, at
+/// `now` by the store's clock, the oldest has been listed.
+pub(crate) fn orphans_seen(rows: &[NodeRow], now: StoreTime) -> Vec<(String, u64, Duration)> {
+    let held = rows.iter().filter_map(|row| {
+        let orphans = &row.record.state.orphans;
+        let first = orphans.values().map(|orphan| orphan.first_seen).min()?;
+        let count = u64::try_from(orphans.len()).unwrap_or(u64::MAX);
+        Some((row.record.host.to_string(), count, now.since(first)))
+    });
+    held.collect()
 }
 
 /// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, of

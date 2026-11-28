@@ -10,11 +10,14 @@
 //! skipped).
 //!
 //! [`problems`] holds the file to its shape: the triggers, the one job, its rights, its `if:`,
-//! farm-connect's pin and inputs and the check of the build. It does not fix the other steps of
-//! the job (the pinned-tool cache around `cargo xtask fetch` is `tests/pinned_tool_cache`); a
-//! change to them is reviewed like any change to a workflow:
-//! - its `on` is exactly `pull_request` with no filter and `push` to `branches: [main]`, and its
-//!   top-level `permissions` are `{}`;
+//! farm-connect's pin and inputs, and the upload of a stale table's patch; and through
+//! `super::farm_steps` the steps that reach the build farm (each buck2 command through komira's
+//! buck2-farm action, under its watchdog) and the time limit of every step. The steps that install
+//! the pinned tools around `cargo xtask fetch` are `tests/pinned_tool_cache`'s:
+//! - its `on` is exactly `pull_request` with no filter, `push` to `branches: [main]` and
+//!   `workflow_call` with the one input `target` (a required string: release.yml's `blackbox`
+//!   calls it with the target it builds in place of `//:ci`), and its top-level `permissions` are
+//!   `{}`;
 //! - its jobs are exactly [`JOB`], on [`RUNNER`], under [`JOB_IF`], with `permissions` exactly
 //!   `contents: read` and `id-token: write`;
 //! - farm-connect is used by exactly one step, pinned by a 40-digit commit, whose `with:` is
@@ -22,14 +25,12 @@
 //!   farm's address, instance, worker property set and TLS switch, each from the organisation's
 //!   variable of its name, and nothing else (no secret, no token, no input a pull request could
 //!   set);
-//! - a step after farm-connect's runs exactly [`BUILD_RUN`]: `cargo xtask farm-build` of `//:ci`,
-//!   which refuses a build with no farm workers or whose summary line does not say `local: 0`
-//!   (crates/xtask/src/farm.rs), and, when the generated build table is stale, writes what
-//!   `buildrules sync` changed to [`patch_file`] and the command that applies it to the job summary;
-//! - exactly one step uploads the artifact [`PATCH_ARTIFACT`], after the build, under exactly
-//!   [`UPLOAD_IF`] (the build failed: the patch exists only then), with `actions/upload-artifact`
-//!   and a `with:` of exactly [`upload_inputs`]: that artifact name and the build's patch file, so the
-//!   command the summary prints downloads what was uploaded.
+//! - the steps of `super::farm_steps::step_problems` and `super::farm_steps::timeout_problems`;
+//! - exactly one step uploads the artifact [`PATCH_ARTIFACT`], after the table's check (which
+//!   writes it to [`patch_file`] when the table is stale), under exactly [`UPLOAD_IF`] (a step
+//!   failed: the patch exists only then), with `actions/upload-artifact` and a `with:` of exactly
+//!   [`upload_inputs`]: that artifact name and the check's patch file, so the command the summary
+//!   prints downloads what was uploaded.
 //!
 //! [`token_problems`] holds every other workflow to the same scope: in a workflow that starts on
 //! `pull_request`, `pull_request_target` or `merge_group` (a merge group of the merge queue runs a
@@ -70,14 +71,12 @@ pub const CONNECT_INPUTS: [(&str, &str); 6] = [
     ),
     ("tls", "${{ vars.FARM_TLS || 'false' }}"),
 ];
-/// The build step's `run:`.
-pub const BUILD_RUN: &str = "cargo xtask farm-build --buck2 \"$RUNNER_TEMP/bin/buck2\" --target //:ci --patch \"$RUNNER_TEMP/buildrules-sync/buildrules-sync.patch\" --summary \"$GITHUB_STEP_SUMMARY\" --repo \"$GITHUB_REPOSITORY\" --run-id \"$GITHUB_RUN_ID\"";
 /// The action that uploads the patch, at any commit.
 pub const UPLOAD: &str = "actions/upload-artifact@";
 /// The exact `if:` of the upload of the patch.
 pub const UPLOAD_IF: &str = "${{ failure() }}";
 
-/// The patch file the build writes, below the runner's temporary directory, as the build step's
+/// The patch file the table's check writes, below the runner's temporary directory, as its step's
 /// shell names it and as the upload's `with:` does.
 pub fn patch_file(shell: bool) -> String {
     let temp = if shell {
@@ -99,8 +98,7 @@ pub fn upload_inputs() -> BTreeMap<&'static str, String> {
 }
 
 /// What a [`FILE`] whose `on` is anything else is refused with.
-pub const ON_PROBLEM: &str =
-    "farm.yml: on must be pull_request with no filter and push to branches [main] alone";
+pub const ON_PROBLEM: &str = "farm.yml: on must be pull_request with no filter, push to branches [main] and workflow_call with the one required string input target, alone";
 /// What a [`FILE`] with any top-level permission is refused with.
 pub const TOP_PERMISSIONS_PROBLEM: &str = "farm.yml: the top-level permissions must be `{}`";
 
@@ -115,7 +113,9 @@ fn scalar_map(node: &Node) -> Option<BTreeMap<&str, &str>> {
     }
 }
 
-/// Whether `on` is exactly `pull_request` with no filter and `push` with `branches: [main]`.
+/// Whether `on` is exactly `pull_request` with no filter, `push` with `branches: [main]` and
+/// `workflow_call` with the one input `target`, a required string, and nothing else but its
+/// description.
 fn pull_request_and_push_to_main(on: Option<&Node>) -> bool {
     let Some(on) = on.filter(|on| matches!(on.value, Value::Map(_))) else {
         return false;
@@ -127,7 +127,26 @@ fn pull_request_and_push_to_main(on: Option<&Node>) -> bool {
         [(key, branches)] => key.as_str() == Some("branches") && only_main(branches),
         _ => false,
     });
-    names(Some(on)) == ["pull_request", "push"] && unfiltered && to_main
+    let called = entry(on, "workflow_call").is_some_and(|call| match entries(call) {
+        [(key, inputs)] => key.as_str() == Some("inputs") && one_target(inputs),
+        _ => false,
+    });
+    names(Some(on)) == ["pull_request", "push", "workflow_call"] && unfiltered && to_main && called
+}
+
+/// Whether `inputs` is the one input `target`: a required string, with a description.
+fn one_target(inputs: &Node) -> bool {
+    match entries(inputs) {
+        [(key, target)] => {
+            key.as_str() == Some("target")
+                && scalar_map(target).is_some_and(|m| {
+                    m.keys().copied().collect::<Vec<_>>() == ["description", "required", "type"]
+                        && m.get("type") == Some(&"string")
+                        && m.get("required") == Some(&"true")
+                })
+        }
+        _ => false,
+    }
 }
 
 /// Whether `branches` is the list `[main]`.
@@ -216,18 +235,12 @@ fn job_problems(job: &Node) -> Vec<String> {
             "job {JOB}: exactly one step must use {FARM_CONNECT}"
         )),
     }
-    let connect = all.iter().position(|s| connect_use(s).is_some());
-    let build = all
+    problems.extend(super::farm_steps::step_problems(job));
+    problems.extend(super::farm_steps::timeout_problems(job));
+    let table = all
         .iter()
-        .position(|s| entry(s, "run").and_then(Node::as_str) == Some(BUILD_RUN));
-    match (connect, build) {
-        (_, None) => problems.push(format!("job {JOB}: no step runs `{BUILD_RUN}`")),
-        (Some(c), Some(b)) if c < b => {}
-        _ => problems.push(format!(
-            "job {JOB}: the build does not come after the farm-connect step"
-        )),
-    }
-    problems.extend(upload_problems(all, build));
+        .position(|s| entry(s, "run").and_then(Node::as_str) == Some(super::farm_steps::TABLE_RUN));
+    problems.extend(upload_problems(all, table));
     problems
 }
 
@@ -242,8 +255,9 @@ fn uploads_patch(step: &Node) -> bool {
             == Some(PATCH_ARTIFACT)
 }
 
-/// What is wrong with the upload of the patch among the steps `all`, the build at `build`.
-fn upload_problems(all: &[Node], build: Option<usize>) -> Vec<String> {
+/// What is wrong with the upload of the patch among the steps `all`, the table's check at
+/// `table`.
+fn upload_problems(all: &[Node], table: Option<usize>) -> Vec<String> {
     let uploads: Vec<usize> = (0..all.len()).filter(|&i| uploads_patch(&all[i])).collect();
     let [at] = uploads[..] else {
         return vec![format!(
@@ -252,9 +266,9 @@ fn upload_problems(all: &[Node], build: Option<usize>) -> Vec<String> {
     };
     let step = &all[at];
     let mut problems = Vec::new();
-    if build.is_some_and(|b| b > at) {
+    if table.is_some_and(|t| t > at) {
         problems.push(format!(
-            "job {JOB}: the upload of {PATCH_ARTIFACT} does not come after the build"
+            "job {JOB}: the upload of {PATCH_ARTIFACT} does not come after the table's check"
         ));
     }
     if entry(step, "if").and_then(Node::as_str) != Some(UPLOAD_IF) {

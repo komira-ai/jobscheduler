@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
 use js_caps::FULL_DISK_ACCESS;
-use js_jobs::{HOST_JOB_TAINT, ScaleMark};
+use js_jobs::{HOST_JOB_TAINT, NodeRecord, ScaleMark};
 use js_registry::{HostMark, HostState, HostView, LoadSeconds};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, MemoryHeadroom, Shape};
@@ -124,6 +124,11 @@ pub(crate) struct HostEntry {
     /// lifts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cordon: Option<CordonListed>,
+    /// How many jobs the host lists that the job store holds no record of (its orphans,
+    /// [`crate::orphans`]): while it lists one the host takes no new job. Not written when
+    /// it is 0.
+    #[serde(skip_serializing_if = "no_orphans")]
+    pub(crate) orphans: u32,
     /// Set for a registered host whose latest heartbeat carried a load: the reading of
     /// its actions control group.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,6 +318,7 @@ impl HostEntry {
                 expires_at_ms: at.millis(),
                 holder: host.cordon_holder.map(|holder| holder.to_string()),
             }),
+            orphans: 0,
             load: host.load.map(|load| LoadView::of(load, host.load_seconds)),
             cpu_pressure_some_usec: pressure,
             actions_oom_events: host.actions_oom_events,
@@ -338,6 +344,7 @@ impl HostEntry {
             ScaleMark::Releasing => HostMark::Releasing,
         });
         let memory = MemoryHeadroom::full(seen.placed.resources().memory_bytes());
+        let orphans = orphans_of(&record);
         let claimed = record.claim.as_ref().unwrap_or(&seen.placed);
         Self {
             id: record.host,
@@ -360,11 +367,22 @@ impl HostEntry {
             reserved_for: None,
             drain_deadline_ms: None,
             cordon: None,
+            orphans,
             load: None,
             cpu_pressure_some_usec: None,
             actions_oom_events: None,
         }
     }
+}
+
+/// How many orphans the row `record` holds, saturated at `u32::MAX`.
+fn orphans_of(record: &NodeRecord) -> u32 {
+    u32::try_from(record.state.orphans.len()).unwrap_or(u32::MAX)
+}
+
+/// Whether `count` of orphans is 0: the body leaves the field out then.
+fn no_orphans(count: &u32) -> bool {
+    *count == 0
 }
 
 impl HostList {
@@ -378,11 +396,23 @@ impl HostList {
     /// host in both is listed once, as the registry that holds it sees it.
     pub(crate) fn with_rows(registered: Vec<HostView>, rows: Vec<Seen>) -> Self {
         let held: BTreeSet<HostId> = registered.iter().map(|host| host.id.clone()).collect();
+        // A host's orphans are its row's, whichever server holds its session.
+        let orphans: BTreeMap<HostId, u32> = rows
+            .iter()
+            .map(|seen| (seen.host().clone(), orphans_of(&seen.row.record)))
+            .collect();
         let by_row = rows
             .into_iter()
             .filter(|seen| !held.contains(seen.host()))
             .map(HostEntry::by_row);
-        let mut hosts: Vec<HostEntry> = registered.into_iter().map(HostEntry::registered).collect();
+        let registered = registered.into_iter().map(|host| {
+            let count = orphans.get(&host.id).copied().unwrap_or(0);
+            HostEntry {
+                orphans: count,
+                ..HostEntry::registered(host)
+            }
+        });
+        let mut hosts: Vec<HostEntry> = registered.collect();
         hosts.extend(by_row);
         hosts.sort_by(|a, b| a.id.cmp(&b.id));
         Self { hosts }

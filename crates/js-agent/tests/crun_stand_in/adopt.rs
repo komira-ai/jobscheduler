@@ -251,6 +251,7 @@ fn a_restart_adopts_a_live_job_and_lists_it() {
         &mut life,
         Command::JobStop {
             job_id: "r1-hold".to_owned(),
+            reason: None,
         },
     );
     life.step();
@@ -454,6 +455,7 @@ fn a_job_with_no_record_is_removed_and_the_server_is_told_it_is_gone() {
         &mut life,
         Command::JobStop {
             job_id: "r6-hold".to_owned(),
+            reason: None,
         },
     );
     life.step();

@@ -281,6 +281,8 @@ fn placed_in(
         providers,
         dispatch,
     } = *agents;
+    // An orphan is ended once listed for longer than any job may run.
+    let job_limits = job_limits.with_orphan_after(backfill.max_job_wall);
     let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
     let joins = joins.requiring_credential(require_host_credential);
     // The usage limits hold the largest host of every pool.

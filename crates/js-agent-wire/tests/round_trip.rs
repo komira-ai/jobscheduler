@@ -15,7 +15,7 @@ use js_agent_wire::limits::*;
 use js_agent_wire::{
     Ack, Caps, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, HelloReply,
     Isolation, JobSpec, JobStartSpec, Outcome, Phase, ReadModel, Refused, ResultAck, Rule,
-    RunResult, Taint, Welcome,
+    RunResult, StopReason, Taint, Welcome,
 };
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -255,13 +255,25 @@ fn job_start_frame() -> impl Strategy<Value = JobStartSpec> {
         )
 }
 
+fn stop_reason() -> impl Strategy<Value = StopReason> {
+    prop_oneof![
+        Just(StopReason::Cancelled),
+        Just(StopReason::Ended),
+        Just(StopReason::Replaced),
+        Just(StopReason::OrphanExpired),
+        Just(StopReason::Operator),
+        Just(StopReason::Unknown),
+    ]
+}
+
 fn command() -> impl Strategy<Value = Command> {
     prop_oneof![
         job_frame().prop_map(|spec| Command::Start(Box::new(spec))),
         ident().prop_map(|run_id| Command::Stop { run_id }),
         ident().prop_map(|run_id| Command::Cancel { run_id }),
         job_start_frame().prop_map(|spec| Command::JobStart(Box::new(spec))),
-        ident().prop_map(|job_id| Command::JobStop { job_id }),
+        (ident(), proptest::option::of(stop_reason()))
+            .prop_map(|(job_id, reason)| Command::JobStop { job_id, reason }),
         Just(Command::Unknown),
     ]
 }

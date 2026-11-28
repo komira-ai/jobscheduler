@@ -1,25 +1,22 @@
-//! `farm-build --buck2 <path> --target <label> --patch <path> --summary <path> --repo <owner/name>
-//! --run-id <id>`: the farm lane's build (`.github/workflows/farm.yml`, docs/farm.md), one command.
-//! In this order:
+//! The farm lane's two checks of its own (`.github/workflows/farm.yml`, docs/farm.md). The lane's
+//! two buck2 builds that reach the build farm, the `buildrules` command line and then `//:ci`, are
+//! not run here: each is a step of komira's buck2-farm action, which runs buck2 under a watchdog of
+//! the runner's connections to the farm, runs a cut or hung run again, and fails a run that ran
+//! an action on the runner. What is left to this crate reaches no farm:
 //!
-//! 1. `buck2 audit config buildrules_re.linux_x86_64_properties --style json` must give the key a
-//!    value that is not blank: the worker property set farm-connect wrote, which `.buckconfig`
-//!    hands to buildrules. Without one buck2 has no execution platform, and this says so first.
-//! 2. The generated build table must be fresh ([`table`]): `buildrules check`, with the
-//!    `buildrules` command line built from the pinned buildrules cell on the farm. When it calls the
-//!    table stale, the job runs `buildrules sync`, writes what sync changed as a patch to `--patch`
-//!    (the workflow uploads it as the artifact [`table::PATCH_ARTIFACT`]) and the stale inputs, the
-//!    changed files and the one command that applies the patch to `--summary` (the job summary),
-//!    and fails without building.
-//! 3. `buck2 build <label>`. What buck2 prints on its standard error (its progress, the output of
-//!    a failed action, its summary) is written to the log line by line as buck2 prints it, so a
-//!    long build shows its progress in the job's log; a failed build is a failure.
-//! 4. The build's summary line, `Commands: N (cached: N, remote: N, local: N)`, must be there and
-//!    say `local: 0`: every action ran on the farm or came from its cache, none on this machine.
-//!    The line is what the verb prints.
+//! - `farm-workers --buck2 <path>` ([`workers`]), before either build:
+//!   `buck2 audit config buildrules_re.linux_x86_64_properties --style json` must give the key a
+//!   value that is not blank: the worker property set farm-connect wrote, which `.buckconfig`
+//!   hands to buildrules. Without one buck2 has no execution platform, and this says so first.
+//! - `farm-table --buck2 <path> --buildrules <path> --patch <path> --summary <path> --repo
+//!   <owner/name> --run-id <id>` ([`table::ensure_fresh`]), between them: the generated build
+//!   table must be fresh, checked with the `buildrules` command line the first build made. When it
+//!   is stale, the job runs `buildrules sync`, writes what sync changed as a patch to `--patch`
+//!   (the workflow uploads it as the artifact [`table::PATCH_ARTIFACT`]) and the stale inputs, the
+//!   changed files and the one command that applies the patch to `--summary` (the job summary),
+//!   and fails, so `//:ci` is not built.
 //!
-//! Whatever happened, it then runs `buck2 kill`, so no daemon outlives the job; that command's own
-//! outcome changes nothing.
+//! Neither stops buck2's daemon: a step of its own after the builds, under `if: always()`, does.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -32,10 +29,14 @@ pub use table::Handoff;
 /// The key of the worker property set buildrules reads.
 pub const PROPERTIES_KEY: &str = "buildrules_re.linux_x86_64_properties";
 
-/// Why a farm build failed.
+/// What `farm-workers` prints when the key has a value.
+pub const WORKERS_SET: &str =
+    "buildrules_re.linux_x86_64_properties is set: buck2 has the farm's worker property set";
+
+/// Why a check of the farm lane failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    /// buck2 could not be started, or waited for.
+    /// A program could not be started, or waited for.
     #[error("cannot run {program:?}: {why}")]
     Start {
         /// The program that was to run.
@@ -60,20 +61,6 @@ pub enum Error {
     /// The generated build table is not fresh, or its freshness could not be settled.
     #[error(transparent)]
     Table(#[from] table::Error),
-    /// The build ended with a failure status.
-    #[error("`buck2 build {target}` failed ({status})")]
-    Build {
-        /// The label that was built.
-        target: String,
-        /// How the build ended.
-        status: String,
-    },
-    /// The build passed and printed no readable summary line.
-    #[error("the build printed no summary line (`Commands: N (cached: N, remote: N, local: N)`)")]
-    NoSummary,
-    /// The summary line says an action ran on this machine; the line is the payload.
-    #[error("`{0}`: actions ran on this machine, not on the farm (local must be 0)")]
-    Local(String),
 }
 
 /// Whether `json`, what `buck2 audit config <key> --style json` printed, gives
@@ -86,42 +73,26 @@ pub fn has_value(json: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The last summary line of a build's output, from `Commands: `, and the number after its
-/// `local: `; `None` when there is none.
-pub fn summary(log: &str) -> Option<(&str, u64)> {
-    log.lines().rev().find_map(|line| {
-        let line = &line[line.find("Commands: ")?..];
-        let (_, after) = line.split_once("local: ")?;
-        let digits = after
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .unwrap_or_default();
-        Some((line, digits.parse().ok()?))
-    })
-}
-
-/// Builds `target` with the buck2 at `buck2`, writing buck2's standard error to `log` as it
-/// comes, once the generated build table is fresh, and stops buck2's daemon after: the summary
-/// line, or why the build is not a farm build. A stale table leaves its fix where `handoff` says.
+/// Fails unless the buck2 at `buck2` gives buildrules a worker property set: [`WORKERS_SET`]
+/// when it does.
 ///
 /// # Errors
-/// buck2 cannot be started, names no worker property set, the table is stale or its check
-/// fails, buck2 fails the build, prints no summary line, or ran an action on this machine.
-pub fn build(
-    buck2: &Path,
-    target: &str,
-    handoff: &Handoff,
-    log: &mut dyn Write,
-) -> Result<String, Error> {
-    let result = build_and_check(buck2, target, handoff, log);
-    // The daemon outlives the command: stop it however the build ended.
-    let _ = Command::new(buck2)
-        .arg("kill")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    result
+/// buck2 cannot be started, its audit fails, or it names no worker property set.
+pub fn workers(buck2: &Path) -> Result<String, Error> {
+    let audit = output(
+        buck2,
+        &["audit", "config", PROPERTIES_KEY, "--style", "json"],
+    )?;
+    if !audit.status.success() {
+        return Err(Error::Audit {
+            status: audit.status.to_string(),
+            stderr: String::from_utf8_lossy(&audit.stderr).trim().to_owned(),
+        });
+    }
+    if !has_value(&String::from_utf8_lossy(&audit.stdout)) {
+        return Err(Error::NoWorkers);
+    }
+    Ok(WORKERS_SET.to_owned())
 }
 
 /// The error for a program that could not be started or waited for.
@@ -145,60 +116,13 @@ fn output(program: &Path, args: &[&str]) -> Result<Output, Error> {
 fn tee(from: impl std::io::Read, log: &mut dyn Write) -> Vec<u8> {
     let mut lines = BufReader::new(from);
     let (mut line, mut text) = (Vec::new(), Vec::new());
-    // A read that fails ends the log; the status of the build is still buck2's.
+    // A read that fails ends the log; the status of the program is still its own.
     while lines.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
-        // A log that cannot be written loses buck2's words, not the verdict.
+        // A log that cannot be written loses the program's words, not the verdict.
         let _ = log.write_all(&line);
         text.append(&mut line);
     }
     text
-}
-
-/// The checks and the build, without the daemon's stop.
-fn build_and_check(
-    buck2: &Path,
-    target: &str,
-    handoff: &Handoff,
-    log: &mut dyn Write,
-) -> Result<String, Error> {
-    let audit = output(
-        buck2,
-        &["audit", "config", PROPERTIES_KEY, "--style", "json"],
-    )?;
-    if !audit.status.success() {
-        return Err(Error::Audit {
-            status: audit.status.to_string(),
-            stderr: String::from_utf8_lossy(&audit.stderr).trim().to_owned(),
-        });
-    }
-    if !has_value(&String::from_utf8_lossy(&audit.stdout)) {
-        return Err(Error::NoWorkers);
-    }
-    table::ensure_fresh(buck2, handoff, log)?;
-    let mut child = Command::new(buck2)
-        .args(["build", target])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(start_error(buck2))?;
-    let text = child
-        .stderr
-        .take()
-        .map(|stderr| tee(stderr, log))
-        .unwrap_or_default();
-    let status = child.wait().map_err(start_error(buck2))?;
-    if !status.success() {
-        return Err(Error::Build {
-            target: target.to_owned(),
-            status: status.to_string(),
-        });
-    }
-    let text = String::from_utf8_lossy(&text);
-    let (line, local) = summary(&text).ok_or(Error::NoSummary)?;
-    if local != 0 {
-        return Err(Error::Local(line.to_owned()));
-    }
-    Ok(line.to_owned())
 }
 
 #[cfg(test)]

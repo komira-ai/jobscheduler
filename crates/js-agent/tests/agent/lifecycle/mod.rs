@@ -43,11 +43,13 @@ mod prepare;
 #[cfg(target_os = "linux")]
 mod provider_flags;
 mod providers;
+mod providers_attempts;
 mod providers_backoff;
 mod providers_end;
 mod providers_lost;
 mod providers_restart;
 mod providers_stop;
+pub mod providers_unread;
 pub mod quota;
 mod quota_health;
 mod reach;
@@ -366,6 +368,8 @@ pub fn names(events: &[Event]) -> Vec<String> {
             ),
             Event::SlotFreed { run_id } => format!("freed {run_id}"),
             Event::Cleaned { run_id, .. } => format!("cleaned {run_id}"),
+            Event::StopReasoned { run_id, reason } => format!("stopped {run_id} {reason:?}"),
+            Event::UnknownToServer { run_ids } => format!("unknown {}", run_ids.join(",")),
             Event::Finding(finding) => format!(
                 "finding {} {}",
                 finding.run_id.as_deref().unwrap_or("-"),

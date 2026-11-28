@@ -44,6 +44,7 @@ use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, Needs, StartFai
 use js_state::StoreTime;
 
 use crate::file::PoolSettings;
+use crate::job_api::submit::DEFAULT_MAX_JOB_WALL;
 use crate::job_retry::{self, Settled};
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
@@ -65,22 +66,29 @@ pub(crate) struct JobLimits {
     pub(crate) capacity_refusal_bar: Duration,
     /// How long a host may go unheard before its placed, starting and running jobs end as lost.
     pub(crate) silence_limit: Duration,
+    /// How long a host lists a job the store holds no record of before the server ends it
+    /// ([`crate::orphans`]): the most any job may run (`--max-job-wall`), the same for every
+    /// pool.
+    pub(crate) orphan_after: Duration,
 }
 
 impl JobLimits {
     /// The limits of a pool that sets none, on a server that sets no `silence_limit`: a queue
     /// wait of one hour, a start timeout of fifteen minutes, eight capacity requeues, a
     /// capacity bar of sixty seconds and a silence limit of thirty minutes
-    /// ([`DEFAULT_SILENCE_LIMIT`]).
+    /// ([`DEFAULT_SILENCE_LIMIT`]); an orphan is ended after the default `--max-job-wall`.
     pub(crate) const DEFAULT: JobLimits = JobLimits {
         max_queue_wait: Duration::from_secs(3600),
         start_timeout: Duration::from_secs(900),
         capacity_requeues: 8,
         capacity_refusal_bar: Duration::from_secs(60),
         silence_limit: DEFAULT_SILENCE_LIMIT,
+        orphan_after: DEFAULT_MAX_JOB_WALL,
     };
 
-    /// The limits the pool's `settings` give, with the default silence limit.
+    /// The limits the pool's `settings` give, with the default silence limit, and an orphan
+    /// ended after the default `--max-job-wall` ([`JobLimits::with_orphan_after`] sets the
+    /// server's).
     pub(crate) fn of(settings: &PoolSettings) -> JobLimits {
         JobLimits {
             max_queue_wait: settings.max_queue_wait,
@@ -88,6 +96,7 @@ impl JobLimits {
             capacity_requeues: settings.capacity_requeues,
             capacity_refusal_bar: settings.capacity_refusal_bar,
             silence_limit: DEFAULT_SILENCE_LIMIT,
+            orphan_after: DEFAULT_MAX_JOB_WALL,
         }
     }
 
@@ -95,6 +104,14 @@ impl JobLimits {
     pub(crate) fn with_silence_limit(self, silence_limit: Duration) -> JobLimits {
         JobLimits {
             silence_limit,
+            ..self
+        }
+    }
+
+    /// The same limits, an orphan ended after `max_job_wall`, the server's `--max-job-wall`.
+    pub(crate) fn with_orphan_after(self, max_job_wall: Duration) -> JobLimits {
+        JobLimits {
+            orphan_after: max_job_wall,
             ..self
         }
     }

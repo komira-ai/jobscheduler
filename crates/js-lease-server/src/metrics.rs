@@ -23,7 +23,11 @@
 //!   section 4), and how long each phase of each `SubmitJob` call took
 //!   (`js_submit_phase_seconds`, by `phase`, [`SubmitPhase`]), and each hello or heartbeat
 //!   refused 413 `body-too-large` for a body over the cap (`js_agent_bodies_too_large_total`,
-//!   by `route`, [`AgentRoute`]). A start failure or a loss is
+//!   by `route`, [`AgentRoute`]), and, by host, each job a heartbeat listed that the store
+//!   holds no record of, once, at the beat that first listed it
+//!   (`js_unknown_jobs_found_total`), and each heartbeat whose listing was mostly such jobs,
+//!   so that the host was told to stop nothing (`js_unknown_listing_guarded_total`,
+//!   [`crate::orphans`]). A start failure or a loss is
 //!   counted as the end of a job, so an attempt that
 //!   retries counts as a retry and not as a start failure or a loss. Each is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
@@ -64,6 +68,7 @@
 mod placement;
 mod render;
 mod scrape;
+mod work;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -108,6 +113,9 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// A queued job of a curve class waited past the wait bound with no host fitting its
     /// curve, and is tested with its flat number from then on; by default, nothing is counted.
     fn curve_wait_expired(&self) {}
+    /// A pass wrote the queue status of a job it did not place, in a commit of its own; by
+    /// default, nothing is counted.
+    fn queue_status_written(&self) {}
     /// A try of a job's completion callback was answered `answer`, and the answer recorded;
     /// by default, nothing is counted.
     fn callback_answered(&self, _answer: &CallbackAnswer) {}
@@ -122,6 +130,14 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// An agent's request on `route` was refused 413 `body-too-large`, its body over the cap;
     /// by default, nothing is counted.
     fn agent_body_too_large(&self, _route: AgentRoute) {}
+    /// A beat of `host` listed `count` jobs the store holds no record of that its row did not
+    /// hold as orphans yet (each counted once, at the beat that first listed it); by default,
+    /// nothing is counted.
+    fn unknown_jobs_found(&self, _host: &HostId, _count: usize) {}
+    /// A beat of `host` listed more jobs the store holds no record of than it knows, so the
+    /// host was told to stop nothing but an operator's orphans ([`crate::orphans`]); by
+    /// default, nothing is counted.
+    fn unknown_listing_guarded(&self, _host: &HostId) {}
 }
 
 /// An agent route whose body is read whole and held to the cap: the label of
@@ -258,6 +274,10 @@ impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
 
     fn curve_wait_expired(&self) {
         self.0.curve_wait_expired();
+    }
+
+    fn queue_status_written(&self) {
+        self.0.queue_status_written();
     }
 }
 
@@ -610,6 +630,11 @@ pub(crate) struct Recorder {
     callbacks: [AtomicU64; 4],
     submit_phases: [Histogram; 6],
     bodies_too_large: [AtomicU64; 2],
+    unknown_found: Mutex<BTreeMap<String, u64>>,
+    unknown_guarded: Mutex<BTreeMap<String, u64>>,
+    /// The queue statuses of unplaced jobs the passes wrote, served with the server's own work
+    /// ([`work`]).
+    queue_status_writes: AtomicU64,
 }
 
 impl Default for Recorder {
@@ -631,6 +656,9 @@ impl Default for Recorder {
             callbacks: Default::default(),
             submit_phases: std::array::from_fn(|_| Histogram::new(SUBMIT_PHASE)),
             bodies_too_large: Default::default(),
+            unknown_found: Mutex::default(),
+            unknown_guarded: Mutex::default(),
+            queue_status_writes: AtomicU64::new(0),
         }
     }
 }
@@ -691,6 +719,10 @@ impl MetricsSink for Recorder {
         self.curve_wait_expiries.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn queue_status_written(&self) {
+        self.queue_status_writes.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn job_retried(&self, outcome: RetryOutcome) {
         self.retries[retry_slot(outcome)].fetch_add(1, Ordering::Relaxed);
     }
@@ -709,6 +741,23 @@ impl MetricsSink for Recorder {
 
     fn agent_body_too_large(&self, route: AgentRoute) {
         self.bodies_too_large[route_slot(route)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn unknown_jobs_found(&self, host: &HostId, count: usize) {
+        let mut found = self
+            .unknown_found
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let seen = found.entry(host.as_str().to_owned()).or_default();
+        *seen = seen.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
+    fn unknown_listing_guarded(&self, host: &HostId) {
+        let mut guarded = self
+            .unknown_guarded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guarded.entry(host.as_str().to_owned()).or_default() += 1;
     }
 }
 
@@ -740,6 +789,18 @@ impl Recorder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The jobs unknown to the store first listed, and the beats the guard held, each by
+    /// host.
+    fn unknown(&self) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+        let read = |counts: &Mutex<BTreeMap<String, u64>>| {
+            counts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        };
+        (read(&self.unknown_found), read(&self.unknown_guarded))
     }
 
     /// The refusals counted, by host and reason.
@@ -774,3 +835,7 @@ mod retry_tests;
 #[cfg(test)]
 #[path = "metrics/telemetry_tests.rs"]
 mod telemetry_tests;
+
+#[cfg(test)]
+#[path = "metrics/orphan_tests.rs"]
+mod orphan_tests;

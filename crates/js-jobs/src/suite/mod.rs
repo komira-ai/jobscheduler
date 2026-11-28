@@ -150,6 +150,7 @@ where
     the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
+    a_hosts_orphans_are_kept_by_its_beats_and_hellos(backend);
     each_hello_writes_its_own_agent_version(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
     a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field(backend);
@@ -378,6 +379,7 @@ macro_rules! job_store_tests {
             the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
+            a_hosts_orphans_are_kept_by_its_beats_and_hellos,
             each_hello_writes_its_own_agent_version,
             heard_at_is_the_store_clock_and_judges_live_nodes,
             a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field,

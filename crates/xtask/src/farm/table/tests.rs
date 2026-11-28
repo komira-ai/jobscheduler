@@ -1,30 +1,6 @@
 use super::*;
 
 #[test]
-fn the_tool_is_the_path_buck2_names_for_its_label() {
-    // Catches: the path of another target, of a label that only starts with the tool's, a line
-    // with no path, or the label kept in the path, taken for the command line.
-    let out = "toolchains//:cargo_1_95_0 /x/cargo\n\
-               buildrules//cli:buildrules /repo/buck-out/v2/gen/buildrules/cli/buildrules\n";
-    assert_eq!(
-        tool_path(out),
-        Some(PathBuf::from(
-            "/repo/buck-out/v2/gen/buildrules/cli/buildrules"
-        ))
-    );
-    for out in [
-        "",
-        "toolchains//:cargo_1_95_0 /x/cargo\n",
-        "buildrules//cli:buildrules_unit /x/unit\n",
-        "buildrules//cli:buildrules\n",
-        "buildrules//cli:buildrules   \n",
-        "buildrules//cli:buildrules buck-out/v2/gen/buildrules\n",
-    ] {
-        assert_eq!(tool_path(out), None, "{out:?}");
-    }
-}
-
-#[test]
 fn the_stale_inputs_are_checks_problem_lines_without_their_marks_and_fix() {
     // Catches: a line that is not the command line's (buck2's or cargo's words, an indented one)
     // taken for a problem, a problem lost (a stale one, or one without the `STALE:` mark such as a
@@ -121,20 +97,6 @@ fn every_error_says_what_is_wrong() {
     // Catches: an error whose words do not name the command, its status and what it printed,
     // the file, or for a stale table the inputs, the files and the command.
     let cases = [
-        (
-            Error::Tool {
-                status: "exit status: 3".to_owned(),
-                stderr: "no cell".to_owned(),
-            },
-            "`buck2 build buildrules//cli:buildrules` failed (exit status: 3): no cell",
-        ),
-        (
-            Error::NoTool {
-                stdout: "x y\n".to_owned(),
-            },
-            "`buck2 build buildrules//cli:buildrules --show-full-output` named no output of \
-             buildrules//cli:buildrules: \"x y\\n\"",
-        ),
         (
             Error::Check {
                 status: "exit status: 2".to_owned(),
