@@ -312,6 +312,7 @@ fn trees_below_the_root_are_taken_canonical() {
     assert_eq!(
         tree_rules(
             &t.root,
+            Some(AGENT),
             OWN,
             &[kbf(&t.a), beside, kbf(&t.a1.join("../1/."))]
         ),
