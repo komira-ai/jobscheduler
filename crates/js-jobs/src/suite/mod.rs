@@ -142,6 +142,7 @@ where
     two_servers_beating_one_host_at_once_apply_each_beat_once(backend);
     a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
     a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved(backend);
+    a_view_guarded_on_absence_writes_only_while_the_host_has_no_row(backend);
     a_conflict_on_another_row_is_not_the_node_moving(backend);
     a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving(backend);
     a_guarded_view_shares_the_write_count_of_its_store(backend);
@@ -150,6 +151,7 @@ where
     the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
+    a_hosts_orphans_are_kept_by_its_beats_and_hellos(backend);
     each_hello_writes_its_own_agent_version(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
     a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field(backend);
@@ -242,6 +244,7 @@ where
     marks_are_raised_at_boot(backend);
     end_and_unmark_deletes_both_or_neither(backend);
     delete_mark_removes_the_mark_it_read(backend);
+    a_marks_hello_wait_is_written_once(backend);
     a_mark_that_loses_to_an_end_or_another_mark_is_stale(backend);
     a_host_isolation_placement_taints_its_host_in_the_same_commit(backend);
     a_contained_placement_writes_no_taint(backend);
@@ -277,6 +280,7 @@ where
     a_failed_prepare_drops_its_mark_or_writes_nothing(backend);
     a_restarted_prepare_moves_only_the_deadline(backend);
     a_restarted_prepare_loses_to_a_change_of_either_row(backend);
+    a_whole_host_start_refuses_a_host_a_row_holds_tainted(backend);
     a_claimed_placement_refuses_a_tainted_host(backend);
     a_plain_placement_of_a_contained_job_on_a_tainted_host_is_stale(backend);
     a_hostmark_refuses_every_placement(backend);
@@ -369,6 +373,7 @@ macro_rules! job_store_tests {
             two_servers_beating_one_host_at_once_apply_each_beat_once,
             a_beat_or_hello_that_loses_its_version_reads_the_row_again,
             a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved,
+            a_view_guarded_on_absence_writes_only_while_the_host_has_no_row,
             a_conflict_on_another_row_is_not_the_node_moving,
             a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving,
             a_guarded_view_shares_the_write_count_of_its_store,
@@ -377,6 +382,7 @@ macro_rules! job_store_tests {
             the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
+            a_hosts_orphans_are_kept_by_its_beats_and_hellos,
             each_hello_writes_its_own_agent_version,
             heard_at_is_the_store_clock_and_judges_live_nodes,
             a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field,
@@ -469,6 +475,7 @@ macro_rules! job_store_tests {
             marks_are_raised_at_boot,
             end_and_unmark_deletes_both_or_neither,
             delete_mark_removes_the_mark_it_read,
+            a_marks_hello_wait_is_written_once,
             a_mark_that_loses_to_an_end_or_another_mark_is_stale,
             a_host_isolation_placement_taints_its_host_in_the_same_commit,
             a_contained_placement_writes_no_taint,
@@ -504,6 +511,7 @@ macro_rules! job_store_tests {
             a_failed_prepare_drops_its_mark_or_writes_nothing,
             a_restarted_prepare_moves_only_the_deadline,
             a_restarted_prepare_loses_to_a_change_of_either_row,
+            a_whole_host_start_refuses_a_host_a_row_holds_tainted,
             a_claimed_placement_refuses_a_tainted_host,
             a_plain_placement_of_a_contained_job_on_a_tainted_host_is_stale,
             a_hostmark_refuses_every_placement,

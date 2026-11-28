@@ -1,17 +1,19 @@
 //! What the server teaches the history the jobs that book nothing are sized from
 //! (`js_sched_placer::sizes`, `docs/design/sizing.md` section 7.7): every ended job its job
-//! store still holds, in the order they ended, so that a restart forgets no size the store's
+//! store still holds, in the order they were freed, so that a restart forgets no size the store's
 //! retention keeps. Each pass teaches the jobs it sees freed.
 //!
 //! The start does not wait for it. It begins the teaching ([`begin`]), which reads the live
 //! allocations and the runs of the newest freed allocations, at most [`BRIDGE_PAGES`] pages of
 //! them, so what it reads is set by the jobs running and that bound, not by the history the
 //! store keeps; the server then listens and answers ready. The ended jobs are read after that,
-//! a page at a time, off the runtime's threads ([`Sizes::teach`]): meanwhile a job that books
-//! nothing is sized from those newest runs and the runs the passes freed since the start (the
-//! cold size only for a class, a fallback and a client with none), and the freed runs are
-//! held, so that once taught the history is the one a server that read everything before its
-//! first pass would hold. A stop of the server ([`Sizes::stop`]) ends the read at the next
+//! a page at a time, oldest free first, off the runtime's threads ([`Sizes::teach`]), and each
+//! page is taught as it is read and then dropped, so the teaching holds one page of ended jobs
+//! at most, not the store's whole history (seven days of a farm's jobs, gigabytes, held until
+//! the last page). Meanwhile a job that books nothing is sized from those newest runs and the
+//! runs the passes freed since the start (the cold size only for a class, a fallback and a
+//! client with none), and the freed runs are held, so that once taught the history is the one a
+//! server that read everything before its first pass would hold. A stop of the server ([`Sizes::stop`]) ends the read at the next
 //! page. The line that says the history is taught names the ended jobs taught, the pages read,
 //! the newest runs the start read (`bridged`) and the seconds since the start (`took_secs`).
 //!
@@ -111,8 +113,9 @@ pub(crate) fn begin(placer: &Arc<SchedPlacer>, jobs: &Arc<ServerJobs>) -> Sizes 
 }
 
 impl Sizes {
-    /// Reads every ended job of the teaching begun, a page at a time, and teaches the placer
-    /// them and the runs the passes held meanwhile ([`SchedPlacer::teach`]); answers how it
+    /// Reads every ended job of the teaching begun, a page at a time, teaching each page as it
+    /// is read ([`js_sched_placer::sizes::Teaching::read_page`]), and then teaches the placer
+    /// that history and the runs the passes held meanwhile ([`SchedPlacer::teach`]); answers how it
     /// ended, with how many taught a class a memory sample when every page was read (a job that
     /// ended with no usage is not counted). It
     /// blocks on the store's reads: the server runs it off the runtime's threads. A read that
@@ -143,7 +146,7 @@ impl Sizes {
             if self.stopping.load(Ordering::SeqCst) {
                 break Err(None);
             }
-            match teaching.read_page(jobs.as_ref()) {
+            match teaching.read_page(&placer, jobs.as_ref()) {
                 Ok(true) => {}
                 Ok(false) => break Ok(()),
                 Err(error) => break Err(Some(error)),

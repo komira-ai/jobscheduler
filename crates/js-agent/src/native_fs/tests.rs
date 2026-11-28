@@ -356,7 +356,8 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
             tree_rules(&t.root, OWN, &[kbf(&t.a), kbf(not_its_own)]),
             not_allowed(format!(
                 "{}: below the trees root {root}, a job mounts only a tree the provider \
-                 answered for its own run (mount-provider/<provider>/<run>/<index>)",
+                 answered for its own run (mount-provider/<provider>/<run>/<index> or \
+                 mount-provider/<provider>/<run>/a<attempt>/<index>)",
                 not_its_own.display()
             )),
             "{}",
@@ -412,24 +413,28 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
 }
 
 /// Asserts which directories are a run's trees, by path alone: the run's own at any index,
-/// and not another run's, a folder above, a deeper path, a provider part that is not lowercase
-/// hex, an index that is not a number, another first folder, or a path outside the root.
-/// Catches a check that takes any path below the root, or that a job could satisfy with
-/// another run's name.
+/// in both of the provider's shapes (`<run>/<index>`, and `<run>/a<attempt>/<index>` for
+/// attempts 1, 44 and the largest), and not another run's (numbered or not), a folder above
+/// (the run's, or its attempt's), a deeper path (below a tree, or an attempt folder inside
+/// another), a provider part that is not lowercase hex, an index that is not a number,
+/// an attempt folder the provider never names (`a0`, `a`, `a01`, `a+3`, `A3`, `b3`, `ax`, one
+/// past the largest attempt), another first folder, or a path outside the root. Catches a
+/// check that takes any path below the root, one that a job could satisfy with another run's
+/// name, and the refusal of every tree of a numbered attempt, which every start the agent
+/// makes since it names attempts is.
 #[test]
 fn a_runs_tree_is_named_by_its_run() {
     let root = Path::new("/Volumes/tierstore");
     let at = |rest: &str| root.join(rest);
-    assert!(is_runs_tree(
-        root,
-        "r1",
-        &at("mount-provider/aa/6a732e7231/0")
-    ));
-    assert!(is_runs_tree(
-        root,
-        "r1",
-        &at("mount-provider/0f9e/6a732e7231/12")
-    ));
+    for its in [
+        "mount-provider/aa/6a732e7231/0",
+        "mount-provider/0f9e/6a732e7231/12",
+        "mount-provider/aa/6a732e7231/a1/0",
+        "mount-provider/aa/6a732e7231/a44/0",
+        "mount-provider/aa/6a732e7231/a18446744073709551615/3",
+    ] {
+        assert!(is_runs_tree(root, "r1", &at(its)), "{its}");
+    }
     for not_its in [
         "mount-provider/aa/6a732e7232/0",
         "mount-provider/aa/6a732e7231",
@@ -438,6 +443,22 @@ fn a_runs_tree_is_named_by_its_run() {
         "mount-provider//6a732e7231/0",
         "mount-provider/aa/6a732e7231/x",
         "trees/aa/6a732e7231/0",
+        "mount-provider/aa/6a732e7232/a1/0",
+        "mount-provider/AA/6a732e7231/a1/0",
+        "trees/aa/6a732e7231/a1/0",
+        "mount-provider/aa/6a732e7231/a1",
+        "mount-provider/aa/6a732e7231/a1/x",
+        "mount-provider/aa/6a732e7231/a1/0/sub",
+        "mount-provider/aa/6a732e7231/a1/a2/0",
+        "mount-provider/aa/6a732e7231/a0/0",
+        "mount-provider/aa/6a732e7231/a/0",
+        "mount-provider/aa/6a732e7231/a01/0",
+        "mount-provider/aa/6a732e7231/a+3/0",
+        "mount-provider/aa/6a732e7231/A3/0",
+        "mount-provider/aa/6a732e7231/b3/0",
+        "mount-provider/aa/6a732e7231/ax/0",
+        "mount-provider/aa/6a732e7231/a18446744073709551616/0",
+        "mount-provider/aa/6a732e7231/3/0",
     ] {
         assert!(!is_runs_tree(root, "r1", &at(not_its)), "{not_its}");
     }
@@ -446,6 +467,63 @@ fn a_runs_tree_is_named_by_its_run() {
         "r1",
         Path::new("/elsewhere/mount-provider/aa/6a732e7231/0")
     ));
+}
+
+/// Asserts, on directories made below a trees root, that the tree of a numbered attempt
+/// (`<run>/a<attempt>/<index>`, as tierstore answers a source whose calls name attempt 44) is
+/// one of the run's trees, taken canonical beside the run's unnumbered tree; and that the
+/// lookup refuses, `input-not-allowed` by exact equality naming the directory as given,
+/// another run's tree of the same attempt, the attempt's folder (above its trees), a path one
+/// level below the tree, a link in the attempt's folder that leads to another run's tree, and
+/// one that leads out of the root. Catches the refusal of every start whose provider answered a
+/// numbered attempt (on the Macs, every start that mounts a tree), and a rule widened past the
+/// provider's two shapes.
+#[test]
+fn a_numbered_attempts_tree_is_the_runs_and_nothing_beside_it_is() {
+    let t = trees("native-fs-numbered");
+    let root = t.root.display();
+    let numbered = t.root.join(RUN_DIR).join("a44/0");
+    let other = t.root.join("mount-provider/aa/6a732e7232/a44/0");
+    let deeper = numbered.join("sub");
+    for dir in [&numbered, &other, &deeper] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let to_other = t.root.join(RUN_DIR).join("a44/1");
+    symlink(&other, &to_other).unwrap();
+    let out = t.root.join(RUN_DIR).join("a44/2");
+    symlink(&t.outside, &out).unwrap();
+    assert_eq!(
+        tree_rules(&t.root, OWN, &[kbf(&numbered), kbf(&t.a)]),
+        Ok(TreeRules {
+            root: t.root.clone(),
+            trees: vec![numbered.clone(), t.a.clone()],
+        })
+    );
+    let not_its_own = |dir: &Path| {
+        not_allowed(format!(
+            "{}: below the trees root {root}, a job mounts only a tree the provider answered \
+             for its own run (mount-provider/<provider>/<run>/<index> or \
+             mount-provider/<provider>/<run>/a<attempt>/<index>)",
+            dir.display()
+        ))
+    };
+    let attempt_dir = t.root.join(RUN_DIR).join("a44");
+    for refused in [&other, &attempt_dir, &deeper, &to_other] {
+        assert_eq!(
+            tree_rules(&t.root, OWN, &[kbf(&numbered), kbf(refused)]),
+            not_its_own(refused),
+            "{}",
+            refused.display()
+        );
+    }
+    assert_eq!(
+        tree_rules(&t.root, OWN, &[kbf(&out)]),
+        not_allowed(format!(
+            "{}: the tree {} is not below the mount root {root}",
+            out.display(),
+            t.outside.display()
+        ))
+    );
 }
 
 const ROOT: &str = "/Volumes/tierstore";

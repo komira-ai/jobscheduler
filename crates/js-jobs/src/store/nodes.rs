@@ -510,6 +510,11 @@ fn hello_record(
             first_listing_pending: true,
             last_listing_clean: before.is_none_or(|before| before.state.last_listing_clean),
             missing_in_a_row: BTreeMap::new(),
+            // An orphan is the store's lack of a record, which a hello does not change: its
+            // age and an operator's ask to end it go on.
+            orphans: before
+                .map(|before| before.state.orphans.clone())
+                .unwrap_or_default(),
         },
         last_beat: None,
         heard_at: now,

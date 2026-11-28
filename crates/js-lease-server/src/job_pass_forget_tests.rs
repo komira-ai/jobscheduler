@@ -129,21 +129,27 @@ async fn a_forget_that_fails_is_logged_and_the_next_period_forgets_it() {
     assert_eq!(rowed(&first), Vec::<String>::new());
 }
 
-/// Asserts that a pass run without the period's claim (the server's registry removed a host,
-/// which only its own pass settles) forgets no row, and that the next pass, which claims the
-/// period, does. It catches every server forgetting in every pass, instead of one in each
-/// period.
+/// Asserts that a server whose pass finds the period claimed by another server forgets no row,
+/// even with a host its own registry no longer holds (the pass no longer runs unclaimed for
+/// it), and that its pass in the next period, which it claims, does. It catches every server
+/// forgetting in every pass, instead of one in each period.
 #[tokio::test]
-async fn a_pass_run_without_the_claim_forgets_no_row() {
+async fn a_pass_in_a_period_another_server_claimed_forgets_no_row() {
     let (mut first, _second) = two_servers("forget_unclaimed");
+    first.agents.set_duty_period(SECOND);
     first.join("host-1", false).await;
     first.advance(past_forgetting(&first));
     first.agents.registry.advance();
     assert!(first.agents.registry.own_host(&host("host-1")).is_none());
 
-    first.agents.job_pass();
+    assert!(
+        first.jobs.claim_duty("job-pass", SECOND).unwrap(),
+        "another server claims the period"
+    );
+    assert_eq!(first.agents.job_pass(), None);
     assert_eq!(rowed(&first), ["host-1"]);
 
+    first.advance(SECOND);
     first.agents.job_pass();
     assert_eq!(rowed(&first), Vec::<String>::new());
 }

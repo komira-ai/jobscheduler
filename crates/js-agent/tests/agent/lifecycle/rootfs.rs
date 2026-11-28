@@ -427,9 +427,11 @@ fn a_stop_while_preparing_waits_for_the_assembly_and_the_cleanup_discards_it() {
     h.apply(vec![
         js_agent_wire::Command::JobStop {
             job_id: "looking".to_owned(),
+            reason: None,
         },
         js_agent_wire::Command::JobStop {
             job_id: "assembling".to_owned(),
+            reason: None,
         },
     ]);
     h.life.step();

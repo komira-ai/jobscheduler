@@ -56,6 +56,20 @@ pub(crate) struct ServerStore {
     /// The database of a store other servers share (Postgres), which this server listens to for
     /// their notices ([`ServerStore::listener`]).
     shared: Option<PostgresConfig>,
+    /// The same store when it is Postgres, for what it counts of its own work
+    /// ([`ServerStore::tally`]).
+    postgres: Option<Arc<PostgresStore>>,
+}
+
+/// What a Postgres store counted of its own work since it was opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoreTally {
+    /// The messages carrying statements it sent, each a round trip
+    /// ([`PostgresStore::statements`]).
+    pub(crate) statements: u64,
+    /// The threads it started to make a call away from the runtime
+    /// ([`PostgresStore::threads_started`]).
+    pub(crate) threads: u64,
 }
 
 impl ServerStore {
@@ -126,6 +140,7 @@ impl ServerStore {
             names,
             locked: true,
             shared: None,
+            postgres: None,
         })
     }
 
@@ -145,11 +160,13 @@ impl ServerStore {
             None => store,
         };
         info!("the store is open");
+        let store = Arc::new(store);
         Ok(Self {
-            store: Arc::new(store),
+            store: Arc::clone(&store) as Arc<dyn Store>,
             names,
             locked: false,
             shared: notices.then(|| config.clone()),
+            postgres: Some(store),
         })
     }
 
@@ -186,6 +203,15 @@ impl ServerStore {
     /// The store, shared.
     pub(crate) fn store(&self) -> Arc<dyn Store> {
         Arc::clone(&self.store)
+    }
+
+    /// What the store counted of its own work since it was opened; `None` for SQLite, which
+    /// counts neither.
+    pub(crate) fn tally(&self) -> Option<StoreTally> {
+        self.postgres.as_ref().map(|store| StoreTally {
+            statements: store.statements(),
+            threads: store.threads_started(),
+        })
     }
 
     /// A listener of the notices the servers of a shared store (Postgres) send on the job

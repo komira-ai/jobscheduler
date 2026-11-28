@@ -242,6 +242,7 @@ fn a_stop_while_the_providers_are_pending_removes_the_directories() {
     let (mut h, providers) = admitted("conc-stop");
     h.apply(vec![Command::JobStop {
         job_id: "j1".to_owned(),
+        reason: None,
     }]);
     for _ in 0..4 {
         h.life.step();

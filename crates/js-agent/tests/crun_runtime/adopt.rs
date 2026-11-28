@@ -123,6 +123,7 @@ fn a_restart_adopts_a_live_job_and_lists_it() {
     let reply = HeartbeatReply {
         commands: vec![Command::JobStop {
             job_id: "r-up".to_owned(),
+            reason: None,
         }],
         ..HeartbeatReply::default()
     };

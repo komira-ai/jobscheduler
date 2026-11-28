@@ -17,6 +17,11 @@
 //!    acknowledged too. A job the agent ran and ended between two heartbeats is walked
 //!    through the steps it skipped first. The same listing twice commits nothing, and a
 //!    report that would move a job backwards or out of an end is ignored.
+//!    A listed job the store holds no live allocation of on the host is judged by what the
+//!    store records of it ([`judge`]): its end, its cancel, or the end of the host's attempt
+//!    of it is a reason to stop it, sent with the stop ([`StopReason`]); a job the store holds
+//!    no record of is an orphan, named in the reply's `unknown_jobs`, kept running and kept in
+//!    the host's row ([`crate::orphans`]). Either way the host's listing is not clean.
 //! 2. **Retired ids are answered** ([`job_alloc::answer_retired`]): a job the agent never held
 //!    and was told to stop is stopped and gone, so a cancelled job ends and its allocation is
 //!    freed in one commit.
@@ -29,9 +34,12 @@
 //!    only once two applied beats in a row leave it out: the count of each such job is kept in
 //!    the host's row ([`JobReply::missing`]).
 //! 4. **The reply is built** from what the store holds now: a stop for every job of the host
-//!    with a cancel intent that has not ended, every listed job the store has no live
-//!    allocation of on this host, and every listed job that ended, or whose attempt there a
-//!    retry ended, without the host reporting it ([`stops_for`]); then a start for every placed job the host does not list yet
+//!    with a cancel intent that has not ended, every listed job that ended, or whose attempt
+//!    there a retry ended, without the host reporting it, and every listed job with no live
+//!    allocation on this host that the store records a reason to stop or that is an orphan
+//!    ended now ([`stops_for`], [`crate::orphans::judge`]), each with its reason; none but
+//!    an operator's when more than half of the listing is orphans (the guard of
+//!    [`crate::orphans`]); then a start for every placed job the host does not list yet
 //!    ([`starts_for`]). A job that books the whole host is the exception on both sides: no
 //!    container exists while it is placed (the host prepares), so it is sent no stop, and it
 //!    is sent its start only once the host reported ready and the job is starting. The reply
@@ -48,11 +56,11 @@ use std::time::Duration;
 
 use js_agent_wire::{
     Ack, Command, HeldJob, HeldState, JobResult, JobResultAck, JobStartSpec, NetworkCeiling,
-    Outcome, refusal,
+    Outcome, StopReason, refusal,
 };
 use js_jobs::{
     AllocationId, AllocationRecord, AllocationStep, Booked, CpuPeak, CpuThrottle, DispatchKind,
-    JobEnd, JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage,
+    JobEnd, JobId, JobRecord, JobState, JobStoreError, LogLengths, Orphan, Output, ResourceUsage,
     StartFailure,
 };
 use js_types::{CpuSeries, HostId, MemorySeries, Resources};
@@ -66,6 +74,7 @@ use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
 use crate::metrics::MetricsSink;
+use crate::orphans::{self, Judged, Listing};
 
 /// The exit code a failure is recorded with when the agent reports it with none (a job
 /// stopped without a cancel, a failure the agent could not read a status for).
@@ -81,7 +90,7 @@ pub(crate) struct JobReply {
     /// Every retired id the heartbeat listed, each answered.
     pub(crate) retired_acks: Vec<String>,
     /// Whether every listed job is one the host holds a live allocation for; a host whose
-    /// listing is not clean is told to stop the others.
+    /// listing is not clean takes no job.
     pub(crate) clean: bool,
     /// The allocation id of the whole-host job the host is to be prepared for or to hold,
     /// when it has one ([`exclusive_of`]): the reply's `exclusive`.
@@ -90,14 +99,39 @@ pub(crate) struct JobReply {
     /// listing left out and did not free, with how many applied beats in a row have left it
     /// out. Empty for an agent that sends one, whose containers are freed at once.
     pub(crate) missing: BTreeMap<JobId, u32>,
+    /// The listed jobs the store holds no record of, in id order: the reply's `unknown_jobs`.
+    pub(crate) unknown_jobs: Vec<String>,
+    /// The host's orphans after this listing ([`orphans::held`]), which the host's row keeps.
+    pub(crate) orphans: BTreeMap<String, Orphan>,
+    /// What the listing decided beside the live allocations, which a reply built again for
+    /// the same listing keeps ([`commands_now`]).
+    pub(crate) judged: Judged,
 }
 
 /// What [`commit_listing`] found.
 #[derive(Debug, Default)]
 struct Reported {
     acks: Vec<JobResultAck>,
-    /// The listed job ids the store holds no live allocation of on this host.
-    unknown: BTreeSet<String>,
+    /// The listed job ids the store holds no live allocation of on this host and records a
+    /// reason to stop ([`Listed::Stop`]), each with it.
+    stopped: BTreeMap<String, StopReason>,
+    /// The listed job ids the store holds no record of ([`Listed::Unknown`]), each with
+    /// whether the host listed its result.
+    unknown: BTreeMap<String, bool>,
+}
+
+/// What the store holds of a job a host lists, for that host ([`judge`]).
+#[derive(Debug)]
+enum Listed {
+    /// A live allocation of the job on the host (and, when a result is listed, the allocation
+    /// it names): the host holds it, and its listing is committed.
+    Placed(Box<JobRecord>),
+    /// No such allocation, and a record that the host is to stop the job, for this reason.
+    Stop(StopReason),
+    /// No record that bears on the job on this host: an id that is no job id, a job the store
+    /// does not hold, or one it holds that ran no attempt on the host and has neither ended
+    /// nor been cancelled.
+    Unknown,
 }
 
 /// What a heartbeat's per-job half knows of the host it serves. It is the one argument the
@@ -140,13 +174,23 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) limits: JobLimits,
 }
 
+/// What the host's row holds that a heartbeat's per-job half reads ([`serve`]).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RowState<'a> {
+    /// `None` for an agent that sends a beat sequence, whose confirmed containers are freed
+    /// as soon as a listing leaves them out; for one that sends none, the count the host's row
+    /// kept of the applied beats in a row that left out each, and a container is freed once
+    /// two have ([`JobReply::missing`]).
+    pub(crate) missed: Option<&'a BTreeMap<JobId, u32>>,
+    /// The host's orphans as its row holds them; `None` reads as none.
+    pub(crate) orphans: Option<&'a BTreeMap<String, Orphan>>,
+}
+
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
-/// `retired`, with room for `room` commands: the listing and the retired ids committed,
-/// confirmed containers freed, then the stops and starts that follow from the store.
-/// `missed` is `None` for an agent that sends a beat sequence, whose confirmed containers are
-/// freed as soon as a listing leaves them out; for one that sends none it is the count the
-/// host's row kept of the applied beats in a row that left out each, and a container is freed
-/// once two have ([`JobReply::missing`]).
+/// `retired`, with room for `room` commands and the host's row holding `row`: the listing
+/// and the retired ids committed, confirmed containers freed, the listed jobs the host holds
+/// no live allocation for judged ([`crate::orphans`]), then the stops and starts that follow
+/// from the store.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -154,11 +198,11 @@ pub(crate) struct BeatContext<'a> {
 pub(crate) fn serve(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
-    listed: &[HeldJob],
-    retired: &[String],
+    (listed, retired): (&[HeldJob], &[String]),
     room: usize,
-    missed: Option<&BTreeMap<JobId, u32>>,
+    row: RowState<'_>,
 ) -> Result<JobReply, JobStoreError> {
+    let missed = row.missed;
     let host = context.host;
     let reported = commit_listing(jobs, context, listed)?;
     for job_id in retired {
@@ -188,24 +232,38 @@ pub(crate) fn serve(
             }
         }
     }
-    let (commands, exclusive) =
-        commands_now(jobs, context, (listed, retired), &reported.unknown, room)?;
+    let before = row.orphans.cloned().unwrap_or_default();
+    let (orphans, now) = orphans::held(jobs, &before, &reported.unknown)?;
+    let listing = Listing {
+        listed: listed.len(),
+        stopped: &reported.stopped,
+    };
+    let judged = orphans::judge(
+        (host, context.metrics),
+        &context.limits,
+        &listing,
+        (&orphans, &before, now),
+    );
+    let (commands, exclusive) = commands_now(jobs, context, (listed, retired), &judged, room)?;
     Ok(JobReply {
         commands,
         job_acks: reported.acks,
         retired_acks: retired.to_vec(),
-        clean: reported.unknown.is_empty(),
+        clean: reported.unknown.is_empty() & reported.stopped.is_empty(),
         exclusive,
         missing,
+        unknown_jobs: reported.unknown.into_keys().collect(),
+        orphans,
+        judged,
     })
 }
 
 /// Step 4 of the module docs alone: the stops and starts, at most `room` of them, and the
 /// allocation of the whole-host job, that follow from what the store holds now for the host
-/// that listed `listed` and `retired`, of which `unknown` are the listed jobs it holds no live
-/// allocation for. It reads and commits nothing else, so a heartbeat whose reply is held
-/// ([`crate::held_beat`]) builds it again, once a placement wakes it, over the listing it
-/// already committed.
+/// that listed `listed` and `retired`, and from what its listing decided (`judged`: the stops
+/// of listed jobs it holds no live allocation for, and the guard). It reads and commits
+/// nothing else, so a heartbeat whose reply is held ([`crate::held_beat`]) builds it again,
+/// once a placement wakes it, over the listing it already committed and what that decided.
 ///
 /// For a host that polls dispatch ([`BeatContext::polls_dispatch`]) a start is left out when
 /// the host's dispatch queue carries a start of its allocation, and a stop when the queue
@@ -222,7 +280,7 @@ pub(crate) fn commands_now(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
     (listed, retired): (&[HeldJob], &[String]),
-    unknown: &BTreeSet<String>,
+    judged: &Judged,
     room: usize,
 ) -> Result<(Vec<Command>, Option<String>), JobStoreError> {
     let held: BTreeSet<&str> = listed
@@ -238,10 +296,13 @@ pub(crate) fn commands_now(
         .filter(|(allocation, _)| queued_stops.contains(&allocation.allocation_id))
         .map(|(allocation, _)| allocation.job.to_string())
         .collect();
-    let stops = stops_for(&live, listed, unknown)
+    let stops = stops_for(&live, listed, judged)
         .into_iter()
-        .filter(|job_id| !stopped_by_queue.contains(job_id))
-        .map(|job_id| Command::JobStop { job_id });
+        .filter(|(job_id, _)| !stopped_by_queue.contains(job_id))
+        .map(|(job_id, reason)| Command::JobStop {
+            job_id,
+            reason: Some(reason),
+        });
     let starts = starts_for(&live, (&held, &queued_starts), context)
         .into_iter()
         .map(|spec| Command::JobStart(Box::new(spec)));
@@ -274,7 +335,8 @@ fn carried_by_queue(
 /// result: [`Ack::Accepted`] for an end this call committed, [`Ack::Duplicate`] for a job
 /// already ended, [`Ack::Stale`] for a job the store holds no live allocation of on this host
 /// (or of another allocation) and for an end the job's state cannot take. A result whose
-/// outcome this version does not know is left unanswered and changes nothing.
+/// outcome this version does not know is left unanswered and changes nothing. A listed job
+/// with no live allocation on the host is set apart as [`judge`] reads it.
 fn commit_listing(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
@@ -282,11 +344,19 @@ fn commit_listing(
 ) -> Result<Reported, JobStoreError> {
     let mut reported = Reported::default();
     for held in listed {
-        let ack = match placement_of(jobs, context.host, held)? {
-            Some(job) => report(jobs, context, job, held)?,
-            None => {
-                reported.unknown.insert(held.job_id.clone());
-                held.result.as_ref().map(|_| Ack::Stale)
+        let (id, stale) = (
+            held.job_id.clone(),
+            held.result.as_ref().map(|_| Ack::Stale),
+        );
+        let ack = match judge(jobs, context.host, held)? {
+            Listed::Placed(job) => report(jobs, context, *job, held)?,
+            Listed::Stop(reason) => {
+                reported.stopped.insert(id, reason);
+                stale
+            }
+            Listed::Unknown => {
+                reported.unknown.insert(id, held.result.is_some());
+                stale
             }
         };
         reported.acks.extend(ack.map(|ack| JobResultAck {
@@ -297,19 +367,28 @@ fn commit_listing(
     Ok(reported)
 }
 
-/// The job `held` names, when the store holds a live allocation of it on `host` (and, when a
-/// result is listed, the allocation the result names): `None` for an id that is not a job id,
-/// a job the store does not know or has no allocation of, and one whose allocation is freed or
-/// on another host. Such a job is never revived and no allocation is made for it.
-fn placement_of(
-    jobs: &ServerJobs,
-    host: &HostId,
-    held: &HeldJob,
-) -> Result<Option<JobRecord>, JobStoreError> {
+/// What the store holds of the job `held` names, for `host` ([`Listed`]): placed when the
+/// store holds a live allocation of it on `host` (and, when a result is listed, the
+/// allocation the result names). Otherwise a stop when the store records a reason, in this
+/// order: the job ended ([`StopReason::Ended`]: lost and ended jobs are never revived); its
+/// client cancelled it ([`StopReason::Cancelled`]); an attempt of it on `host` ended, so the
+/// job was sent back to the queue or placed again and the host runs an old copy
+/// ([`StopReason::Replaced`]). Otherwise unknown. No allocation is made for the job in any
+/// case.
+///
+/// Only records the store holds stop a job: a store that is empty, older than the host's
+/// work or another farm's holds no end, cancel or attempt of a job it never placed, so its
+/// jobs read as unknown, never as stopped.
+fn judge(jobs: &ServerJobs, host: &HostId, held: &HeldJob) -> Result<Listed, JobStoreError> {
     let Ok(id) = JobId::parse(&held.job_id) else {
-        return Ok(None);
+        return Ok(Listed::Unknown);
     };
-    let (job, allocation) = (jobs.get_job(&id)?, jobs.get_allocation(&id)?);
+    // The allocation is read first: a job read after it is as new as the allocation or newer,
+    // so an allocation that moved on is explained by the job's end or its ended attempt here.
+    let allocation = jobs.get_allocation(&id)?;
+    let Some(job) = jobs.get_job(&id)? else {
+        return Ok(Listed::Unknown);
+    };
     let current = |allocation: &AllocationRecord| {
         let this = allocation.allocation_id.to_string();
         let named = held
@@ -318,7 +397,39 @@ fn placement_of(
             .is_none_or(|result| result.allocation_id == this);
         (allocation.host == *host) & (allocation.step != AllocationStep::Freed) & named
     };
-    Ok(job.filter(|_| allocation.as_ref().is_some_and(current)))
+    if allocation.as_ref().is_some_and(current) {
+        return Ok(Listed::Placed(Box::new(job)));
+    }
+    let reason = if job.state.is_ended() {
+        Some(StopReason::Ended)
+    } else if job.cancel_requested {
+        Some(StopReason::Cancelled)
+    } else if job.attempt.hosts().contains(host) {
+        Some(StopReason::Replaced)
+    } else {
+        None
+    };
+    Ok(reason.map_or(Listed::Unknown, Listed::Stop))
+}
+
+/// The listed jobs of `listed` the store holds no record of for `host` ([`Listed::Unknown`]),
+/// each with whether the host listed its result, read and never committed: what a reply to a
+/// beat the row did not apply names, and guards, as the beat that applied the listing did.
+///
+/// # Errors
+/// The first [`JobStoreError`] of a read.
+pub(crate) fn unknown_of(
+    jobs: &ServerJobs,
+    host: &HostId,
+    listed: &[HeldJob],
+) -> Result<BTreeMap<String, bool>, JobStoreError> {
+    let mut unknown = BTreeMap::new();
+    for held in listed {
+        if let Listed::Unknown = judge(jobs, host, held)? {
+            unknown.insert(held.job_id.clone(), held.result.is_some());
+        }
+    }
+    Ok(unknown)
 }
 
 /// Commits what the host reports of `job`, which it holds: a state moves the job forward, a
@@ -578,19 +689,22 @@ fn preparing(allocation: &AllocationRecord, job: &JobRecord) -> bool {
     matches!(allocation.booked, Booked::WholeHost) & (job.state == JobState::Placed)
 }
 
-/// The jobs a host is told to stop, in id order: every job of `live` (the host's live
-/// allocations) with a cancel intent that has not ended (a whole-host job that is still
-/// preparing excepted), every listed job whose attempt on the host is over ([`attempt_over`]:
-/// the job ended, or a retry ended the attempt and queued the next) without the host listing
-/// its result, and every id of `unknown` (listed jobs the store holds no live allocation of on this
-/// host). It is resent on every heartbeat until the host stops listing the job or answers
-/// with its retired id. This is the one stop rule: a cancel, a start timeout or a wall limit
-/// that the store records reaches the host through it.
+/// The jobs a host is told to stop, in id order, each with its reason: every job of `live`
+/// (the host's live allocations) with a cancel intent that has not ended (a whole-host job
+/// that is still preparing excepted: [`StopReason::Cancelled`]), every listed job whose
+/// attempt on the host is over ([`attempt_over`]) without the host listing its result
+/// ([`StopReason::Ended`] for a job that ended, [`StopReason::Replaced`] for one a retry sent
+/// back to the queue), and every job of `judged.stops` (listed jobs the host holds no live
+/// allocation for, judged by [`crate::orphans::judge`]). Under the guard
+/// (`judged.guarded`) the live allocations stop nothing: only `judged.stops`, which the guard
+/// left with an operator's stops alone. It is resent on every heartbeat until the host stops
+/// listing the job or answers with its retired id. This is the one stop rule: a cancel, a
+/// start timeout or a wall limit that the store records reaches the host through it.
 pub(crate) fn stops_for(
     live: &[(AllocationRecord, Option<JobRecord>)],
     listed: &[HeldJob],
-    unknown: &BTreeSet<String>,
-) -> BTreeSet<String> {
+    judged: &Judged,
+) -> BTreeMap<String, StopReason> {
     let listing: BTreeMap<&str, &HeldJob> = listed
         .iter()
         .map(|held| (held.job_id.as_str(), held))
@@ -598,16 +712,25 @@ pub(crate) fn stops_for(
     let jobs = live
         .iter()
         .filter_map(|(allocation, job)| job.as_ref().map(|job| (allocation, job)));
-    let stopped = jobs.filter(|(allocation, job)| {
+    let stopped = jobs.filter_map(|(allocation, job)| {
         let ended = job.state.is_ended();
         let unreported = listing
             .get(job.id.as_str())
             .is_some_and(|held| held.result.is_none());
         let cancelled = job.cancel_requested & !ended & !preparing(allocation, job);
-        cancelled | (attempt_over(job) & unreported)
+        let reason = match (cancelled, attempt_over(job) & unreported, ended) {
+            (true, _, _) => StopReason::Cancelled,
+            (false, true, true) => StopReason::Ended,
+            (false, true, false) => StopReason::Replaced,
+            (false, false, _) => return None,
+        };
+        Some((job.id.to_string(), reason))
     });
-    let mut stops: BTreeSet<String> = stopped.map(|(_, job)| job.id.to_string()).collect();
-    stops.extend(unknown.iter().cloned());
+    let mut stops: BTreeMap<String, StopReason> = match judged.guarded {
+        true => BTreeMap::new(),
+        false => stopped.collect(),
+    };
+    stops.extend(judged.stops.iter().map(|(job, why)| (job.clone(), *why)));
     stops
 }
 
@@ -668,3 +791,7 @@ pub(crate) fn exclusive_of(live: &[(AllocationRecord, Option<JobRecord>)]) -> Op
 #[cfg(test)]
 #[path = "per_job_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "per_job_unknown_tests.rs"]
+mod unknown_tests;

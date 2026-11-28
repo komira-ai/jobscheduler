@@ -251,6 +251,7 @@ fn a_restart_adopts_a_live_job_and_lists_it() {
         &mut life,
         Command::JobStop {
             job_id: "r1-hold".to_owned(),
+            reason: None,
         },
     );
     life.step();
@@ -454,6 +455,7 @@ fn a_job_with_no_record_is_removed_and_the_server_is_told_it_is_gone() {
         &mut life,
         Command::JobStop {
             job_id: "r6-hold".to_owned(),
+            reason: None,
         },
     );
     life.step();
@@ -790,18 +792,13 @@ fn a_runtime_with_an_egress_adopts_a_run_that_has_no_network() {
     assert_gone(&node, &id.0);
 }
 
-/// Proves a removal that cannot end the supervisor fails, naming it, and leaves the lease
-/// for another try: the sidecar names a process that a group kill does not reach (a child of
-/// the test, in the test's own group), so the forced end never completes within the wait;
-/// the removal is an error naming the process and the lease stays; once the process is gone
-/// the removal works. Catches a removal that waits for the supervisor without end.
-#[test]
-fn a_removal_that_cannot_end_the_supervisor_fails_and_can_be_tried_again() {
-    let node = Node::new("adopt-remove-stuck");
-    let mut first = node.open();
-    let id = held(&node, &mut first, "r1-hold");
-    end_supervisor(&node, &id.0);
-    let mut child = std::process::Command::new("sleep")
+/// Ends the supervisor of the lease `name` and makes its sidecar name, as its supervisor, a
+/// process a group kill does not reach: a new child of the test (`sleep`, in the test's own
+/// process group), which the caller ends. A removal then finds the supervisor still there
+/// after its kill, as it finds one a loaded host has not ended yet.
+pub(crate) fn name_an_unreachable_supervisor(node: &Node, name: &str) -> std::process::Child {
+    end_supervisor(node, name);
+    let child = std::process::Command::new("sleep")
         .arg("600")
         .spawn()
         .expect("a child");
@@ -811,12 +808,31 @@ fn a_removal_that_cannot_end_the_supervisor_fails_and_can_be_tried_again() {
         .and_then(|(_, after)| after.split_whitespace().nth(19))
         .and_then(|field| field.parse().ok())
         .expect("a start time");
-    edit(&node, &id.0, |json| {
+    edit(node, name, |json| {
         json["supervisor"] = json!({ "pid": child.id(), "start": start });
     });
+    child
+}
+
+/// Proves a removal that cannot end the supervisor fails, naming it, and leaves the lease
+/// for another try: the sidecar names a process that a group kill does not reach
+/// ([`name_an_unreachable_supervisor`]), and the force wait is given as zero, so the forced
+/// end has not completed when the wait is spent; the removal is an error naming the process
+/// and the lease stays; once the process is gone the removal works. Catches a removal that
+/// waits for the supervisor without end.
+#[test]
+fn a_removal_that_cannot_end_the_supervisor_fails_and_can_be_tried_again() {
+    let node = Node::new("adopt-remove-stuck");
+    let mut first = node.open();
+    let id = held(&node, &mut first, "r1-hold");
+    let mut child = name_an_unreachable_supervisor(&node, &id.0);
     drop(first);
 
-    let mut second = node.open_with(Node::hooks(Duration::ZERO, LONG), Arc::new(NoImages));
+    let hooks = Hooks {
+        force_wait: Duration::ZERO,
+        ..Node::hooks(Duration::ZERO, LONG)
+    };
+    let mut second = node.open_with(hooks, Arc::new(NoImages));
     assert_eq!(second.swept().adopted, ["r1-hold"], "{:?}", second.swept());
     let why = second.remove(&id).expect_err("not ended");
     let text = why.to_string();

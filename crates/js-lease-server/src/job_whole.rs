@@ -20,7 +20,12 @@
 //!    that is already starting or running; the host's listing decides it
 //!    ([`crate::job_loss::lose_unlisted`]).
 //! 3. **A ready report** naming the allocation, from an untainted host, moves the job to
-//!    starting.
+//!    starting. Untainted is judged twice: the registry of this server holds no taint for the
+//!    host ([`Beat::tainted`]), and no row does ([`js_jobs::JobStore::start_untainted`]: the
+//!    host's `taint/<host>` row and the taint its binding holds, read at the start and checked
+//!    in its commit), so a taint stored through another server since this one last read the
+//!    host's rows keeps the job from starting as this server's own does. A start the rows
+//!    refuse changes nothing and the allocation stays named, as for a tainted registry.
 //! 4. **A refusal** naming the allocation fails the prepare ([`fail_prepare`]) with the
 //!    agent's code.
 //! 5. Otherwise nothing changes and the allocation stays named.
@@ -156,9 +161,10 @@ pub(crate) fn serve(
             Step::Restart => {
                 jobs.restart_prepare(&job.id, deadline(rules, jobs.now()?))?;
             }
-            Step::Start => {
-                jobs.transition(&job.id, JobState::Placed, JobState::Starting)?;
-            }
+            Step::Start => match jobs.start_untainted(&job.id, beat.host) {
+                Ok(_) | Err(JobStoreError::HostTainted { .. }) => {}
+                Err(error) => return Err(error),
+            },
             Step::Fail(code) => {
                 let cause = PrepareCause::Refused(code);
                 let now = jobs.now()?;

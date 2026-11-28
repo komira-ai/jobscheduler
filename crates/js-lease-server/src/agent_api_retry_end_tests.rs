@@ -9,7 +9,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use js_agent_wire::{Ack, HeartbeatReply, HeldState, Outcome};
+use js_agent_wire::{Ack, HeartbeatReply, HeldState, Outcome, StopReason};
 use js_jobs::{AllocationStep, EndReason, JobId, JobSpec, JobState, StartFailure};
 use js_proto::v1;
 use js_registry::WholeNodeConfig;
@@ -17,10 +17,12 @@ use js_types::{HostId, RetryPolicy};
 use js_usage::EndedHistory;
 use serde_json::json;
 
-use super::job_rig::{BOOKED, FakeAgent, Rig, clocked_rig, placed, spec, starts, stops};
+use super::job_rig::{
+    BOOKED, FakeAgent, Rig, clocked_rig, placed, spec, starts, stop_reasons, stops,
+};
 use crate::job_api::read::view;
 use crate::job_expiry::JobLimits;
-use crate::job_loss::{Observe, Seen};
+use crate::job_loss::{Observe, RowRead, Seen};
 use crate::job_pass::{run, store_time};
 use crate::metrics::NoMetrics;
 
@@ -141,7 +143,7 @@ fn acks(reply: &HeartbeatReply) -> Vec<(String, Ack)> {
 struct Absent(&'static str);
 
 impl Observe for Absent {
-    fn observe(&self, host: &HostId) -> Result<Seen, String> {
+    fn observe(&self, host: &HostId, _: &RowRead) -> Result<Seen, String> {
         let seen = match host.as_str() == self.0 {
             true => Seen::Absent,
             false => Seen::Present,
@@ -667,7 +669,11 @@ async fn a_stop_for_an_earlier_attempt_never_retires_a_later_one() {
     b.take(&on_new);
 
     let on_old = rig.beat(&a).await.unwrap();
-    assert_eq!(stops(&on_old), [id.to_string()]);
+    // The fence is the store's record of the attempt on host-a that ended: the old copy is
+    // told why it stops.
+    let replaced = Some(StopReason::Replaced);
+    assert_eq!(stop_reasons(&on_old), [(id.to_string(), replaced)]);
+    assert!(on_old.unknown_jobs.is_empty(), "{on_old:?}");
     assert!(starts(&on_old).is_empty(), "{on_old:?}");
     a.take(&on_old);
     let late = rig.beat(&a).await.unwrap();

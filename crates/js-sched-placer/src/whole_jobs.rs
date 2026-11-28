@@ -21,19 +21,24 @@
 //! 4. Queues each queued whole-host job the engine does not queue yet, as a whole-machine
 //!    request held to the time the job was submitted, with the bars its row holds (its failed
 //!    prepares, and the hosts that refused its start as held) and the mark the table holds
-//!    for it. A mark is taken back only after its host said
-//!    hello to this server; one whose host has not said hello waits for it until `claim_by`
-//!    (the server's start plus `regain_grace`), its row standing meanwhile and the job not
-//!    queued; after `claim_by` the mark is deleted and the job is queued without it, to be
-//!    marked again. The deadline of a stored mark was raised at boot by the store
+//!    for it. A mark is taken back only once its host said hello ([`WholeJobs::hello`]: its
+//!    row is live, whichever server took the hello); one whose host has not waits for it until
+//!    the mark's stored [`MarkRecord::hello_by`], its row standing meanwhile and the job not
+//!    queued. A mark with no such time is given one, the store's time of the pass plus
+//!    `regain_grace` ([`WholeJobStep::WaitForHello`]), and waits; at or after it the mark is
+//!    deleted and the job is queued without it, to be marked again. Both are judged on the
+//!    store's clock ([`WholeJobs::store_now`]), so every server judges one wait alike and a
+//!    restart does not begin it again; a pass that could not read that clock leaves each
+//!    waiting mark as it is. The deadline of a stored mark was raised at boot by the store
 //!    ([`js_jobs::JobStore::raise_at_boot`]): the engine takes it as it is stored.
 //! 5. Runs one placement round of the queue, in the term of the whole-host grants
 //!    ([`super::whole::WHOLE_TERM`]).
 //! 6. Reads the round, for each job in queue order: a job granted a quiet host that may take
 //!    a job now is committed there; a job granted any other host keeps the grant; a job with a
 //!    mark has it written when it differs from the stored one (at millisecond precision, so an
-//!    unchanged mark is never rewritten); a job with no mark and a stored mark has the mark
-//!    deleted.
+//!    unchanged mark is never rewritten; a stored mark taken back that still holds a hello
+//!    wait differs, and is written without it); a job with no mark and a stored mark has the
+//!    mark deleted.
 //!
 //! A failed prepare of a job is decided by [`failed_prepare`] (the registry's table of causes
 //! and `max_replace`); the count and the bars it gives are written
@@ -79,9 +84,11 @@ pub struct WholeJobs<'a> {
     /// The pool's whole-node settings; `None`: the pool has none, and no whole-host job is
     /// placed.
     pub settings: Option<&'a WholeNodeConfig>,
-    /// Until when a mark the store held at this server's start waits for its host's hello:
-    /// the server's start plus `regain_grace_ms` (design section 6.7, step 3).
-    pub claim_by: FarmTime,
+    /// The store's time of the pass ([`js_jobs::JobStore::now`]), which a stored mark's
+    /// [`MarkRecord::hello_by`] is judged by and stamped from; `None` when it could not be
+    /// read, and then a mark that waits for its host's hello is neither given a time nor
+    /// dropped.
+    pub store_now: Option<StoreTime>,
 }
 
 /// What the pass writes for one whole-host job, in the order the engine decides them.
@@ -92,6 +99,16 @@ pub enum WholeJobStep {
     Mark(MarkRecord),
     /// Delete the job's mark ([`js_jobs::JobStore::delete_mark`]).
     Unmark(JobId),
+    /// Give the job's stored mark on `host`, whose host has not said hello, the time it waits
+    /// for that hello until ([`js_jobs::JobStore::wait_for_hello`]).
+    WaitForHello {
+        /// The job.
+        job: JobId,
+        /// The host of its stored mark.
+        host: HostId,
+        /// Until when the mark waits: the store's time of the pass plus `regain_grace`.
+        by: StoreTime,
+    },
     /// Commit the job placed on the host with the whole host booked
     /// ([`js_jobs::JobStore::place_with`]).
     Commit {
@@ -212,17 +229,49 @@ impl Engine {
             };
             let held = match stored.get(&job.id).copied() {
                 Some(mark) if input.hello.contains(&mark.host) => Some(mark),
-                Some(_) if now < input.claim_by => continue,
-                Some(_) => {
-                    steps.push(unmark(&job.id));
-                    None
-                }
+                Some(mark) => match self.hello_wait(mark, input.store_now) {
+                    Some(step) => {
+                        steps.extend(step);
+                        continue;
+                    }
+                    None => {
+                        steps.push(unmark(&job.id));
+                        None
+                    }
+                },
                 None => None,
             };
             let operation = self.submit_job((job, needs), held, now);
             self.whole_jobs.insert(job.id.clone(), operation);
         }
         steps
+    }
+
+    /// What a pass at `store_now` does with `mark`, stored for a job the engine does not queue,
+    /// whose host has not said hello (step 4 of the module documentation): `Some` while the
+    /// mark waits, with the write that gives it its wait when it has none yet; `None` once its
+    /// wait has ended, and the mark is deleted. With no reading of the store's clock the mark
+    /// waits and nothing is written.
+    fn hello_wait(
+        &self,
+        mark: &MarkRecord,
+        store_now: Option<StoreTime>,
+    ) -> Option<Option<WholeJobStep>> {
+        let Some(now) = store_now else {
+            return Some(None);
+        };
+        match mark.hello_by {
+            Some(by) => (now < by).then_some(None),
+            None => {
+                let grace = self.whole_settings.as_ref();
+                let grace = grace.map_or(0, |settings| settings.regain_grace_ms);
+                Some(Some(WholeJobStep::WaitForHello {
+                    job: mark.job.clone(),
+                    host: mark.host.clone(),
+                    by: now.saturating_add(Duration::from_millis(grace)),
+                }))
+            }
+        }
     }
 
     /// Queues `job`, a whole-host job that requires `needs` of its host, at the back of the
@@ -389,6 +438,7 @@ struct Reading<'a> {
     deadline: FarmTime,
     tail_end: Option<FarmTime>,
     bars: BTreeMap<WorkerId, Bar>,
+    hello_by: Option<FarmTime>,
 }
 
 /// `mark` as the pass compares it.
@@ -399,6 +449,7 @@ fn reading(mark: &MarkRecord) -> Reading<'_> {
         deadline: farm_of(mark.deadline),
         tail_end: mark.tail_end.map(farm_of),
         bars: bars_of_exclusions(&mark.exclusions),
+        hello_by: mark.hello_by.map(farm_of),
     }
 }
 

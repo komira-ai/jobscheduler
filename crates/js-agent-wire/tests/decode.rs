@@ -191,6 +191,7 @@ fn unknown_fields_ignored_everywhere() {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        unknown_jobs: Vec::new(),
         log_grant: None,
         beat_now: false,
     };

@@ -9,8 +9,8 @@
 //! digest, no shape, no labels, the phase `quarantined` (a phase text this build does not know
 //! reads so too, as on the wire: fail closed), no load, the first listing applied, the last
 //! listing clean, no beat applied, no container missed, no agent process (a hello from an agent
-//! that sent none), no agent version. The two listing flags are markers named so that their
-//! absence is that default (`FIRST_LISTING_PENDING`, `LISTING_UNCLEAN`).
+//! that sent none), no agent version, no orphan. The two listing flags are markers named so
+//! that their absence is that default (`FIRST_LISTING_PENDING`, `LISTING_UNCLEAN`).
 //!
 //! The agent version is written with the epoch of the hello that gave it, and read only while
 //! that is the row's epoch. A build that does not know the tag carries it, so a hello such a
@@ -27,10 +27,10 @@ use js_types::{Resources, Shape};
 
 use super::{
     DecodeError, Fields, Writer, host_of, job_id_of, map, no_repeats, pairs_of, text, text_map,
-    text_map_of, text_of, time, time_of, u64_of,
+    text_map_of, text_of, texts, texts_of, time, time_of, u64_of,
 };
 use crate::error::JobStoreError;
-use crate::node::{AppliedBeat, LoadReading, NodeRecord, NodeState, SessionDigest};
+use crate::node::{AppliedBeat, LoadReading, NodeRecord, NodeState, Orphan, SessionDigest};
 
 /// The tags of a host's row.
 pub(crate) mod node_tag {
@@ -63,6 +63,12 @@ pub(crate) mod node_tag {
     /// The agent version of the hello that began the row's epoch: that epoch (u64), then the
     /// version (text); absent for a hello that gave none.
     pub const AGENT_VERSION: u16 = 14;
+    /// The orphans of the host: each listed job id the store holds no record of, with when it
+    /// was first listed (map of text to time).
+    pub const ORPHANS: u16 = 15;
+    /// The orphans an operator asked the host to stop (list of text), each one of
+    /// [`ORPHANS`] (an id that is none is passed by); absent when there is none.
+    pub const ORPHANS_ENDING: u16 = 16;
     /// Present (empty) when the row holds the host's announced shape, in the six tags after.
     pub const CLAIM: u16 = 20;
     /// Present (empty) when the row holds the shape the pool books, in the six tags after.
@@ -216,6 +222,53 @@ fn missing_of(tag: u16, value: Vec<u8>) -> Result<BTreeMap<crate::ids::JobId, u3
         .collect()
 }
 
+/// The value of [`node_tag::ORPHANS`]: each orphan's job id and when it was first listed, in
+/// turn.
+fn orphans_value(orphans: &BTreeMap<String, Orphan>) -> Vec<u8> {
+    let seen: Vec<(&str, Vec<u8>)> = orphans
+        .iter()
+        .map(|(job, orphan)| (job.as_str(), time(orphan.first_seen)))
+        .collect();
+    map(seen.iter().map(|(job, at)| (job.as_bytes(), at.as_slice())))
+}
+
+/// The orphans of a row from the values of [`node_tag::ORPHANS`] and
+/// [`node_tag::ORPHANS_ENDING`], no job twice; an ending job that is no orphan is passed by,
+/// as data another build may write is.
+fn orphans_of(
+    seen: Option<Vec<u8>>,
+    ending: Option<Vec<String>>,
+) -> Result<BTreeMap<String, Orphan>, DecodeError> {
+    let pairs = pairs_of(t::ORPHANS, seen.as_deref().unwrap_or_default())?;
+    let count = pairs.len();
+    let mut by_job = BTreeMap::new();
+    for (job, at) in pairs {
+        let first_seen = time_of(t::ORPHANS, at.to_vec())?;
+        let orphan = Orphan {
+            first_seen,
+            end_asked: false,
+        };
+        by_job.insert(text_of(t::ORPHANS, job.to_vec())?, orphan);
+    }
+    let mut by_job = no_repeats(t::ORPHANS, count, by_job)?;
+    let ending = ending.unwrap_or_default();
+    for orphan in by_job.iter_mut().filter(|(job, _)| ending.contains(*job)) {
+        orphan.1.end_asked = true;
+    }
+    Ok(by_job)
+}
+
+/// The value of [`node_tag::ORPHANS_ENDING`]: the orphans an operator asked the host to stop,
+/// `None` when there is none.
+fn ending_value(orphans: &BTreeMap<String, Orphan>) -> Option<Vec<u8>> {
+    let ending: Vec<String> = orphans
+        .iter()
+        .filter(|(_, orphan)| orphan.end_asked)
+        .map(|(job, _)| job.clone())
+        .collect();
+    (!ending.is_empty()).then(|| texts(&ending))
+}
+
 /// The session digest a value holds.
 fn session_of(tag: u16, value: Vec<u8>) -> Result<SessionDigest, DecodeError> {
     let bytes: [u8; 32] = value
@@ -268,6 +321,10 @@ pub(crate) fn encode_node(node: &NodeRecord) -> Result<Vec<u8>, JobStoreError> {
         row.put_opt(t::BEAT_SEQ, beat.seq.map(|seq| seq.to_be_bytes().to_vec()));
     }
     row.put(t::MISSING, missing_value(&state.missing_in_a_row));
+    if !state.orphans.is_empty() {
+        row.put(t::ORPHANS, orphans_value(&state.orphans));
+    }
+    row.put_opt(t::ORPHANS_ENDING, ending_value(&state.orphans));
     row.put_opt(t::AGENT_PROCESS, node.agent_process.as_deref().map(text));
     row.put_opt(
         t::AGENT_VERSION,
@@ -311,6 +368,9 @@ pub(crate) fn decode_node(row: &[u8]) -> Result<NodeRecord, DecodeError> {
         None => None,
     };
     let missing_in_a_row = fields.opt(t::MISSING, missing_of)?.unwrap_or_default();
+    let seen = fields.opt(t::ORPHANS, |_, value| Ok(value))?;
+    let ending = fields.opt(t::ORPHANS_ENDING, texts_of)?;
+    let orphans = orphans_of(seen, ending)?;
     let agent_process = fields.opt(t::AGENT_PROCESS, text_of)?;
     // A version another epoch's hello gave is not that of the agent in this epoch's session.
     let agent_version = fields
@@ -335,6 +395,7 @@ pub(crate) fn decode_node(row: &[u8]) -> Result<NodeRecord, DecodeError> {
             first_listing_pending,
             last_listing_clean,
             missing_in_a_row,
+            orphans,
         },
         last_beat,
         heard_at,

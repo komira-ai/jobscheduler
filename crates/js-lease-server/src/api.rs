@@ -205,7 +205,7 @@ impl Shared {
     }
 }
 
-/// The router of the host listing, join, brake, usage and status routes: `/healthz` open,
+/// The router of the host listing, orphan, join, brake, usage and status routes: `/healthz` open,
 /// everything else behind the bearer token. With `with_agents` the agent routes are served too (one port
 /// for everything, as without `server.agent_listen`); without it they are served by
 /// [`agent_router`] on a port of their own and answer 404 here.
@@ -224,6 +224,7 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
     let app = open.merge(guarded);
     let agents = shared.agents.clone();
     let app = app.merge(join_api::router(shared.clone(), agents.clone()));
+    let app = app.merge(crate::orphan_api::router(shared.clone(), agents.clone()));
     let app = match with_agents {
         true => app.merge(agent_api::router(agents)),
         false => app,

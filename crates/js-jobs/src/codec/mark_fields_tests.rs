@@ -21,6 +21,7 @@ fn host(text: &str) -> HostId {
 fn full_mark() -> MarkRecord {
     MarkRecord {
         tail_end: Some(at(30)),
+        hello_by: Some(at(60)),
         exclusions: BTreeMap::from([
             (host("host-x"), Exclusion::Backoff(at(40))),
             (host("host-y"), Exclusion::Until(at(50))),
@@ -54,8 +55,8 @@ fn kind(byte: u8, rest: &[u8]) -> Vec<u8> {
 }
 
 // Catches a field written and not read back (or read into another), an exclusion read as
-// another kind or with another end, and `made` or the tail end dropped: a full mark and a
-// bare one read back as written.
+// another kind or with another end, and `made`, the tail end or the hello wait dropped: a full
+// mark and a bare one read back as written.
 #[test]
 fn a_mark_reads_back_as_written() {
     let full = full_mark();
@@ -70,8 +71,9 @@ fn a_mark_reads_back_as_written() {
 }
 
 // Catches a change of the bytes an earlier build reads: each field is pinned by tag and
-// value, the optional tail end is absent when unset, and the exclusions are written empty
-// when there are none.
+// value, the optional tail end and hello wait are absent when unset (so a mark that never
+// waited is the row an earlier build wrote), and the exclusions are written empty when there
+// are none.
 #[test]
 fn the_mark_layout_is_pinned() {
     let row = mark_row(&full_mark());
@@ -81,6 +83,8 @@ fn the_mark_layout_is_pinned() {
     assert_eq!(field_of(&row, t::MADE), Some(seconds(10)));
     assert_eq!(field_of(&row, t::DEADLINE), Some(seconds(20)));
     assert_eq!(field_of(&row, t::TAIL_END), Some(seconds(30)));
+    assert_eq!(t::HELLO_BY, 7);
+    assert_eq!(field_of(&row, t::HELLO_BY), Some(seconds(60)));
     assert_eq!(
         field_of(&row, t::EXCLUSIONS),
         Some(framed(&[
@@ -99,11 +103,13 @@ fn the_mark_layout_is_pinned() {
         at(2),
     ));
     assert_eq!(field_of(&bare, t::TAIL_END), None);
+    assert_eq!(field_of(&bare, t::HELLO_BY), None);
     assert_eq!(field_of(&bare, t::EXCLUSIONS), Some(Vec::new()));
 }
 
 // Catches a later build's field dropped on a rewrite, and a row an earlier build wrote
-// without the optional fields, in another field order, read as anything but the defaults.
+// without the optional fields (the hello wait among them), in another field order, read as
+// anything but the defaults.
 #[test]
 fn a_mark_row_is_additive() {
     let row = with(&mark_row(&full_mark()), 77, &[1, 2, 3]);
@@ -111,10 +117,14 @@ fn a_mark_row_is_additive() {
     assert_eq!(read.carried, Carried(BTreeMap::from([(77, vec![1, 2, 3])])));
     assert_eq!(mark_row(&read), row, "the rewrite is not the row it read");
 
-    let older =
-        rearranged(&mark_row(&full_mark()), &[t::TAIL_END, t::EXCLUSIONS]).expect("the row parses");
+    let older = rearranged(
+        &mark_row(&full_mark()),
+        &[t::TAIL_END, t::EXCLUSIONS, t::HELLO_BY],
+    )
+    .expect("the row parses");
     let defaults = MarkRecord {
         tail_end: None,
+        hello_by: None,
         exclusions: BTreeMap::new(),
         ..full_mark()
     };
@@ -171,5 +181,9 @@ fn every_malformed_mark_row_is_an_error() {
     assert_eq!(
         decode_mark(&with(&row, t::TAIL_END, &[0])),
         Err(DecodeError::BadLength { tag: t::TAIL_END })
+    );
+    assert_eq!(
+        decode_mark(&with(&row, t::HELLO_BY, &[0])),
+        Err(DecodeError::BadLength { tag: t::HELLO_BY })
     );
 }

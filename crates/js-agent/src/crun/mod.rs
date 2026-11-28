@@ -280,13 +280,10 @@ pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// single worker. The stop goes on to the lease cgroup's kill.
 pub const CALL_LIMIT: Duration = Duration::from_secs(120);
 
-/// How long a run is waited for after its cgroup was killed. A process in an
-/// uninterruptible sleep outlasts it; the stop then fails and is tried again.
+/// How long a run is waited for after its cgroup was killed, and how long a removal waits for a
+/// supervisor it then ended by force ([`Hooks::force_wait`]). A process in an uninterruptible
+/// sleep outlasts it; the stop or the removal then fails and is tried again.
 pub const KILL_WAIT: Duration = Duration::from_secs(60);
-
-/// The least a removal waits for a supervisor it ended by force: a process that was sent
-/// SIGKILL is a zombie a moment later, so a wait of none would fail a removal that works.
-const FORCE_FLOOR: Duration = Duration::from_millis(500);
 
 /// The directory of the image configs that the image source keeps and the runtime reads,
 /// for a runtime whose store is `scratch`.

@@ -159,6 +159,10 @@ pub trait PassMetrics {
     /// A queued job of a curve class waited past the wait bound with no host fitting its curve,
     /// and is tested with its flat number from now on; by default, nothing is told.
     fn curve_wait_expired(&self) {}
+    /// The queue status of a job the pass did not place was written, its own commit, because
+    /// the pass's notes changed it ([`js_jobs::JobStore::note_queue`]); by default, nothing is
+    /// told.
+    fn queue_status_written(&self) {}
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -664,8 +668,8 @@ impl SchedPlacer {
     /// long its job waited since its submit, and each write that did not commit, are told to
     /// `metrics`.
     ///
-    /// The marks of the whole-host jobs wait for their hosts to say hello until the server's
-    /// start plus the pool's `regain_grace` (design section 6.7, step 3). A job that needs the
+    /// A stored mark of a whole-host job waits for its host to say hello until the time the mark
+    /// stores, on the store's clock (design section 6.7, step 3). A job that needs the
     /// whole host is committed with the pool's `prepare_timeout` as its allocation's prepare
     /// deadline.
     ///
@@ -713,7 +717,6 @@ impl SchedPlacer {
         self.learn_freed(jobs, live);
         let now = self.now();
         let ready = placeable(queued, live, hosts.open, now);
-        let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
         // The whole-host engine marks and commits only contained jobs: it does not yet hold a
         // job to the hosts that run host jobs or report `layered-rootfs`, so a whole-host job
@@ -735,7 +738,7 @@ impl SchedPlacer {
             open: &open,
             tainted: hosts.tainted,
             settings: hosts.whole,
-            claim_by: self.boot().saturating_add(Duration::from_millis(grace)),
+            store_now: jobs.now().ok(),
         };
         let steps = {
             let mut engine = self.engine();
@@ -764,7 +767,7 @@ impl SchedPlacer {
                     drop(emptying.insert(mark.job.clone(), mark.host.clone()))
                 }
                 WholeJobStep::Unmark(job) => drop(emptying.remove(job)),
-                WholeJobStep::Commit { .. } => {}
+                WholeJobStep::Commit { .. } | WholeJobStep::WaitForHello { .. } => {}
             }
             let sinks = (starts, metrics);
             match self.write_step(jobs, (&step, hosts), sinks, &mut noted) {
@@ -813,11 +816,17 @@ impl SchedPlacer {
             if !job.queue.changed_by(&notes) {
                 continue;
             }
-            if let Err(error) = jobs.note_queue(&job.id, &notes) {
-                warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
-                noted.unwritten(&job.id);
-                self.restore_outcomes(noted.outcomes.remove_entry(&job.id).into_iter().collect());
-                failed_write(metrics);
+            match jobs.note_queue(&job.id, &notes) {
+                // `None`: the job was no longer queued, or the row read changed nothing.
+                Ok(written) => written.iter().for_each(|_| metrics.queue_status_written()),
+                Err(error) => {
+                    warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
+                    noted.unwritten(&job.id);
+                    self.restore_outcomes(
+                        noted.outcomes.remove_entry(&job.id).into_iter().collect(),
+                    );
+                    failed_write(metrics);
+                }
             }
         }
         placed
@@ -835,13 +844,10 @@ impl SchedPlacer {
     ) -> Result<Option<JobId>, JobStoreError> {
         let settings = hosts.whole;
         match step {
-            WholeJobStep::Mark(mark) => {
-                jobs.put_mark(mark.clone())?;
-                Ok(None)
-            }
-            WholeJobStep::Unmark(job) => {
-                jobs.delete_mark(job)?;
-                Ok(None)
+            WholeJobStep::Mark(mark) => jobs.put_mark(mark.clone()).map(|_| None),
+            WholeJobStep::Unmark(job) => jobs.delete_mark(job).map(|_| None),
+            WholeJobStep::WaitForHello { job, host, by } => {
+                jobs.wait_for_hello(job, host, *by).map(|_| None)
             }
             WholeJobStep::Commit { job, host } => {
                 let prepare_timeout =

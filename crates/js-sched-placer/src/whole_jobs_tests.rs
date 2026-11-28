@@ -15,7 +15,7 @@ use js_types::sched::{LeaseKind, WorkKey};
 use super::{PrepareCause, WholeJobStep, WholeJobs, failed_prepare};
 use crate::engine::Engine;
 use crate::engine::rig::{
-    Tables, at, beat, engine, host, hosts, mark, run, run_with, settings, store,
+    Tables, at, beat, engine, host, hosts, mark, run, run_with, settings, store, waiting,
 };
 use crate::engine::whole::WHOLE_TERM;
 use crate::map;
@@ -36,7 +36,7 @@ fn pass(
         open: &both,
         tainted: &BTreeSet::new(),
         settings,
-        claim_by: at(15_000),
+        store_now: Some(store(now_ms)),
     };
     e.whole_jobs(&input, at(now_ms))
 }
@@ -244,14 +244,15 @@ fn a_stored_mark_whose_host_said_hello_is_restored_as_it_is_stored() {
     assert_eq!(kept.tail_end, Some(at(90_000)));
 }
 
-/// Catches: a stored mark dropped before `claim_by` while its host may still say hello (a
-/// restart would lose every mark of an agent that is a few seconds late), a mark kept past
-/// it (a host that never comes back would hold the job's place for ever), and a job whose
-/// mark is dropped that is not marked again. With no hello, nothing is decided for `j` at
-/// 14 s and its stored mark stands; at 15 s the mark is deleted and the job, queued
-/// without it, is marked afresh.
+/// Catches: a stored mark given no wait (a restart or another server would begin it again), one
+/// given a wait by another clock or grace than the store's time plus `regain_grace`, a mark
+/// dropped before its stored wait ends while its host may still say hello, one kept past it (a
+/// host that never comes back would hold the job's place for ever), and a job whose mark is
+/// dropped that is not marked again. With no hello, `j`'s stored mark with no wait is given one
+/// at 4 s, until 19 s, and the job is not queued; with that wait stored, nothing is decided at
+/// 18.999 s; at 19 s the mark is deleted and the job, queued without it, is marked afresh.
 #[test]
-fn a_stored_mark_whose_host_never_says_hello_is_dropped_at_claim_by() {
+fn a_stored_mark_whose_host_never_says_hello_waits_until_its_stored_time() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);
@@ -259,16 +260,77 @@ fn a_stored_mark_whose_host_never_says_hello_is_dropped_at_claim_by() {
     let stored = [mark(&j, "a", (5_000, 65_000), None)];
     let none = hosts(&[]);
     let open = hosts(&["a", "b"]);
-    let early = run_with(&mut e, (&queue, &stored), (&none, &open), 14_000);
+    let first = run_with(&mut e, (&queue, &stored), (&none, &open), 4_000);
+    let wait = WholeJobStep::WaitForHello {
+        job: j.id.clone(),
+        host: host("a"),
+        by: store(19_000),
+    };
+    assert_eq!(first, [wait]);
+    assert!(e.whole_jobs.is_empty());
+    let stored = [waiting(stored[0].clone(), 19_000)];
+    let early = run_with(&mut e, (&queue, &stored), (&none, &open), 18_999);
     assert!(early.is_empty());
     assert!(e.whole_jobs.is_empty());
-    let steps = run_with(&mut e, (&queue, &stored), (&none, &open), 15_000);
+    let steps = run_with(&mut e, (&queue, &stored), (&none, &open), 19_000);
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0], unmark(&j));
     let again = written(&steps[1]);
     assert_eq!(again.host, host("a"));
-    assert_eq!(again.made, store(15_000));
+    assert_eq!(again.made, store(19_000));
+    assert_eq!(again.hello_by, None);
     assert_eq!(e.whole_jobs.len(), 1);
+}
+
+/// Catches: a mark that waits for its host's hello given a wait or dropped by a pass that could
+/// not read the store's clock (it would judge the wait by no clock at all). With no reading, a
+/// stored mark with no wait and one whose wait ended long ago both stand, nothing is written,
+/// and neither job is queued.
+#[test]
+fn a_waiting_mark_stands_when_the_store_clock_cannot_be_read() {
+    let tables = Tables::new();
+    let (j, k) = (tables.whole("j"), tables.whole("k"));
+    let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+    let queue = [j.clone(), k.clone()];
+    let stored = [
+        mark(&j, "a", (5_000, 65_000), None),
+        waiting(mark(&k, "b", (5_000, 65_000), None), 6_000),
+    ];
+    let (none, open) = (hosts(&[]), hosts(&["a", "b"]));
+    let whole = settings();
+    let input = WholeJobs {
+        queued: &queue,
+        marks: &stored,
+        hello: &none,
+        open: &open,
+        tainted: &BTreeSet::new(),
+        settings: Some(&whole),
+        store_now: None,
+    };
+    beat(&mut e, &["a", "b"], 100_000);
+    assert!(e.whole_jobs(&input, at(100_000)).is_empty());
+    assert!(e.whole_jobs.is_empty());
+}
+
+/// Catches: a stored mark taken back after its host said hello that keeps the wait it was given
+/// while the host was silent (a later silence would then drop the mark at once, with no grace),
+/// and one whose other fields move on the way back. `j`'s mark on `a`, waiting until 19 s, is
+/// taken back at 12 s once `a` said hello: the job is queued with it, and the mark is written
+/// again as stored but for the wait.
+#[test]
+fn a_mark_taken_back_after_its_hello_is_written_without_its_wait() {
+    let tables = Tables::new();
+    let j = tables.whole("j");
+    let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+    let queue = [j.clone()];
+    let held = mark(&j, "a", (5_000, 65_000), Some(90_000));
+    let stored = [waiting(held.clone(), 19_000)];
+    let steps = run(&mut e, (&queue, &stored), 12_000);
+    assert_eq!(steps.len(), 1);
+    assert_eq!(*written(&steps[0]), held);
+    let kept = e.sched.whole_mark(e.whole_jobs[&j.id]).unwrap();
+    assert_eq!((kept.made, kept.deadline), (at(5_000), at(65_000)));
+    assert!(run(&mut e, (&queue, &[held]), 13_000).is_empty());
 }
 
 /// Catches: a stored mark on a host the engine cannot hold left standing under a job that

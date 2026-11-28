@@ -120,9 +120,9 @@ fn live(tables: &Tables, id: &str, class: &str) {
         .unwrap();
 }
 
-/// Reads `teaching` through: every page, and the number of pages.
-fn read_through(teaching: &mut Teaching, tables: &Tables) -> usize {
-    while teaching.read_page(&tables.jobs).unwrap() {}
+/// Reads `teaching` of `placer` through: every page, and the number of pages.
+fn read_through(teaching: &mut Teaching, placer: &SchedPlacer, tables: &Tables) -> usize {
+    while teaching.read_page(placer, &tables.jobs).unwrap() {}
     teaching.pages()
 }
 
@@ -166,10 +166,10 @@ fn farm(first: bool) -> (String, Vec<(u64, u64)>, usize) {
     assert_eq!(pass(&placer, &tables).len(), 1, "frees live and next");
     finish_at(&tables, "late", 7 * GIB);
     let pages = teaching.as_mut().map_or(0, |teaching| {
-        let pages = read_through(teaching, &tables);
-        assert_eq!(teaching.read_page(&tables.jobs), Ok(false));
+        let pages = read_through(teaching, &placer, &tables);
+        assert_eq!(teaching.read_page(&placer, &tables.jobs), Ok(false));
         tables.store.take_reads();
-        assert_eq!(teaching.read_page(&tables.jobs), Ok(false));
+        assert_eq!(teaching.read_page(&placer, &tables.jobs), Ok(false));
         assert_eq!(
             tables.store.take_reads(),
             Vec::new(),
@@ -302,7 +302,7 @@ fn a_job_placed_while_a_teaching_is_read_books_from_the_runs_freed_since_it_bega
         placer.engine().sizes().sized_from(&job, day)
     });
     assert_eq!(from, [Some(SizedFrom::Class), Some(SizedFrom::Fallback)]);
-    read_through(&mut teaching, &tables);
+    read_through(&mut teaching, &placer, &tables);
     assert_eq!(placer.teach(teaching), 4);
     let first = JobId::parse("first").unwrap();
     let first = tables.jobs.get_job(&first).unwrap().unwrap();
@@ -365,7 +365,7 @@ fn a_teaching_whose_read_fails_teaches_the_held_runs_alone() {
     finish_at(&tables, "next", 6 * GIB);
     pass(&placer, &tables);
     tables.store.fail_read_after(1);
-    assert!(teaching.read_page(&tables.jobs).is_err());
+    assert!(teaching.read_page(&placer, &tables.jobs).is_err());
     assert_eq!(teaching.pages(), 0);
     assert_eq!(placer.teach(teaching), 0);
     submit(&tables, "after", "build");
@@ -382,7 +382,7 @@ fn a_teaching_whose_read_fails_teaches_the_held_runs_alone() {
 }
 
 /// Asserts that a job a pass named freed while the teaching was begun, whose run the pass had
-/// not yet handed over when the teaching was taught (the pass reads the job between the two,
+/// not yet handed over when its page was read (the pass reads the job between the two,
 /// outside the engine's lock), is taught once: by the pass, after the ended jobs, as a server
 /// that taught first teaches it; the read, which found it freed, leaves it out. Catches the run
 /// taught by the read and again by the pass.
@@ -402,7 +402,7 @@ fn a_job_named_freed_as_the_teaching_is_taught_is_taught_once() {
         let named = placer.engine().sizes().freed(&[]);
         assert_eq!(named, vec![(live.clone(), booked(2000, 4 * GIB))]);
         if let Some(teaching) = pages {
-            assert_eq!(read_through(teaching, &tables), 1);
+            assert_eq!(read_through(teaching, placer, &tables), 1);
         }
     }
     assert_eq!(placer.teach(teaching), 8);
@@ -425,9 +425,9 @@ fn a_read_that_fails_after_a_page_teaches_none_of_that_page() {
     let _ = history(&tables, 1000);
     let teacher = placer();
     let mut teaching = teacher.begin_teaching(&tables.jobs, 0).unwrap();
-    assert_eq!(teaching.read_page(&tables.jobs), Ok(true));
+    assert_eq!(teaching.read_page(&teacher, &tables.jobs), Ok(true));
     tables.store.fail_read_after(0);
-    assert!(teaching.read_page(&tables.jobs).is_err());
+    assert!(teaching.read_page(&teacher, &tables.jobs).is_err());
     assert_eq!(teaching.pages(), 1);
     assert_eq!(teacher.teach(teaching), 0);
     let untaught = placer();
@@ -482,7 +482,7 @@ fn a_pass_before_the_ended_jobs_are_read_books_a_class_from_its_newest_runs() {
     let learned = booked(3000, 11 * 256 * MIB);
     assert_eq!(allocation(&tables, "next"), learned, "its class's runs");
     assert_eq!(allocation(&tables, "other"), learned, "its client's runs");
-    read_through(&mut teaching, &tables);
+    read_through(&mut teaching, &placer, &tables);
     assert_eq!(placer.teach(teaching), 4);
     let reference = super::super::tests::placer();
     let bounds = placer.engine().sizes().bounds;
@@ -540,4 +540,49 @@ fn a_begin_whose_read_of_the_newest_runs_fails_begins_with_none_of_them() {
     submit(&tables, "next", "build");
     pass(&placer, &tables);
     assert_eq!(allocation(&tables, "next"), booked(2000, 4 * GIB), "cold");
+}
+
+/// Asserts that a teaching keeps none of the ended jobs it read: over 2,500 freed jobs (three
+/// pages), what it holds after its second page (every field, as its `Debug` shows it) is as long
+/// as what it held after its first, and it is read through in three pages. Catches a
+/// teaching that keeps each page's jobs until it is taught, which held a farm's seven days of
+/// ended jobs, about 6.9 GiB, until its last page.
+#[test]
+fn a_teaching_holds_none_of_the_pages_it_read() {
+    let tables = Tables::new();
+    cancelled(&tables, 2500);
+    let placer = placer();
+    let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
+    let mut held = Vec::new();
+    while teaching.read_page(&placer, &tables.jobs).unwrap() {
+        held.push(format!("{teaching:?}"));
+    }
+    assert_eq!((teaching.pages(), held.len()), (3, 2));
+    assert_eq!(held[1].len(), held[0].len(), "{held:?}");
+    assert_eq!(placer.teach(teaching), 0);
+}
+
+/// Asserts that the ended jobs a page taught size no job until the teaching is taught: after the
+/// first of two pages, which holds the four 2 GiB runs of `build`, a job of `build` still books
+/// its cold size (the begin taught the interim history nothing), and once the teaching is read
+/// through and taught the next books from those runs (three cores and 2.75 GiB). Catches a page
+/// taught to the history the passes size from, which a read that stops or fails half way would
+/// leave taught in part.
+#[test]
+fn the_pages_read_size_no_job_until_the_teaching_is_taught() {
+    let tables = Tables::new();
+    let build = || exited(0, 2 * GIB, Duration::from_secs(30));
+    runs(&tables, "build", 4, "build", booked(2000, 4 * GIB), build);
+    cancelled(&tables, 1000);
+    let placer = placer();
+    let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
+    assert_eq!(teaching.read_page(&placer, &tables.jobs), Ok(true));
+    submit(&tables, "during", "build");
+    assert_eq!(pass(&placer, &tables).len(), 1);
+    assert_eq!(allocation(&tables, "during"), booked(2000, 4 * GIB), "cold");
+    assert_eq!(read_through(&mut teaching, &placer, &tables), 2);
+    assert_eq!(placer.teach(teaching), 4);
+    submit(&tables, "after", "build");
+    assert_eq!(pass(&placer, &tables).len(), 1);
+    assert_eq!(allocation(&tables, "after"), booked(3000, 11 * 256 * MIB));
 }

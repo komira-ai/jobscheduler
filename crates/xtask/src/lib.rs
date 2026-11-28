@@ -70,7 +70,9 @@
 //!   compared with the tree, every byte.
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
-//!   merged by the toolchain's llvm-profdata from a list file.
+//!   merged by the toolchain's llvm-profdata from a list file; a raw profile cut short is
+//!   left out by name and counted, and a merge llvm-profdata refuses names each profile it
+//!   refuses alone.
 //! - `coverage-shard --plan <file> --shard <k> --of <n> -- <program> <args>...`
 //!   ([`coverage_shard`]): one coverage shard of `ci.yml`: the program run once for the named
 //!   long tests the plan (`.config/coverage-shards.toml`) gives shard `k`, and once for each

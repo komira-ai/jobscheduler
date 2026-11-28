@@ -115,6 +115,10 @@ message Host {
   string taint_reason = 11;
   // The version of the host's agent. Empty: no agent reported one.
   string agent_version = 12;
+  // How many jobs the host runs that the job service holds no record of (its orphans): while
+  // it lists one, the host takes no new job. The jobs keep running; an operator lists them
+  // with GET /v1/hosts/{host}/orphans. 0: none.
+  uint32 orphans = 13;
 }
 
 // Whether a pool or a machine provider can serve.

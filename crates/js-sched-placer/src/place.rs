@@ -16,9 +16,9 @@
 //! the job tables hold, with the server's start ([`SchedPlacer::boot`]) deciding how long a
 //! stored mark waits for its host to say hello.
 //!
-//! A host the registry removes is told to the engine and also recorded for the job pass of
-//! the tick, which reads it absent and settles the job allocations left on it
-//! ([`SchedPlacer::gone`]); a host the engine holds a job allocation on is never forgotten for
+//! A host the registry removes is told to the engine; the job allocations left on it are
+//! settled by the job pass from the store's rows, not from anything the placer records (design
+//! `multi-instance.md`, G6). A host the engine holds a job allocation on is never forgotten for
 //! silence ([`Placer::holds_work_on`]).
 //!
 //! Locks: the registry tells the placer of its hosts under its own lock, and a pass over the
@@ -29,9 +29,9 @@
 //! first thing when it is next taken ([`SchedPlacer::engine`]). The registry's lock, which the
 //! job service's read calls and the agents' heartbeats take on the server's async workers,
 //! is so never held while a pass decides. The placer never calls the registry, and a pass
-//! takes its own lock, then the engine's, and reads the registry before either. The record
-//! of removed hosts has a lock of its own, a leaf, and so have the calls kept for the engine
-//! and the record of what pass 2 told of the queued jobs.
+//! takes its own lock, then the engine's, and reads the registry before either. The calls kept
+//! for the engine and the record of what pass 2 told of the queued jobs have locks of their
+//! own, leaves.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,9 +57,6 @@ use super::telemetry::Telemetry;
 /// queued jobs, and follows the registry's hosts.
 pub struct SchedPlacer {
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
-    /// The placer's clock when it was made: the server's start, which the marks of the
-    /// whole-host jobs the store held then wait from for their hosts' hellos.
-    boot: FarmTime,
     engine: Mutex<Engine>,
     /// The registry's calls that found the engine held by a pass, in the order the registry
     /// made them, until the engine is next taken ([`SchedPlacer::engine`]). Its lock is a
@@ -68,12 +65,6 @@ pub struct SchedPlacer {
     /// Held for each pass over the queued jobs, so two passes never decide at once
     /// ([`super::engine::jobs`]); taken before the engine's lock, never under it.
     passes: Mutex<()>,
-    /// The hosts the registry removed (given back after the provider read them gone), each
-    /// with the number of its removal, until the job pass has settled the job allocations
-    /// left on them ([`SchedPlacer::gone`]). Its lock is a leaf.
-    gone: Mutex<BTreeMap<HostId, u64>>,
-    /// How many removals were recorded.
-    removals: AtomicU64,
     /// What pass 2 told of each job since the last pass over the queued jobs, in the order it
     /// came ([`SchedPlacer::note_outcomes`]); the pass takes them all. Its lock is a leaf.
     pub(crate) outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
@@ -106,9 +97,6 @@ impl SchedPlacer {
             kept: Mutex::default(),
             passes: Mutex::new(()),
             clock,
-            boot: now,
-            gone: Mutex::default(),
-            removals: AtomicU64::new(0),
             outcomes: Mutex::default(),
             changes: AtomicU64::new(0),
             seen: Mutex::default(),
@@ -298,8 +286,7 @@ impl SchedPlacer {
     /// `host`, booked as `shape`, is one a pass may offer jobs although its hello may have been
     /// taken by another server (its `node/` row is live): the engine is told of it as at a
     /// hello ([`Placer::host_up`]) when it does not know the host booked as `shape`, and the
-    /// change is counted then only ([`SchedPlacer::engine_changes`]). Unlike a hello, it leaves
-    /// a removal the job pass has not settled ([`SchedPlacer::gone`]) as it is.
+    /// change is counted then only ([`SchedPlacer::engine_changes`]).
     pub fn host_seen(&self, host: &HostId, shape: &Shape) {
         let now = self.now();
         self.changing(|engine| {
@@ -323,25 +310,9 @@ impl SchedPlacer {
         self.passes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The farm time of the placer's clock when the placer was made: the server's start.
-    pub fn boot(&self) -> FarmTime {
-        self.boot
-    }
-
     /// The farm time of the placer's clock now.
     pub fn now(&self) -> FarmTime {
         farm_time(&*self.clock)
-    }
-
-    fn removed(&self) -> MutexGuard<'_, BTreeMap<HostId, u64>> {
-        self.gone.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// The hosts the registry removed that the job pass has not settled yet, each with the
-    /// number of its removal: the provider reads each of them absent (design section 6.3).
-    /// A host that says hello again is taken off at its hello.
-    pub fn gone(&self) -> BTreeMap<HostId, u64> {
-        self.removed().clone()
     }
 
     /// Notes `outcomes`, what pass 2 reached for jobs (a refused acquire, a launch), for the
@@ -369,13 +340,6 @@ impl SchedPlacer {
     /// Takes what pass 2 told since the last pass ([`SchedPlacer::note_outcomes`]).
     pub(super) fn take_outcomes(&self) -> BTreeMap<JobId, Vec<Outcome>> {
         std::mem::take(&mut *self.outcomes.lock().unwrap_or_else(PoisonError::into_inner))
-    }
-
-    /// Takes off each of `settled`, removals the job pass has settled (every job allocation on
-    /// the host freed), unless the host was removed again since.
-    pub fn settle_gone(&self, settled: &BTreeMap<HostId, u64>) {
-        self.removed()
-            .retain(|host, removal| settled.get(host) != Some(&*removal));
     }
 
     /// What the engine charges `host` by its load, for a test that reads it: `None` for a
@@ -438,7 +402,6 @@ impl Tell {
 /// ([`SchedPlacer::tell`]).
 impl Placer for SchedPlacer {
     fn host_up(&self, host: &HostId, shape: &Shape) {
-        self.removed().remove(host);
         self.tell(Tell::Up(host.clone(), shape.clone(), self.now()));
     }
 
@@ -446,12 +409,10 @@ impl Placer for SchedPlacer {
         self.tell(Tell::Heard(host.clone(), load.cloned(), self.now()));
     }
 
-    /// Recorded for the job pass ([`SchedPlacer::gone`]) as well as told to the engine: a
-    /// removed host's job allocations are freed only by the pass, never here.
+    /// Told to the engine only: a removed host's job allocations are freed by the job pass,
+    /// from the store's rows, never here.
     fn host_gone(&self, host: &HostId) {
         self.tell(Tell::Gone(host.clone()));
-        let removal = self.removals.fetch_add(1, Ordering::Relaxed);
-        self.removed().insert(host.clone(), removal);
     }
 
     /// A host the engine holds a job allocation on is not forgotten for silence: only its

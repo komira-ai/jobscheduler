@@ -103,3 +103,29 @@ fn read_request(stream: &mut TcpStream) -> (String, String) {
     reader.read_exact(&mut body).unwrap();
     (head, String::from_utf8(body).unwrap())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that `serve`, with `stop` set (as a receiver's drop sets it), returns at the
+    /// first connection it accepts and records nothing of it. `serve` runs on the test's
+    /// thread, so it has taken the stop when the assertion runs; a receiver's own thread takes
+    /// it only after its drop, which nothing waits for. The connection sends a whole request,
+    /// and the listener does not wait once that connection is taken: a `serve` that went on
+    /// would record the request and then fail at its next accept. Catches a thread that keeps
+    /// serving after its receiver was dropped.
+    #[test]
+    fn serve_returns_at_the_first_connection_once_stopped() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds loopback");
+        let addr = listener.local_addr().expect("an address");
+        let mut waiting = TcpStream::connect(addr).expect("connects");
+        waiting
+            .write_all(b"POST / HTTP/1.1\r\ncontent-length: 0\r\n\r\n")
+            .expect("sends");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let seen = Mutex::new(Vec::new());
+        serve(&listener, "", &seen, &AtomicBool::new(true));
+        assert_eq!(seen.lock().expect("lock").len(), 0);
+    }
+}

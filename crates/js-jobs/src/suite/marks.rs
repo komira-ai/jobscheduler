@@ -655,6 +655,108 @@ where
     assert_eq!(state_of(&rig.jobs, &id), Some(JobState::Queued));
 }
 
+/// A mark's hello wait ([`crate::JobStore::wait_for_hello`]) is written once and never moved
+/// later: the first call writes it with the mark's other fields and a later build's field as
+/// they were; a second, with a later time, by another writer, writes nothing; a call naming
+/// another host, or a job with no mark, writes nothing; a mark another writer changed between
+/// the read and the commit is stale and keeps no wait; and a rewrite of the mark without the
+/// wait (a pass took the mark back) clears it. Catches a wait that a second server or a restart
+/// moves later, one written over another host's mark, and one that outlives its hello.
+pub fn a_marks_hello_wait_is_written_once<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "a_marks_hello_wait_is_written_once";
+    let rig = rig(backend);
+    let (id, mark) = marked(&rig, "hw-1");
+    let key = keys::mark(&id);
+    let row = rig.raw(&key).expect("written").value;
+    rig.put_raw(&key, set_field(&row, LATER_TAG, &[7, 7]).expect("parses"));
+    let read = rig.jobs.get_mark(&id).expect("reads").expect("a mark");
+    let (a, by) = (host("host-a"), after(now(&rig), 15));
+    assert_eq!(
+        rig.jobs.wait_for_hello(&id, &a, by),
+        Ok(true),
+        "{name}: the first wait was not written"
+    );
+    let waiting = rig.jobs.get_mark(&id).expect("reads").expect("a mark");
+    assert_eq!(
+        waiting.hello_by,
+        Some(by),
+        "{name}: the wait is not the one given"
+    );
+    assert_eq!(
+        MarkRecord {
+            hello_by: None,
+            ..waiting.clone()
+        },
+        read,
+        "{name}: more than the wait changed"
+    );
+    assert_eq!(mark.hello_by, None, "{name}: a new mark waits");
+    let later = || field_of(&rig.raw(&key).expect("written").value, LATER_TAG);
+    assert_eq!(
+        later(),
+        Some(vec![7, 7]),
+        "{name}: a later build's field was lost"
+    );
+
+    let unmarked = rig.queue_spec("hw-2", whole_host_spec());
+    let other = rig.other();
+    let before = rig.snapshot();
+    assert_eq!(
+        other.wait_for_hello(&id, &a, after(by, 10)),
+        Ok(false),
+        "{name}: another writer moved the wait"
+    );
+    assert_eq!(
+        rig.jobs.wait_for_hello(&id, &host("host-b"), by),
+        Ok(false),
+        "{name}: a wait was written over another host's mark"
+    );
+    assert_eq!(
+        rig.jobs.wait_for_hello(&unmarked, &a, by),
+        Ok(false),
+        "{name}: a wait was written for a job with no mark"
+    );
+    assert_eq!(
+        rig.snapshot(),
+        before,
+        "{name}: a wait that changes nothing wrote"
+    );
+    assert_eq!(
+        rig.raw(&keys::mark(&unmarked)),
+        None,
+        "{name}: a mark was made"
+    );
+
+    let (raced, _) = marked(&rig, "hw-3");
+    rig.store.before_next(rewrite(&rig, &keys::mark(&raced)));
+    assert_eq!(
+        rig.jobs.wait_for_hello(&raced, &a, by),
+        Err(JobStoreError::Stale { id: raced.clone() }),
+        "{name}: a wait over a changed mark was not stale"
+    );
+    let kept = rig.jobs.get_mark(&raced).expect("reads").expect("a mark");
+    assert_eq!(kept.hello_by, None, "{name}: a stale wait was written");
+
+    let taken_back = MarkRecord {
+        hello_by: None,
+        ..waiting
+    };
+    rig.jobs.put_mark(taken_back).expect("rewrites");
+    let cleared = rig.jobs.get_mark(&id).expect("reads").expect("a mark");
+    assert_eq!(
+        cleared.hello_by, None,
+        "{name}: a mark taken back kept its wait"
+    );
+    assert_eq!(
+        later(),
+        Some(vec![7, 7]),
+        "{name}: the rewrite lost a later build's field"
+    );
+}
+
 /// A mark whose job ended, or whose row another mark took, between its reads and its commit
 /// is stale and writes nothing: no mark is left on a job that has ended.
 pub fn a_mark_that_loses_to_an_end_or_another_mark_is_stale<B: Backend>(backend: &B)

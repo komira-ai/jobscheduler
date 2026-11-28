@@ -1,17 +1,19 @@
 //! A placement that writes its prepare deadline and wall limit and drops the job's mark
 //! ([`crate::JobStore::place_with`]), and the cancel of a queued job, which drops its mark
 //! ([`crate::JobStore::request_cancel`]): each is one commit, writes nothing when its commit
-//! fails, and is stale when a row it read changed. The helpers the checks of `prepare` share are
-//! here too.
+//! fails, and is stale when a row it read changed; and the start of a placed whole-host job,
+//! refused on a host a row holds tainted ([`crate::JobStore::start_untainted`]). The helpers the
+//! checks of `prepare` share are here too.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::conformance::Backend;
-use js_state::{Store, StoreError, StoreTime};
+use js_state::{Cond, Store, StoreError, StoreTime, Txn};
 
 use super::marks::{marked, rewrite, state_of};
 use super::{Rig, cancelled, host, rig, whole_host_spec};
+use crate::codec::DecodeError;
 use crate::interfere::INJECTED;
 use crate::keys;
 use crate::{
@@ -410,5 +412,99 @@ where
         rig.jobs.get_mark(&placed),
         Ok(Some(leftover)),
         "{name}: the cancel of a placed job touched its mark"
+    );
+}
+
+/// A placed whole-host job is started ([`crate::JobStore::start_untainted`]) only on a host no
+/// row holds tainted: a host whose binding holds a taint, or that has a `taint/<host>` row, is
+/// refused as tainted and nothing is written; a binding that cannot be read is corrupt; a taint
+/// stored in the binding between the start's reads and its commit makes it stale, the job still
+/// placed; a host whose binding holds no taint, or that has no binding, takes the start, the job
+/// starting with its start queued for the host. Catches a start that judges the host by its
+/// reads and not its commit, by one of the two rows only, or by neither.
+pub fn a_whole_host_start_refuses_a_host_a_row_holds_tainted<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "a_whole_host_start_refuses_a_host_a_row_holds_tainted";
+    let rig = rig(backend);
+    let (id, _, _) = placed_whole(&rig, "st-a");
+    let a = host("host-a");
+    let start = || rig.jobs.start_untainted(&id, &a).map(|job| job.state);
+    let tainted = || {
+        Err(JobStoreError::HostTainted {
+            id: id.clone(),
+            host: a.clone(),
+        })
+    };
+    let binding = keys::binding(&a);
+    let taint_value = br#"{"version":1,"taint_reason":"residue"}"#.to_vec();
+    let clean_value = br#"{"version":1,"taint_reason":null}"#.to_vec();
+
+    rig.put_raw(&binding, taint_value.clone());
+    let before = rig.snapshot();
+    assert_eq!(
+        start(),
+        tainted(),
+        "{name}: a binding's taint did not refuse"
+    );
+    assert_eq!(rig.snapshot(), before, "{name}: a refusal wrote");
+
+    rig.put_raw(&binding, b"not json".to_vec());
+    let corrupt = JobStoreError::Corrupt {
+        key: binding.clone(),
+        why: DecodeError::BadValue { tag: 0 },
+    };
+    assert_eq!(
+        start(),
+        Err(corrupt),
+        "{name}: an unreadable binding did not refuse"
+    );
+
+    rig.put_raw(&binding, clean_value.clone());
+    let taint_row = keys::taint(&a);
+    rig.put_raw(&taint_row, b"a host job".to_vec());
+    let before = rig.snapshot();
+    assert_eq!(start(), tainted(), "{name}: a taint row did not refuse");
+    assert_eq!(rig.snapshot(), before, "{name}: a refusal wrote");
+    let store = rig.store.inner();
+    let dropped = Txn::new().delete(taint_row, Cond::Any);
+    store.txn(dropped).expect("reachable").expect("commits");
+
+    let (store, key) = (rig.store.inner(), binding.clone());
+    rig.store.before_next(move || {
+        let put = Txn::new().put(key, taint_value, Cond::Any);
+        store.txn(put).expect("reachable").expect("commits");
+    });
+    assert_eq!(
+        start(),
+        Err(JobStoreError::Stale { id: id.clone() }),
+        "{name}: a taint stored before the commit did not make the start stale"
+    );
+    assert_eq!(state_of(&rig.jobs, &id), Some(JobState::Placed));
+
+    rig.put_raw(&binding, clean_value);
+    assert_eq!(
+        start(),
+        Ok(JobState::Starting),
+        "{name}: a clean host refused the start"
+    );
+    let queued = rig.jobs.dispatch_queue(&a).expect("reads");
+    assert_eq!(
+        queued.len(),
+        1,
+        "{name}: the start was not queued for the host"
+    );
+
+    let other = rig.queue_spec("st-b", whole_host_spec());
+    let b = host("host-b");
+    rig.jobs
+        .place_with(&other, b.clone(), Booked::WholeHost, engine_placement())
+        .expect("a queued whole-host job is placed");
+    let started = rig.jobs.start_untainted(&other, &b).map(|job| job.state);
+    assert_eq!(
+        started,
+        Ok(JobState::Starting),
+        "{name}: a host with no binding refused"
     );
 }

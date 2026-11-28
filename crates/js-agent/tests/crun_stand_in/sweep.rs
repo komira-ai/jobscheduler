@@ -353,6 +353,82 @@ fn an_ended_runs_supervisor_that_is_still_exiting_is_not_killed_by_the_sweep() {
     assert_eq!((status.signal(), status.code()), (None, Some(0)));
 }
 
+/// A stand-in for the supervisor of the lease `name`, which its sidecar is made to name: a
+/// child of the test in a group of its own whose command line names the node (`sh`, which
+/// the `; true` keeps from replacing itself with `cat`, whose command line would not), still
+/// there until its stdin is closed, when it exits with status 0.
+fn named_supervisor(node: &Node, name: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt as _;
+    let child = std::process::Command::new("sh")
+        .args(["-c", "cat > /dev/null; true"])
+        .arg(&*node.dir)
+        .stdin(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("sh");
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).expect("its stat");
+    let start: u64 = stat
+        .rsplit_once(')')
+        .and_then(|(_, after)| after.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .expect("a start time");
+    let path = sidecar(node, name);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    json["supervisor"] = serde_json::json!({ "pid": child.id(), "start": start });
+    std::fs::write(&path, json.to_string()).expect("write the sidecar");
+    child
+}
+
+/// Catches a node that, as its test ends, kills the supervisor of a run that has ended: the
+/// supervisor writes its exit record and then exits, and in a coverage build that exit writes
+/// a profile a kill would cut short, failing the merge of every profile of the run. Here the
+/// sidecar of an ended run names a stand-in for such a supervisor ([`named_supervisor`]).
+/// The node's ending names it and leaves it alone, and it then exits by itself, with status
+/// 0, not a signal.
+#[test]
+fn a_node_ending_leaves_a_supervisor_that_wrote_its_exit_record_to_exit() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let node = Node::new("ending-exiting");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r1-exit"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    drop(runtime);
+    let mut exiting = named_supervisor(&node, &id.0);
+
+    let named = node.end_supervisors();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert!(named[0].alive(), "signalled although its record is written");
+    drop(exiting.stdin.take());
+    let status = exiting.wait().expect("reaped");
+    assert_eq!((status.signal(), status.code()), (None, Some(0)));
+    drop(node);
+}
+
+/// Proves that a node ends the supervisor of a run still running as its test ends: the
+/// sidecar names a stand-in ([`named_supervisor`]) for the supervisor of a lease with no
+/// exit record, which the node's ending kills.
+#[test]
+fn a_node_ending_kills_the_supervisor_of_a_run_still_running() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let node = Node::new("ending-running");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r1-exit"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    drop(runtime);
+    std::fs::remove_file(js_contain::oci::exit_record_path(&node.lease_of(&id.0)))
+        .expect("the record removed");
+    let mut running = named_supervisor(&node, &id.0);
+
+    drop(node);
+    let status = running.wait().expect("reaped");
+    assert_eq!(status.signal(), Some(9));
+}
+
 /// Proves a sidecar the runtime cannot read as its own is left and reported, and the
 /// runtime still opens and sweeps the good one beside it: garbage and a sidecar under
 /// another lease's name stay where they are. Catches a sweep that acts on, or stops at, a

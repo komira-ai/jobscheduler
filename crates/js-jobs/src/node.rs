@@ -81,6 +81,23 @@ pub struct NodeState {
     /// each job whose container the host had confirmed, by job. Its container is freed only
     /// once two applied beats in a row leave it out.
     pub missing_in_a_row: BTreeMap<JobId, u32>,
+    /// The jobs the host's last applied listing named that the store holds no record of (its
+    /// orphans), by the id the host listed: no placement of the job on the host, no end, no
+    /// cancel and no later attempt. The host is not told to stop them for that; they are held
+    /// here with their age until the host stops listing them, and the host takes no job while
+    /// it lists one. Empty for a row a build from before the field wrote.
+    pub orphans: BTreeMap<String, Orphan>,
+}
+
+/// A job a host lists that the store holds no record of, as the host's row keeps it
+/// ([`NodeState::orphans`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Orphan {
+    /// When an applied beat first listed it, on the store's clock: its age is counted from
+    /// here, across hellos of the host.
+    pub first_seen: StoreTime,
+    /// Whether an operator asked that the host stop it; the beats after that tell the host to.
+    pub end_asked: bool,
 }
 
 /// What a hello announces, which [`crate::JobStore::hello_node`] writes into the host's row
