@@ -143,3 +143,30 @@ fn unanswered(missing: &TryRecvError, now_ms: u64, deadline_ms: u64) -> Option<&
         TryRecvError::Disconnected => Some("ended without an answer"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a thread of the pool runs every task queued before its pool was dropped,
+    /// in order and past one that panics, and then returns because the queue is closed. `serve`
+    /// runs on the test's thread, so its loop has ended when the assertion runs; the pool's own
+    /// threads end only once their pool is dropped, which nothing waits for. Catches a thread
+    /// that stops at a task that panics, one that drops the tasks left in the queue, and one
+    /// that does not return once its pool is gone.
+    #[test]
+    fn a_thread_runs_the_queue_out_and_returns_once_the_pool_is_gone() {
+        let (work, queue) = mpsc::channel::<Task>();
+        let (ran_to, ran) = mpsc::channel();
+        let first = ran_to.clone();
+        work.send(Box::new(move || first.send(1).expect("sends")))
+            .expect("queues");
+        work.send(Box::new(|| panic!("a task that panics")))
+            .expect("queues");
+        work.send(Box::new(move || ran_to.send(2).expect("sends")))
+            .expect("queues");
+        drop(work);
+        serve(&Mutex::new(queue));
+        assert_eq!(ran.try_iter().collect::<Vec<i32>>(), [1, 2]);
+    }
+}
