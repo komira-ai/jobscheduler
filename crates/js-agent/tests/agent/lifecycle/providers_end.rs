@@ -132,6 +132,37 @@ fn a_stop_while_preparing_releases_the_source() {
     assert!(prepared < released, "{log:?}");
 }
 
+/// Asserts that a release the provider answers `Failed` (its `FAILED_PRECONDITION`) waits and
+/// is asked again, as an unavailable one is, with a `provider-backoff` line. Catches a
+/// release given up on, or asked at every step, when the provider's state turns it away.
+#[test]
+fn a_release_the_provider_cannot_serve_backs_off_and_is_asked_again() {
+    let (mut h, providers) = rig("prov-release-state", |_| {});
+    run_one(&mut h, &providers, "j1");
+    let failed = ProviderAnswer::Failed("restarting".to_owned());
+    providers.always("tier", &release("j1", 0), failed);
+    h.fake.exit("j1", 0);
+    let events = (0..4)
+        .flat_map(|_| names(&h.life.step()))
+        .collect::<Vec<_>>();
+    assert!(
+        events.contains(&"finding j1 provider-backoff".to_owned()),
+        "{events:?}"
+    );
+    assert_eq!(
+        providers.sent("release").len(),
+        1,
+        "the steps that follow wait"
+    );
+    h.clock.advance(59_999);
+    h.life.step();
+    assert_eq!(
+        providers.sent("release").len(),
+        2,
+        "asked again after its wait"
+    );
+}
+
 /// Asserts that a release a provider does not answer never taints the host and never holds
 /// the run's slot or its checks (the run is freed in the step it ended in), is asked again
 /// for a minute from the end of the run (after a wait that grows with each failure, so not at

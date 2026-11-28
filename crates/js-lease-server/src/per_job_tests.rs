@@ -11,15 +11,15 @@ use js_agent_wire::{
     Outcome,
 };
 use js_jobs::{
-    Booked, CpuPeak, CpuThrottle, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output,
-    ResourceUsage, ResultReason, StartFailure,
+    Booked, CpuPeak, CpuThrottle, JobEnd, JobRecord, JobSpec, JobState, JobStoreError, Needs,
+    Output, ResourceUsage, ResultReason, StartFailure,
 };
 use js_state::StoreError;
 use js_types::{CpuSeries, HostId, MemorySeries, Resources};
 
 use js_state::Store;
 
-use super::{BeatContext, Command, RowState, end_of, serve};
+use super::{BeatContext, Command, NO_EXIT_CODE, RowState, end_of, serve};
 use crate::agent_api::job_rig::{BOOKED, placed, result, spec, starts, stops, tables};
 use crate::metrics::{MetricsSink, NoMetrics};
 
@@ -406,6 +406,49 @@ fn an_input_failure_on_a_job_that_ran_ends_it_as_an_input_failure_whatever_the_o
             );
         }
     }
+}
+
+/// A `killed` result the agent made for its host's sake (detail `silence-stop` or
+/// `host-stop`, alone or before a `:`) ends the job as lost, the end that retries on another
+/// host, whatever exit status it names; a cancel the client asked for still ends it
+/// cancelled; a `killed` result with no detail or any other one, and a `failed` result with
+/// `silence-stop`, still end as a failure with [`NO_EXIT_CODE`]. It catches a silence stop
+/// or a drain's stop ended as the job's own failure (which never retries), a cancel read as
+/// a lost host, and a stop the server asked for read as the host's.
+#[test]
+fn a_kill_the_agent_made_for_its_host_ends_the_job_lost() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let mut cancelled = job.clone();
+    cancelled.cancel_requested = true;
+    let end = |record: &JobRecord, outcome, detail: Option<&str>| {
+        let mut reported = ended(outcome, None);
+        reported.detail = detail.map(str::to_owned);
+        end_of(record, &reported)
+    };
+    for detail in ["silence-stop", "host-stop", "silence-stop: 300000 ms"] {
+        assert_eq!(
+            end(&job, Outcome::Killed, Some(detail)),
+            Some(JobEnd::Lost),
+            "{detail}"
+        );
+        assert_eq!(
+            end(&cancelled, Outcome::Killed, Some(detail)),
+            Some(JobEnd::Cancelled {
+                exit_code: None,
+                output: done(),
+            }),
+            "{detail}"
+        );
+    }
+    let failed = Some(JobEnd::Exited {
+        exit_code: NO_EXIT_CODE,
+        output: done(),
+    });
+    for detail in [None, Some(""), Some("stopped"), Some("silence-stopped")] {
+        assert_eq!(end(&job, Outcome::Killed, detail), failed, "{detail:?}");
+    }
+    assert_eq!(end(&job, Outcome::Failed, Some("silence-stop")), failed);
 }
 
 /// A result that never ran the job ignores an input failure it names: a start the agent

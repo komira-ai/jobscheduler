@@ -232,7 +232,7 @@ impl Attached {
                     said.clone_into(why);
                     self.turned_away = self.turned_away.saturating_add(1);
                 }
-                ProviderAnswer::Refused(_) => {
+                ProviderAnswer::Refused(_) | ProviderAnswer::Failed(_) => {
                     self.turned_away = self.turned_away.saturating_add(1);
                 }
                 ProviderAnswer::Pending => {}
@@ -363,7 +363,9 @@ impl Attached {
                 let (answer, step) = self.paced((provider, &call), &mut owed.pace, now_ms, &seed);
                 if let (
                     Some(step),
-                    ProviderAnswer::Refused(why) | ProviderAnswer::Unavailable(why),
+                    ProviderAnswer::Refused(why)
+                    | ProviderAnswer::Failed(why)
+                    | ProviderAnswer::Unavailable(why),
                 ) = (step, &answer)
                 {
                     backed.push(Backed {
@@ -418,7 +420,9 @@ impl Attached {
             match providers.ask(name, &call) {
                 ProviderAnswer::Done(_) => false,
                 ProviderAnswer::Pending => true,
-                ProviderAnswer::Refused(why) | ProviderAnswer::Unavailable(why) => {
+                ProviderAnswer::Refused(why)
+                | ProviderAnswer::Failed(why)
+                | ProviderAnswer::Unavailable(why) => {
                     sweep.again_ms = now_ms.saturating_add(SWEEP_AGAIN_MS);
                     if !sweep.told {
                         sweep.told = true;

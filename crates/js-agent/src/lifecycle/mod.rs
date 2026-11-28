@@ -101,7 +101,8 @@
 //!   for each provider's `Mount` answer, the directory being held to the agent's mount
 //!   roots as a host path is, for at most
 //!   `--mount-provider-wait` from its admission (`input-unavailable`; a provider that refuses
-//!   the ref fails it `provider-refused`). Each source is then a host path, and the start goes
+//!   the request as wrong in itself fails it `provider-refused`, one that cannot serve it in
+//!   its present state `provider-failed`). Each source is then a host path, and the start goes
 //!   on as above. When the run's file system is taken apart, on every end path, each source is
 //!   released; a release that fails is asked again for a minute, after a wait that grows with
 //!   each failure (`machine::pace`, one `provider-backoff` line at each), and then left to the

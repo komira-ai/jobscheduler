@@ -947,6 +947,8 @@ fn work(
             Err(RecvTimeoutError::Disconnected) => return,
         }
         if shared.stop_all.swap(false, Ordering::SeqCst) {
+            // The agent's own stop, not the server's: each result says so (`host-stop`).
+            lines.extend(describe(&life.stop_for_host()));
             lines.extend(describe(&life.apply(&stops(&life))));
         }
         lines.extend(describe(&life.step()));

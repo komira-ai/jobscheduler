@@ -123,6 +123,9 @@ stopped or cancelled, or that it stopped after a silence of the server; a `job_s
 allocation and retires every fence of the job), keeps the retired fences in its state root across a restart, takes the same job
 under a new allocation, and stops every job it holds once it has not heard the server for its silence bound (`--silence-stop`,
 300 s by default, reported `killed` with the detail `silence-stop`). A server that does not see the capability can expect neither.
+An agent also reports `killed` with the detail `host-stop` each job it stopped for its own end rather than at the server's word
+(a drain past its wait, a wind-down after a refusal for good). The server ends a job reported `killed` with either detail as lost,
+the host's end, which its retry policy retries on another host; a `killed` result without one is a stop the server asked for.
 A run start is fenced by its run id alone, as before.
 
 A job start carries the optional `placed_at_ms` (`JobStartSpec.placed_at_ms`): the server's Unix time in milliseconds at which it placed the

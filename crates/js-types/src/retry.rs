@@ -115,10 +115,11 @@ const MAX_DOUBLINGS: u32 = 12;
 /// The agent refusal codes that name the job's own fault: a start refused with one of them is
 /// refused on every host, so it never retries. They are the codes of
 /// `crates/js-agent-wire/src/refusal.rs` that a bad job gets (its spec, image, bundle, program,
-/// environment, mounts, files, platform or labels), and those of a host's image and bundle
-/// trust policy, which refuse the job's own choice of image or bundle. Every other code, one
-/// this crate does not know included, is the host's. Kept sorted, so a test can find a code
-/// listed twice.
+/// environment, mounts, files, platform or labels; a mount provider's refusal of a request
+/// wrong in itself, `provider-refused`, but not `provider-failed`, a provider's own state),
+/// and those of a host's image and bundle trust policy, which refuse the job's own choice of
+/// image or bundle. Every other code, one this crate does not know included, is the host's.
+/// Kept sorted, so a test can find a code listed twice.
 const JOB_FAULT_REFUSALS: [&str; 18] = [
     "bundle-denied",
     "bundle-digest-required",
@@ -356,6 +357,7 @@ mod tests {
             "quota-unavailable",
             "input-not-allowed",
             "input-unavailable",
+            "provider-failed",
             "network-above-ceiling",
             "port-above-ceiling",
             "ports-not-supported",
@@ -402,6 +404,7 @@ mod tests {
             "bundle-not-allowed",
             "bundle-denied",
             "bundle-registry-not-allowed",
+            "provider-refused",
         ] {
             assert!(JOB_FAULT_REFUSALS.contains(&named), "{named} is the job's");
         }

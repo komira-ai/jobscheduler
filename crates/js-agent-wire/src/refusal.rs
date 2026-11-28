@@ -237,10 +237,17 @@ pub const INPUT_NOT_ALLOWED: &str = "input-not-allowed";
 /// try may succeed.
 pub const INPUT_UNAVAILABLE: &str = "input-unavailable";
 /// As the detail of a `failed_to_start` result: the node-local provider of a layer or a
-/// mount refused its ref (it answered `INVALID_ARGUMENT` or `FAILED_PRECONDITION` to
-/// `Prepare` or `Mount`), so the tree will never be made from it. The client's to fix:
-/// another host's provider reads the same ref.
+/// mount refused the request as wrong in itself (it answered `INVALID_ARGUMENT` to `Prepare`
+/// or `Mount`: a ref it cannot read), so the tree will never be made from it. The client's
+/// to fix: another host's provider reads the same ref. No other answer of a provider gives
+/// it (an agent before [`PROVIDER_FAILED`] also gave it for `FAILED_PRECONDITION`).
 pub const PROVIDER_REFUSED: &str = "provider-refused";
+/// As the detail of a `failed_to_start` result: the node-local provider of a layer or a
+/// mount cannot serve the source in its present state (it answered `FAILED_PRECONDITION` to
+/// `Prepare` or `Mount`: a source it does not hold as prepared, after a restart of it for
+/// one, a source prepared with another ref, a tree it will not make here). The host's state,
+/// not the job's: another host's provider may serve the same request.
+pub const PROVIDER_FAILED: &str = "provider-failed";
 /// As the detail of a `failed_to_start` result: a start with `layers` on an agent whose
 /// runtime has no root to replace (the macOS native runtime). Nothing was created.
 pub const ROOTFS_UNSUPPORTED_HERE: &str = "rootfs-unsupported-here";
@@ -259,6 +266,14 @@ pub const INPUT_UNREADABLE: &str = "input-unreadable";
 /// As a result's `input_failure` ([`crate::JobResult::input_failure`]): a host port of the
 /// job that the agent could not offer again after it restarted, so it stopped the job.
 pub const HOST_PORT_LOST: &str = "host-port-lost";
+/// As the detail of a `killed` result: the agent stopped the job because it had not heard
+/// from the server for its silence bound (`--silence-stop`). The job did not end for its own
+/// sake: its host lost the server, so the end is the host's (the server ends it as lost).
+pub const SILENCE_STOP: &str = "silence-stop";
+/// As the detail of a `killed` result: the agent stopped the job for its own end and not
+/// because the server asked: a drain past its wait, or a wind-down after the server refused
+/// the agent for good. The end is the host's (the server ends it as lost).
+pub const HOST_STOP: &str = "host-stop";
 /// As the detail of a `failed_to_start` result: a start the agent refused because its host
 /// is held (its hold file is there: the host is being drained for an update, or its update
 /// halted). Nothing was created. It is the host's state and not the run's, and, unlike

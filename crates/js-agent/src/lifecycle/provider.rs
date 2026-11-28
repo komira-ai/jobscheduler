@@ -100,9 +100,14 @@ pub enum ProviderAnswer {
     /// The call succeeded; a [`ProviderCall::Mount`] carries the directory the provider
     /// answered (its text, untrusted), every other call `None`.
     Done(Option<String>),
-    /// The provider refused the ref for good (`INVALID_ARGUMENT` or
-    /// `FAILED_PRECONDITION`), with its reason.
+    /// The provider refused the request as wrong in itself (`INVALID_ARGUMENT`: a ref it
+    /// cannot read or a request it cannot parse), with its reason. No provider serves it.
     Refused(String),
+    /// The provider cannot serve the source in its present state (`FAILED_PRECONDITION`: a
+    /// source it does not hold as prepared, one prepared with another ref, a tree it will not
+    /// make here), with its reason. Not asked again on this host; another host's provider
+    /// may serve the same request.
+    Failed(String),
     /// The provider could not be reached, did not answer within the call's bound, or
     /// answered that it cannot yet (`UNAVAILABLE` and every other failure), with why. The
     /// call may be asked again.

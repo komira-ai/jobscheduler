@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use js_agent::lifecycle::detail;
 use js_agent::{Delivery, LINES_CAP, QUEUE};
 use js_agent_wire::{Command, HeartbeatReply, HeldState, Outcome};
 
@@ -232,8 +233,10 @@ fn a_closed_worker_takes_no_start_and_still_stops() {
     );
 }
 
-/// Asserts that `stop_all` stops every run the worker holds, each reported killed, and
-/// stops them once. It catches a drain that leaves a job running past its wait.
+/// Asserts that `stop_all` stops every run the worker holds, each reported killed with the
+/// detail `host-stop` (the agent's own stop, not the server's), and stops them once. It
+/// catches a drain that leaves a job running past its wait, and a drain's stop reported as
+/// one the server asked for, which the server ends as the job's own failure.
 #[test]
 fn stop_all_stops_every_run() {
     let dir = Scratch::new("jobs-worker-stop-all");
@@ -256,6 +259,14 @@ fn stop_all_stops_every_run() {
         .map(|r| r.outcome)
         .collect();
     assert_eq!(outcomes, [Outcome::Killed, Outcome::Killed]);
+    let details: Vec<Option<String>> = worker
+        .snapshot()
+        .results
+        .iter()
+        .map(|r| r.detail.clone())
+        .collect();
+    let host_stop = Some(detail::HOST_STOP.to_owned());
+    assert_eq!(details, [host_stop.clone(), host_stop]);
     assert!(worker.handle().settle());
     let stops = machine
         .world

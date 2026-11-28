@@ -205,6 +205,13 @@ enum Way {
     HostCode,
     /// The agent refused the start with a code this server does not know.
     UnknownCode,
+    /// The agent failed the start with `provider-failed`: its mount provider answered
+    /// `FAILED_PRECONDITION`, a state of the provider and not a fault of the job.
+    ProviderFailed,
+    /// The agent stopped the running job after its silence bound (`killed`, `silence-stop`).
+    SilenceStop,
+    /// The agent stopped the running job for its own end (`killed`, `host-stop`).
+    HostStop,
     /// The provider reads the host absent.
     ProviderAbsent,
     /// The host said hello again and its first listing omitted the running job.
@@ -252,7 +259,13 @@ fn expected(
             "a-code-from-a-later-agent",
             EndReason::Refused,
         ),
-        Way::ProviderAbsent | Way::Unlisted => {
+        Way::ProviderFailed => (
+            StartFailed,
+            Code::AgentRefused,
+            "provider-failed",
+            EndReason::Refused,
+        ),
+        Way::ProviderAbsent | Way::Unlisted | Way::SilenceStop | Way::HostStop => {
             (HostLost, Code::Unspecified, "", EndReason::HostAbsent)
         }
     }
@@ -265,7 +278,10 @@ fn expected(
 async fn second_attempt(way: Way) {
     let (outcome, failure, detail, freed_for) = expected(way);
     let (mut rig, mut a, mut b) = two_hosts(&format!("second_{way:?}"));
-    let running = matches!(way, Way::ProviderAbsent | Way::Unlisted);
+    let running = matches!(
+        way,
+        Way::ProviderAbsent | Way::Unlisted | Way::SilenceStop | Way::HostStop
+    );
     let id = start_on(&rig, "job-r", "host-a", 3);
     walk(&rig, &mut a, &id, running).await;
     let live = match running {
@@ -288,6 +304,18 @@ async fn second_attempt(way: Way) {
         }
         Way::UnknownCode => {
             refuse(&rig, &mut a, &id, "a-code-from-a-later-agent").await;
+        }
+        Way::ProviderFailed => {
+            refuse(&rig, &mut a, &id, "provider-failed").await;
+        }
+        Way::SilenceStop | Way::HostStop => {
+            let detail = match way {
+                Way::SilenceStop => "silence-stop",
+                _ => "host-stop",
+            };
+            let killed = (Outcome::Killed, None);
+            a.end_naming(id.as_str(), killed, (Some(detail), None));
+            beat(&rig, &mut a).await;
         }
         Way::ProviderAbsent => {
             let lost = pass_reading_absent(&rig, "host-a");
@@ -346,7 +374,12 @@ async fn second_attempt(way: Way) {
             beat(&rig, &mut a).await;
             beat(&rig, &mut a).await;
         }
-        Way::InputUnavailable | Way::HostCode | Way::UnknownCode => {
+        Way::InputUnavailable
+        | Way::HostCode
+        | Way::UnknownCode
+        | Way::ProviderFailed
+        | Way::SilenceStop
+        | Way::HostStop => {
             assert_eq!(rig.allocation(&id).step, AllocationStep::Releasing);
             beat(&rig, &mut a).await;
         }
@@ -380,8 +413,10 @@ async fn second_attempt(way: Way) {
 }
 
 /// Asserts that each end that retries makes a second attempt: a start that timed out, a start
-/// the agent refused with `input-unavailable`, with a code of its host and with a code this
-/// server does not know, a host the provider reads absent (the job is queued, not lost, and its
+/// the agent refused with `input-unavailable`, with a code of its host, with a code this
+/// server does not know and with `provider-failed` (its mount provider's own state), a running
+/// job the agent stopped for its silence bound (`silence-stop`) or for its own end
+/// (`host-stop`), each ended as its host lost, a host the provider reads absent (the job is queued, not lost, and its
 /// allocation freed in the same pass for the host's absence), and a host that says hello again
 /// and does not list the job it ran. Each leaves the job queued with one entry in its attempt
 /// history (outcome, host, retried), its allocation freed for the reason of the end once
@@ -396,6 +431,9 @@ async fn each_retrying_outcome_makes_a_second_attempt() {
         Way::InputUnavailable,
         Way::HostCode,
         Way::UnknownCode,
+        Way::ProviderFailed,
+        Way::SilenceStop,
+        Way::HostStop,
         Way::ProviderAbsent,
         Way::Unlisted,
     ] {
@@ -404,11 +442,13 @@ async fn each_retrying_outcome_makes_a_second_attempt() {
 }
 
 /// Asserts that the ends that are not the host's fault end the job although attempts are left: a
-/// refusal with a code that names the job's own fault (`invalid-job`), a non-zero exit, and a
-/// start refused for a cause of the host when the policy has no attempt after the first. Each
-/// ends the job at its first attempt, with one history entry not marked retried and no wait.
-/// Catches a job's own failure retried on host after host, and a policy's attempt count that is
-/// not honoured.
+/// refusal with a code that names the job's own fault (`invalid-job`, and `provider-refused`, a
+/// mount provider's `INVALID_ARGUMENT`), a non-zero exit, a kill with no reason of the host
+/// (failed, exit code -1), and a start refused for a cause of the host, or a silence stop
+/// (lost), when the policy has no attempt after the first. Each ends the job at its first
+/// attempt, with one history entry not marked retried and no wait. Catches a job's own failure
+/// retried on host after host, a kill the server asked for read as the host's, and a policy's
+/// attempt count that is not honoured.
 #[tokio::test]
 async fn a_job_fault_a_non_zero_exit_and_the_last_attempt_end_the_job() {
     let (rig, mut a, _b) = two_hosts("ends");
@@ -441,10 +481,38 @@ async fn a_job_fault_a_non_zero_exit_and_the_last_attempt_end_the_job() {
     let outcome = (v1::AttemptOutcome::StartFailed, false);
     assert_ended_once(&rig, &last, refused, outcome);
 
+    // A mount provider's refusal of a request wrong in itself (`INVALID_ARGUMENT`) is the job's.
+    let wrong = start_on(&rig, "job-wrong-ref", "host-a", 3);
+    walk(&rig, &mut a, &wrong, false).await;
+    refuse(&rig, &mut a, &wrong, "provider-refused").await;
+    let outcome = (v1::AttemptOutcome::StartFailed, false);
+    assert_ended_once(&rig, &wrong, refused, outcome);
+    let entry = view::job(&rig.job(&wrong)).attempt_history[0].clone();
+    assert_eq!(entry.start_failure_detail, "provider-refused");
+
+    // A kill the agent gives no host reason for is a failure with no exit status, as before.
+    let killed = start_on(&rig, "job-killed", "host-a", 3);
+    walk(&rig, &mut a, &killed, true).await;
+    a.end(killed.as_str(), Outcome::Killed, None);
+    beat(&rig, &mut a).await;
+    let outcome = (v1::AttemptOutcome::Failed, false);
+    assert_ended_once(&rig, &killed, JobState::Failed, outcome);
+    let entry = view::job(&rig.job(&killed)).attempt_history[0].clone();
+    assert_eq!(entry.exit_code, Some(-1));
+
+    // A silence stop on the last attempt ends the job lost, not failed.
+    let silenced = start_on(&rig, "job-silenced", "host-a", 1);
+    walk(&rig, &mut a, &silenced, true).await;
+    let ended = (Outcome::Killed, None);
+    a.end_naming(silenced.as_str(), ended, (Some("silence-stop"), None));
+    beat(&rig, &mut a).await;
+    let outcome = (v1::AttemptOutcome::HostLost, false);
+    assert_ended_once(&rig, &silenced, JobState::Lost, outcome);
+
     // None of them is placed again, whatever time passes.
     let (mut a, mut b) = (FakeAgent::new("host-a"), FakeAgent::new("host-b"));
     pass_time(&rig, 2 * MINUTE, &mut [&mut a, &mut b], &[]).await;
-    for id in [&fault, &exits, &last] {
+    for id in [&fault, &exits, &last, &wrong, &killed, &silenced] {
         assert_eq!(rig.job(id).attempt.number(), 1);
         assert!(rig.job(id).state.is_ended());
     }

@@ -120,8 +120,8 @@ impl Pace {
         self.sent_ms.get_or_insert(now_ms);
     }
 
-    /// Takes the answer of the ask: a success starts the count again; a failure (refused or
-    /// unavailable) counts one more and sets the next call after the wait from the send;
+    /// Takes the answer of the ask: a success starts the count again; a failure (refused,
+    /// failed or unavailable) counts one more and sets the next call after the wait from the send;
     /// `Pending` leaves the call out. A failure gives the [`Step`] it took; `seed` names the
     /// source, for the jitter.
     pub(super) fn answered(
@@ -136,7 +136,9 @@ impl Pace {
                 *self = Self::default();
                 None
             }
-            ProviderAnswer::Refused(_) | ProviderAnswer::Unavailable(_) => {
+            ProviderAnswer::Refused(_)
+            | ProviderAnswer::Failed(_)
+            | ProviderAnswer::Unavailable(_) => {
                 let sent = self.sent_ms.take().unwrap_or(now_ms);
                 self.resumed = false;
                 let wait = wait_ms(self.failures, seed);
@@ -301,6 +303,10 @@ mod tests {
             "held longer than the wait"
         );
         assert_eq!(pace.failures(), 2);
+        pace.asked(60_000);
+        let failed = ProviderAnswer::Failed("not prepared".to_owned());
+        let third = pace.answered(&failed, 60_000, "s").expect("a step");
+        assert_eq!(third.failures, 3, "a provider's state counts as a failure");
         pace.asked(60_000);
         assert_eq!(
             pace.answered(&ProviderAnswer::Done(None), 60_001, "s"),

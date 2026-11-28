@@ -551,8 +551,11 @@ fn advance(
 }
 
 /// The end a listed result records for `job`, or `None` for an outcome this version does not
-/// know. A stop the client asked for is a cancel; a stop it did not ask for, and a failure
-/// with no exit status, is a failure with [`NO_EXIT_CODE`]. The stream lengths of the
+/// know. A stop the client asked for is a cancel; a stop the agent made for its host's sake
+/// (a `killed` result whose detail is `silence-stop` or `host-stop`, [`stopped_by_host`]) is
+/// the host lost ([`JobEnd::Lost`], which retries under the job's policy, its output not
+/// kept); any other stop, and a failure with no exit status, is a failure with
+/// [`NO_EXIT_CODE`]. The stream lengths of the
 /// result's `logs` are kept with it when the report is consistent
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
 /// without it, so that a reader of the job's live logs knows where each stream ends. The
@@ -638,6 +641,7 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             exit_code: code,
             output,
         },
+        Outcome::Killed if stopped_by_host(result.detail.as_deref()) => JobEnd::Lost,
         Outcome::Failed | Outcome::Killed => JobEnd::Exited {
             exit_code: failed,
             output,
@@ -654,6 +658,20 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
         Outcome::Unknown => return None,
     };
     Some(end)
+}
+
+/// The codes of a `killed` result's detail that say the agent stopped the job for its host's
+/// sake and not because the server asked: it lost the server for its silence bound, or it
+/// was ending (a drain past its wait, a wind-down).
+const HOST_STOPS: [&str; 2] = [refusal::SILENCE_STOP, refusal::HOST_STOP];
+
+/// Whether a `killed` result with `detail` is a stop the agent made for its host's sake
+/// ([`HOST_STOPS`], read as the part of the detail before its first `:`, as a refusal's code
+/// is read).
+fn stopped_by_host(detail: Option<&str>) -> bool {
+    detail
+        .and_then(|detail| detail.split(':').next())
+        .is_some_and(|code| HOST_STOPS.contains(&code))
 }
 
 /// The end of a start the agent refused with the code `detail`: `input-unavailable` is the

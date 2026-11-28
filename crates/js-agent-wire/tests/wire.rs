@@ -84,11 +84,14 @@ fn refusal_codes_snapshot() {
         refusal::INPUT_NOT_ALLOWED,
         refusal::INPUT_UNAVAILABLE,
         refusal::PROVIDER_REFUSED,
+        refusal::PROVIDER_FAILED,
         refusal::ROOTFS_UNSUPPORTED_HERE,
         refusal::MOUNT_TARGET_UNSUPPORTED_HERE,
         refusal::HOST_PORT_REMAP_UNSUPPORTED_HERE,
         refusal::INPUT_UNREADABLE,
         refusal::HOST_PORT_LOST,
+        refusal::SILENCE_STOP,
+        refusal::HOST_STOP,
         refusal::HOST_HELD,
         refusal::NO_FULL_DISK_ACCESS,
     ];
@@ -105,9 +108,9 @@ fn refusal_codes_snapshot() {
          invalid-log-sink invalid-log-credential vm-unavailable \
          tree-unavailable tree-invalid tree-read-failed tree-stalled tree-placement-unsupported \
          tree-unsupported-here outputs-unsupported-here too-many-inputs-here cwd-in-tree \
-         input-not-allowed input-unavailable provider-refused rootfs-unsupported-here \
+         input-not-allowed input-unavailable provider-refused provider-failed rootfs-unsupported-here \
          mount-target-unsupported-here host-port-remap-unsupported-here input-unreadable \
-         host-port-lost host-held no-full-disk-access"
+         host-port-lost silence-stop host-stop host-held no-full-disk-access"
     );
 }
 

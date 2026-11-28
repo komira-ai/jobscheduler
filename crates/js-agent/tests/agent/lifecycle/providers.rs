@@ -176,6 +176,45 @@ fn a_refused_ref_fails_the_start_provider_refused() {
     }
 }
 
+/// Asserts that a provider that cannot serve a source in its present state (`Failed`, its
+/// `FAILED_PRECONDITION`: at `Prepare`, a source prepared with another ref; at `Mount`, one it
+/// does not hold as prepared, as after its restart) fails the start `provider-failed` at once,
+/// not `provider-refused`, with the provider's reason, naming the provider and the source,
+/// and that the source is released all the same. Catches a provider's own state reported as
+/// the job's fault (which the server never retries), and a failure waited out on this host
+/// until `--mount-provider-wait`.
+#[test]
+fn a_provider_state_fails_the_start_provider_failed() {
+    for (n, at_mount) in [false, true].into_iter().enumerate() {
+        let (mut h, providers) = rig(&format!("prov-failed-{n}"), |_| {});
+        let failed = ProviderAnswer::Failed("the source was not prepared".to_owned());
+        match at_mount {
+            false => providers.always("tier", &prepare("j1", 0, "k1", MountMode::ReadOnly), failed),
+            true => providers.always("tier", &mount("j1", 0), failed),
+        }
+        h.apply(vec![job_start(with_layer("j1"))]);
+        h.life.step();
+        let result = listing(&h, "j1").result.expect("a result");
+        assert_eq!(result.outcome, Outcome::FailedToStart, "{n}");
+        assert_eq!(
+            result.detail.as_deref(),
+            Some(refusal::PROVIDER_FAILED),
+            "{n}"
+        );
+        assert_eq!(
+            finding(&h, "j1", "start-failed"),
+            "the provider tier cannot serve source 0 now: the source was not prepared",
+            "{n}"
+        );
+        assert_eq!(
+            providers.sent("release"),
+            ["provider release tier j1#0"],
+            "{n}"
+        );
+        assert!(h.fake.created().is_empty(), "{n}");
+    }
+}
+
 /// Asserts that the record of a start's provider sources (`providers/<run>.json` in the state
 /// root: the provider and the index of each source, the directory `0700` and the file `0600`)
 /// is not yet on disk when each `Prepare` is sent (the provider works while the record's
@@ -418,6 +457,32 @@ fn a_provider_whose_sweep_is_unanswered_holds_the_start_until_it_answers() {
         "the provider tier did not mount source 0 within 30 s: the provider tier has not \
          answered its sweep since the agent started"
     );
+}
+
+/// Asserts that a sweep the provider answers `Failed` (its `FAILED_PRECONDITION`) is reported
+/// and asked again ten seconds later, as one that is unavailable is. Catches a sweep at start
+/// given up on that answer, which would leave the provider's starts waiting for ever.
+#[test]
+fn a_sweep_the_provider_cannot_serve_is_asked_again() {
+    let mut h = bare("prov-sweep-state");
+    let providers = FakeProviders::new(&["tier"], &h.log);
+    let failed = ProviderAnswer::Failed("restarting".to_owned());
+    providers.always("tier", &sweep(), failed);
+    let events = h
+        .life
+        .attach_providers(Box::new(providers.clone()), WAIT_MS);
+    assert_eq!(names(&events), ["finding - provider-sweep-failed"]);
+    let Event::Finding(found) = &events[0] else {
+        panic!("a finding");
+    };
+    assert_eq!(
+        found.message,
+        "the provider tier has not answered the sweep at start: restarting; asked again \
+         every ten seconds, and a start that names it waits"
+    );
+    h.clock.advance(10_000);
+    h.life.step();
+    assert_eq!(providers.sent("sweep").len(), 2);
 }
 
 /// Asserts that a sweep that fails is reported once (`provider-sweep-failed`, with the
