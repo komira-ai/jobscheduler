@@ -449,3 +449,54 @@ async fn an_orphan_is_ended_at_the_servers_max_job_wall() {
     );
     h.running.shutdown().await.unwrap();
 }
+
+/// Asserts the operator's view of a host closed by an orphan, over the server's own HTTP: the
+/// orphan routes answer 401 without the client token or with a wrong one; with it, the
+/// listing shows the orphan, the host listing (`GET /v1/hosts`) and the job service's
+/// `ListHosts` (what `js host list` prints) show the host holding one orphan, the end is
+/// answered 202, and the host's next beat is told to stop the job with the reason `operator`.
+/// It catches orphan routes served without the token, an end that does not reach the host, and
+/// a host that takes no work without saying why.
+#[tokio::test]
+async fn an_operator_sees_a_host_closed_by_an_orphan_and_ends_it_over_http() {
+    let scratch = Scratch::new("orphan_routes");
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(Duration::from_millis(T0));
+    let ids = Arc::new(ScriptedIds::new([1; 16], [[0xf0; 16]]));
+    let h = job_server(scratch, "initialise", &clock, ids).await;
+    let host = job_agent(&h, "host-1").await;
+    let told = beat_with(&h, &host, &[running("ghost-1")]).await;
+    assert_eq!(told["unknown_jobs"], json!(["ghost-1"]), "{told}");
+
+    let list = "/v1/hosts/host-1/orphans";
+    let end = "/v1/hosts/host-1/orphans/ghost-1/end";
+    for token in [None, Some("nope")] {
+        for (method, path) in [("GET", list), ("POST", end)] {
+            let reply = request(h.addr(), method, path, token, None).await;
+            assert_eq!(reply.status, 401, "{method} {path} {token:?}");
+        }
+    }
+    let shown = h.call("GET", list, None).await;
+    assert_eq!(shown.status, 200, "{}", shown.body);
+    let orphans = &shown.json()["orphans"];
+    assert_eq!(orphans[0]["job_id"], "ghost-1", "{orphans}");
+    assert_eq!(orphans[0]["end_asked"], false, "{orphans}");
+    assert_eq!(entry(&hosts(&h).await, "host-1")["orphans"], 1);
+    let job = h.running.job_addr().expect("the job service is on");
+    let listed = request(job, "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    let listed = listed.json();
+    let served = listed["hosts"].as_array().unwrap();
+    let one = served.iter().find(|each| each["id"] == "host-1").unwrap();
+    assert_eq!(one["orphans"], 1, "{one}");
+
+    let asked = h.call("POST", end, None).await;
+    assert_eq!(asked.status, 202, "{}", asked.body);
+    let stopped = beat_with(&h, &host, &[running("ghost-1")]).await;
+    assert_eq!(
+        stopped["commands"],
+        json!([{ "type": "job_stop", "job_id": "ghost-1", "reason": "operator" }]),
+        "{stopped}"
+    );
+    h.running.shutdown().await.unwrap();
+}

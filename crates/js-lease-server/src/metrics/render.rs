@@ -48,13 +48,15 @@ fn state_slot(state: JobState) -> usize {
 }
 
 /// What a scrape read of the job tables: how many jobs are in each state, how long the
-/// oldest queued job has waited (zero with none queued), and how many completion callbacks are
-/// pending.
+/// oldest queued job has waited (zero with none queued), how many completion callbacks are
+/// pending, and each host that holds orphans ([`crate::orphans`]) with how many and how long
+/// the oldest has been listed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobsSeen {
     by_state: [u64; 9],
     oldest_queued: Duration,
     callbacks_pending: u64,
+    orphans: Vec<(String, u64, Duration)>,
 }
 
 impl JobsSeen {
@@ -69,6 +71,11 @@ impl JobsSeen {
     /// Records that `pending` completion callbacks are pending.
     pub(crate) fn callbacks_pending(&mut self, pending: u64) {
         self.callbacks_pending = pending;
+    }
+
+    /// Records that `host` holds `count` orphans, the oldest listed for `oldest`.
+    pub(crate) fn orphans(&mut self, host: &str, count: u64, oldest: Duration) {
+        self.orphans.push((host.to_owned(), count, oldest));
     }
 }
 
@@ -207,6 +214,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         let help = "Completion callbacks of ended jobs not yet delivered, abandoned or expired; one past its deadline counts until a try finds it expired.";
         family(&mut out, pending, "gauge", help);
         let _ = writeln!(out, "{pending} {}", jobs.callbacks_pending);
+        orphans(&mut out, &jobs.orphans);
     }
     let placed = recorder.placed.load(Ordering::Relaxed);
     let help = "Queued jobs placed on a host.";
@@ -317,6 +325,29 @@ fn bodies_too_large(out: &mut String, recorder: &Recorder) {
     }
 }
 
+/// The hosts that hold orphans now, each with how many and how long the oldest has been
+/// listed: a host is written only while it holds one, so either gauge above 0 is a host that
+/// takes no new job.
+fn orphans(out: &mut String, held: &[(String, u64, Duration)]) {
+    let count = "js_host_orphans";
+    let help = "Jobs a host lists that the job store holds no record of (its orphans), by host, written only for a host that holds one. While it does, the host takes no new job: see docs/runbooks/orphan-jobs.md.";
+    family(out, count, "gauge", help);
+    for (host, held, _) in held {
+        let _ = writeln!(out, "{count}{{host=\"{}\"}} {held}", label(host));
+    }
+    let age = "js_host_oldest_orphan_age_seconds";
+    let help = "How long the oldest orphan of a host has been listed, by the store's clock, by host, written only for a host that holds one.";
+    family(out, age, "gauge", help);
+    for (host, _, oldest) in held {
+        let _ = writeln!(
+            out,
+            "{age}{{host=\"{}\"}} {}",
+            label(host),
+            seconds(*oldest)
+        );
+    }
+}
+
 fn unknown(out: &mut String, recorder: &Recorder) {
     let (found, guarded) = recorder.unknown();
     let name = "js_unknown_jobs_found_total";
@@ -327,7 +358,7 @@ fn unknown(out: &mut String, recorder: &Recorder) {
         let _ = writeln!(out, "{name}{{host=\"{host}\"}} {count}");
     }
     let name = "js_unknown_listing_guarded_total";
-    let help = "Heartbeats whose listing was more than half jobs the store holds no record of, by host: the host was told to stop nothing but the orphans an operator ended. Any rise means the store may have lost or rolled back its tables.";
+    let help = "Heartbeats whose listing was more than half jobs the store holds no record of, by host: the reply told the host to stop nothing but the orphans an operator ended (a stop already in its dispatch queue is still handed out). Any rise means the store may have lost or rolled back its tables.";
     family(out, name, "counter", help);
     for (host, count) in guarded {
         let host = label(&host);

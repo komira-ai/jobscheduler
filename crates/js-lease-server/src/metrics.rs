@@ -835,3 +835,7 @@ mod retry_tests;
 #[cfg(test)]
 #[path = "metrics/telemetry_tests.rs"]
 mod telemetry_tests;
+
+#[cfg(test)]
+#[path = "metrics/orphan_tests.rs"]
+mod orphan_tests;

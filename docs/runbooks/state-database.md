@@ -141,10 +141,15 @@ What the server does by itself, and what to check:
   record of (one accepted after the backup) is told to stop nothing for it: each heartbeat reply names it in `unknown_jobs`, the host's row
   keeps it as an orphan with the time it was first listed, and the job runs on until it ends on the host (its result is acknowledged
   `STALE`, no row is made for it, and it is never revived), until it has been listed for longer than `--max-job-wall`, or until an
-  operator ends it (`docs/runbooks/orphan-jobs.md`). Such a host takes no new start until a listing of it is clean. A host whose listing
-  is mostly such jobs is told to stop nothing at all, a cancel the restored store holds included, and the server logs an error and counts
-  it (`js_unknown_listing_guarded_total`): look at the restore before anything else. A job the restored store holds, on the host its
-  allocation names, keeps its state and its allocation.
+  operator ends it (`docs/runbooks/orphan-jobs.md`). Such a host takes no new start until a listing of it is clean, and the host listing
+  shows its `orphans`. A host whose listing is mostly such jobs is told by its heartbeat replies to stop nothing at all, a cancel the
+  restored store holds included (a stop already in the host's dispatch queue is still handed out), no orphan of it is ended at
+  `--max-job-wall`, and the server logs an error and counts it (`js_unknown_listing_guarded_total`): look at the restore before
+  anything else. A job the restored store holds, on the host its allocation names, keeps its state and its allocation.
+- **The agents' own limit while the server is down.** The jobs survive the outage of the restore only as long as each agent's
+  `--silence-stop` (300 s by default): an agent that has not heard the server for that long stops every job it holds, before any of
+  the above applies. Keep the server's outage shorter than that, or raise `--silence-stop` on the agents first, until the agent keeps
+  its running jobs through a silence (komira-ai/jobscheduler#1278).
 - **Nothing is booked twice.** Placement rebuilds every host's bookings from the restored allocation table before it places, so a
   host whose restored allocation is live is not placed on beyond it, and a host still running a forgotten job is not counted until it
   stops listing it.

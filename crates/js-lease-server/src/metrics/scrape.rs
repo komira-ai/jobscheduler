@@ -4,6 +4,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -11,10 +12,11 @@ use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
+use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE, NodeRow};
 use js_registry::HostState;
 use js_sched_placer::curves::{CurveView, MemoryShadowView};
 use js_sched_placer::telemetry::Telemetry;
+use js_state::StoreTime;
 use tracing::warn;
 
 use super::Recorder;
@@ -110,7 +112,23 @@ fn read_jobs(
         }
     }
     seen.callbacks_pending(jobs.callbacks_pending()?);
+    let (at, rows) = jobs.nodes()?;
+    for (host, count, oldest) in orphans_seen(&rows, at) {
+        seen.orphans(&host, count, oldest);
+    }
     Ok((seen, jobs.live_allocations()?))
+}
+
+/// Each host of `rows` that holds orphans, in host order, with how many and how long, at
+/// `now` by the store's clock, the oldest has been listed.
+pub(crate) fn orphans_seen(rows: &[NodeRow], now: StoreTime) -> Vec<(String, u64, Duration)> {
+    let held = rows.iter().filter_map(|row| {
+        let orphans = &row.record.state.orphans;
+        let first = orphans.values().map(|orphan| orphan.first_seen).min()?;
+        let count = u64::try_from(orphans.len()).unwrap_or(u64::MAX);
+        Some((row.record.host.to_string(), count, now.since(first)))
+    });
+    held.collect()
 }
 
 /// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, of

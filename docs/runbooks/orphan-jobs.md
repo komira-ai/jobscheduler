@@ -12,18 +12,28 @@ such job is an *orphan* of its host:
 - the host's row keeps it with the time a heartbeat first listed it, so its age is the same on every
   server over the store;
 - the host takes no new job while it lists one, so the work the store does not count is never booked
-  over;
-- it ends by itself at its own wall limit on the agent; if it is still listed after `--max-job-wall`
-  (`server.max_job_wall`, 30 days unless set), the server tells the host to stop it (the stop's reason
-  is `orphan_expired`), one orphan of a host at a time.
+  over; the host listing shows it (`"orphans": <count>` in `GET /v1/hosts` and in `js host list`), and
+  the gauges `js_host_orphans` and `js_host_oldest_orphan_age_seconds` are written for the host;
+- it ends by itself at its own wall limit on the agent. On a host whose listing is mostly known, if it
+  is still listed after `--max-job-wall` (`server.max_job_wall`, 30 days unless set), the server tells
+  the host to stop it (the stop's reason is `orphan_expired`), one orphan of a host at a time. On a
+  host whose listing is mostly orphans (section 2) the server never ends one at that bound: it ends at
+  its wall limit on the agent, or when an operator ends it (section 3).
 
 The jobs the store does hold records of are stopped for those records, each stop carrying its reason
 (`cancelled`, `ended`, `replaced`), and the agent logs the reason (`job: StopReasoned { ... }`).
 
+**A host that takes no work.** When `js host list` shows a host with `orphans`, or `js_host_orphans`
+is above 0 for it, that host takes no new job until those jobs end. List them (section 1) and, if the
+store is right and nobody wants them, end them (section 3); if most of its work is orphans, check the
+store first (section 2).
+
 ## 1. See the orphans
 
-`js_unknown_jobs_found_total{host="..."}` counts each orphan once, when a heartbeat first lists it. To
-see a host's orphans and how long it has listed each:
+`js_host_orphans{host="..."}` is how many orphans a host holds now and
+`js_host_oldest_orphan_age_seconds{host="..."}` how long its oldest has been listed; both are written
+only for a host that holds one. `js_unknown_jobs_found_total{host="..."}` counts each orphan once,
+when a heartbeat first lists it. To see a host's orphans and how long it has listed each:
 
 ```
 curl -s -H "Authorization: Bearer $(cat client-token)" \
@@ -38,8 +48,11 @@ A host the store holds no row of is `404 unknown-host`.
 
 ## 2. When most of a host's work is unknown
 
-When more than half of what a host lists is orphans, the server tells that host to stop nothing at all,
-not even a job the store records a cancel of: the store is more likely wrong than the host. Each such
+When more than half of what a host lists is orphans, the server's heartbeat reply tells that host to
+stop nothing at all, not even a job the store records a cancel of, and no orphan of it is ended at
+`--max-job-wall`: the store is more likely wrong than the host. The guard is the heartbeat's alone: a
+stop already queued in the host's dispatch queue (written when a server decided a job's end, and handed
+to an agent that polls dispatch) is still handed out, and an operator's end (section 3) still goes out. Each such
 heartbeat counts in `js_unknown_listing_guarded_total{host="..."}`, and the server logs an error the
 first time (`more than half of what the host lists is unknown to the store`). Alert on any rise of that
 counter. It means the store lost or rolled back its tables, or the server reads the wrong store: check
