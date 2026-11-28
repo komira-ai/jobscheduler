@@ -36,8 +36,8 @@ fn other_agents(root: &Path, dir: &Path, found: &str) -> Result<TreeRules, Nativ
 /// Asserts that a tree in another agent's folder that carries this run's own name, at both
 /// of the provider's shapes, is refused `input-not-allowed` naming both folders, by exact
 /// equality, beside this agent's tree of the same run, which is taken; and that by path alone
-/// the folders the old rule took for any lowercase hex (`6a79`, `0f9e`, the `aa` the tests
-/// used), the agent's own folder in uppercase, a missing folder (`mount-provider//...`) and
+/// folders that are lowercase hex but not this agent's (`6a79`, `0f9e`,
+/// `aa`), the agent's own folder in uppercase, a missing folder (`mount-provider//...`) and
 /// another agent's folder itself are each refused as another agent's. Catches a rule that
 /// takes any provider folder below the root, which would open to a run every agent's tree of
 /// a run with its name.

@@ -210,7 +210,7 @@ impl TreeRules {
 }
 
 /// Why a directory below the trees root is not a tree the provider answered for the run
-/// ([`check_runs_tree`]). Each reads after "below the trees root <root>, ".
+/// ([`check_runs_tree`]). Each reads after `below the trees root <root>, `.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NotRunsTree {
     /// A component of the path below the root is not UTF-8 (shown lossily): the provider
@@ -232,8 +232,8 @@ pub enum NotRunsTree {
     /// The provider's folder is not the one it keeps for this agent: `found` is the folder the
     /// path names, `own` the hex of the name this agent gives itself in its provider calls.
     #[error(
-        "{PROVIDER_DIR}/{found} is not this agent's folder: the provider answers this agent's \
-         trees in {PROVIDER_DIR}/{own}"
+        "mount-provider/{found} is not this agent's folder: the provider answers this agent's \
+         trees in mount-provider/{own}"
     )]
     OtherAgent {
         /// The folder the path names below `mount-provider`.
@@ -244,8 +244,8 @@ pub enum NotRunsTree {
     /// Not one of the two shapes of a tree of the run in this agent's folder.
     #[error(
         "a job mounts only a tree the provider answered for its own run \
-         ({PROVIDER_DIR}/<provider>/<run>/<index> or \
-         {PROVIDER_DIR}/<provider>/<run>/a<attempt>/<index>)"
+         (mount-provider/<provider>/<run>/<index> or \
+         mount-provider/<provider>/<run>/a<attempt>/<index>)"
     )]
     NotTheRunsShape,
 }
