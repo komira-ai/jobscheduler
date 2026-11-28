@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use js_elastic::Offer;
 use js_scaler::{
-    Cooldown, CooldownReason, Health, HostState, LaunchMode, Mark, Phase, Settings, launchable,
+    Cooldown, CooldownReason, Health, HostMark, HostState, LaunchMode, Phase, Settings, launchable,
 };
 
 fn can(rig: &Rig) -> bool {
@@ -27,7 +27,7 @@ fn a_request_is_launchable_when_a_live_available_pool_has_a_fitting_offer() {
     };
     assert!(!can(&Rig::new(plan_only)));
 
-    for health in [Health::Checking, Health::Failing] {
+    for health in [Health::Checking, Health::Unavailable] {
         let mut rig = Rig::new(settings("gpu"));
         rig.pool().health = health;
         assert!(!can(&rig));
@@ -92,12 +92,12 @@ fn a_full_pool_is_launchable_only_if_an_idle_host_would_free_a_slot() {
     };
     assert!(can(&make(|_| {}, Phase::Registered)));
     assert!(can(&make(
-        |h| h.mark = Some(Mark::Draining),
+        |h| h.mark = Some(HostMark::Draining),
         Phase::Draining
     )));
     assert!(!can(&make(|h| h.busy = true, Phase::Registered)));
     assert!(!can(&make(
-        |h| h.mark = Some(Mark::Held),
+        |h| h.mark = Some(HostMark::Held),
         Phase::Registered
     )));
     assert!(!can(&make(
@@ -105,7 +105,7 @@ fn a_full_pool_is_launchable_only_if_an_idle_host_would_free_a_slot() {
         Phase::Registered
     )));
     assert!(!can(&make(
-        |h| h.mark = Some(Mark::Releasing),
+        |h| h.mark = Some(HostMark::Releasing),
         Phase::Releasing
     )));
 

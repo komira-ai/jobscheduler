@@ -218,7 +218,7 @@ async fn a_pool_whose_checks_or_list_fail_launches_nothing() {
     assert!(rig.log().is_empty());
     assert_eq!(rig.scaler.state().blocked["gpu"], Blocked::Checking);
 
-    rig.world().health = Health::Failing;
+    rig.world().health = Health::Unavailable;
     rig.scaler.tick().await;
     assert!(rig.log().is_empty());
     assert_eq!(rig.scaler.state().blocked["gpu"], Blocked::Unavailable);

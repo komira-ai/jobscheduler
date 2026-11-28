@@ -117,6 +117,9 @@ pub enum Isolation {
 }
 
 /// The container to run for one job.
+///
+/// This is the per-lease container the host side runs, built for a lease; it is not the
+/// job's request, which is [`js_types::JobContainer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerSpec {
     /// The container's name, unique on the node (the lease's directory is named by it).

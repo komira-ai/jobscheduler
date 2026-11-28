@@ -171,6 +171,7 @@ impl Script {
     }
 }
 
+/// The helper process of one scripted VM start, driven by its [`Script`].
 pub struct FakeProc {
     pid: u32,
     events: VecDeque<Poll>,
@@ -252,12 +253,19 @@ impl VmProcess for FakeProc {
 /// A hook run on each clone's destination.
 pub type CloneHook = Box<dyn Fn(&Path)>;
 
+/// A [`System`] whose files are really copied but whose VM helpers, host queries and
+/// installs answer from the values set here; it records what it was asked to do.
 pub struct FakeSystem {
+    /// The scripts the next starts follow, one per start; once empty, a start uses
+    /// [`Script::booted`].
     pub scripts: RefCell<VecDeque<Script>>,
+    /// Every `start_vm` call so far: the spec and the user id to run as.
     pub starts: RefCell<Vec<(VmSpec, Option<u32>)>>,
     /// The names in the results directory of each start, taken as the VM starts.
     pub results_at_start: RefCell<Vec<Vec<String>>>,
+    /// When set, `start_vm` fails with this message.
     pub start_error: RefCell<Option<String>>,
+    /// When set, `clonefile` fails for a source whose file name is this.
     pub clone_fails_on: RefCell<Option<&'static str>>,
     /// How many more `clonefile` calls succeed (`None`: all).
     pub clone_budget: Cell<Option<usize>>,
@@ -265,36 +273,59 @@ pub struct FakeSystem {
     pub after_clone: RefCell<Option<CloneHook>>,
     /// Runs after each offline write, to change the host between the write and what follows.
     pub after_offline_write: RefCell<Option<Box<dyn Fn()>>>,
+    /// Every `clonefile` call that was not refused so far: the source and the destination.
     pub cloned: RefCell<Vec<(PathBuf, PathBuf)>>,
     /// Every path `clear_immutable` was asked about, in order.
     pub unflagged: RefCell<Vec<PathBuf>>,
     /// Makes `clear_immutable` fail.
     pub unflag_fails: Cell<bool>,
+    /// What `new_machine_identifier` answers: the identifier bytes, or an error message.
     pub identity: RefCell<Result<Vec<u8>, String>>,
+    /// The user id `uid` reports.
     pub uid: Cell<u32>,
+    /// The parent process id `ppid` reports.
     pub ppid: Cell<u32>,
+    /// The launchd context `launchd_context` reports, if any.
     pub context: RefCell<Option<String>>,
+    /// The user id of the console user `console_uid` reports, if any.
     pub console_uid: Cell<Option<u32>>,
+    /// What `purge_cache` answers.
     pub purge: RefCell<Result<(), String>>,
+    /// How many times `purge_cache` has been called.
     pub purges: Cell<u32>,
+    /// What `signature` answers: the code signature, or an error message.
     pub sig: RefCell<Result<Signature, String>>,
+    /// What `offline_write` answers: the report, or an error message.
     pub offline: RefCell<Result<Value, String>>,
+    /// Every `offline_write` call so far: the disk and the paths of the files to write.
     pub offline_calls: RefCell<Vec<(PathBuf, Vec<String>)>>,
+    /// What `offline_harvest` answers: the report, or an error message.
     pub harvest: RefCell<Result<Value, String>>,
+    /// Every `offline_harvest` call so far: the disk and the output directory.
     pub harvest_calls: RefCell<Vec<(PathBuf, PathBuf)>>,
+    /// What `process_table` answers: the table text, or an error message.
     pub table: RefCell<Result<String, String>>,
+    /// What `fetch` answers: success, or an error message.
     pub fetch: RefCell<Result<(), String>>,
+    /// The bytes a successful `fetch` writes to the destination.
     pub fetch_body: RefCell<Vec<u8>>,
     /// Makes a successful `fetch` leave a directory where the file should be.
     pub fetch_leaves_dir: Cell<bool>,
+    /// The URL of every `fetch` call so far.
     pub fetched: RefCell<Vec<String>>,
+    /// What `install_image` answers: the report, or an error message.
     pub install: RefCell<Result<Value, String>>,
+    /// Every `install_image` call so far: the image file, the output directory and the sizing.
     pub installs: RefCell<Vec<(PathBuf, PathBuf, Sizing)>>,
     /// Runs after each install with the bundle directory.
     pub after_install: RefCell<Option<CloneHook>>,
+    /// What `offline_stage` answers: the report, or an error message.
     pub stage: RefCell<Result<Value, String>>,
+    /// Every `offline_stage` call so far: the disk and the plan.
     pub stage_calls: RefCell<Vec<(PathBuf, crate::stage::Plan)>>,
+    /// What `run_vm_helper` answers: success, or an error message.
     pub helper: RefCell<Result<(), String>>,
+    /// The spec of every `run_vm_helper` call so far.
     pub helper_specs: RefCell<Vec<VmSpec>>,
     next_pid: Cell<u32>,
     /// The time the probes read: see [`FakeClock`].
@@ -302,6 +333,7 @@ pub struct FakeSystem {
 }
 
 impl FakeSystem {
+    /// A system with no scripts queued and every answer set to success.
     pub fn new() -> Self {
         Self {
             scripts: RefCell::new(VecDeque::new()),
@@ -346,12 +378,14 @@ impl FakeSystem {
         }
     }
 
+    /// Queues `s` for the next VM start that has no script ahead of it.
     pub fn script(&self, s: Script) -> &Self {
         self.scripts.borrow_mut().push_back(s);
         self
     }
 }
 
+/// An ad-hoc signature with the hardened runtime and the virtualization entitlement.
 pub fn good_signature() -> Signature {
     Signature {
         adhoc: true,

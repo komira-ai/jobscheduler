@@ -300,8 +300,8 @@ pub(crate) struct Start {
     bundles: Option<Arc<crate::bundle::Placer>>,
     /// The VM backend, when `--vm-driver` turned it on.
     vm: Option<crate::vm::VmSettings>,
-    /// The Xcodes the hello lists ([`crate::host::Offer::xcodes`]), which the native runtime
-    /// runs a job that names one with.
+    /// The Xcodes the hello lists ([`crate::host::PreparedHello::xcodes`]), which the native
+    /// runtime runs a job that names one with.
     xcodes: Vec<crate::xcode::Xcode>,
 }
 

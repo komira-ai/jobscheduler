@@ -102,6 +102,18 @@ fn a_pool_that_says_nothing_launches_nothing_and_requires_the_container_contract
     assert_eq!(config.listen().to_string(), "127.0.0.1:0");
 }
 
+/// Asserts that a pool table without `boot_timeout` gets the scaler's default,
+/// `js_scaler::BOOT_TIMEOUT`. Catches a second copy of the default in the config reader that
+/// drifts from the scaler's.
+#[test]
+fn a_pool_without_boot_timeout_gets_the_scalers_default() {
+    let scratch = Scratch::new("config_boot_timeout_default");
+    let pool = PoolText::elastic(&scratch);
+    let config = load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).unwrap();
+    let plan = config.elastic_pool().unwrap();
+    assert_eq!(plan.boot_timeout, js_scaler::BOOT_TIMEOUT);
+}
+
 /// Asserts that `exec = "none"` asks for no host contract, `exec = "sandbox-exec"` asks
 /// for that mode of a kind that can launch it, and `launch = "live"` and
 /// `network = { kind = "default" }` are accepted and read. It catches an opt-out that

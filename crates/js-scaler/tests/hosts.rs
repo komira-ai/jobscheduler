@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use js_elastic::HostStatus;
-use js_scaler::{CooldownReason, HostState, Mark, Phase, Records};
+use js_scaler::{CooldownReason, HostMark, HostState, Phase, Records};
 
 /// Asserts that the boot clock runs from the launch, as the token's does, and not from
 /// the answer: a machine accepted ten minutes after its launch is given up on at
@@ -98,7 +98,7 @@ fn a_machine_the_registry_forgot_is_released() {
 #[test]
 fn a_registered_host_marked_releasing_is_released() {
     let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
-    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    rig.input.hosts[0].mark = Some(HostMark::Releasing);
     let actions = rig.tick(at(3 * SECOND));
     assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
@@ -166,7 +166,7 @@ fn a_taken_back_host_whose_undrain_was_lost_is_not_stuck() {
     let now = 2 * SECOND + 10 * MINUTE;
     rig.tick(at(now));
     assert_eq!(rig.phase(0), Phase::Draining);
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     rig.input.waiting = vec![request("r2")];
     let undrain = rig.tick(at(now + SECOND));
     assert_eq!(count(&undrain, "Undrain"), 1);
@@ -187,7 +187,7 @@ fn a_taken_back_host_whose_undrain_was_lost_is_not_stuck() {
 #[test]
 fn a_request_takes_back_a_registered_host_still_shown_draining() {
     let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(3 * SECOND));
     assert_eq!(kinds(&actions), ["Undrain"]);
@@ -303,7 +303,7 @@ fn a_silent_host_with_its_leases_given_up_is_drained_then_released_after_the_hol
     assert_eq!(rig.phase(0), Phase::Draining);
     assert!(rig.state.silent_released.is_empty());
 
-    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    rig.input.hosts[0].mark = Some(HostMark::Releasing);
     let actions = rig.tick(at(3 * SECOND + 32 * MINUTE));
     assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
@@ -478,8 +478,8 @@ fn a_host_that_never_heartbeated_but_books_work_is_not_released_at_boot_timeout(
     type Work = fn(&mut Rig, &str);
     let works: [Work; 4] = [
         |rig, _| rig.input.hosts[0].busy = true,
-        |rig, _| rig.input.hosts[0].mark = Some(Mark::Held),
-        |rig, _| rig.input.hosts[0].mark = Some(Mark::Reserved),
+        |rig, _| rig.input.hosts[0].mark = Some(HostMark::Held),
+        |rig, _| rig.input.hosts[0].mark = Some(HostMark::Reserved),
         |rig, name| rig.input.waiting = vec![reserved("r2", name)],
     ];
     for work in works {

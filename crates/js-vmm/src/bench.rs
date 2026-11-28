@@ -38,11 +38,17 @@ use crate::system::Clock;
 /// One run's measurements in milliseconds; `None` is a marker that never appeared.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Run {
+    /// How long cloning the base bundle took.
     pub clone: f64,
+    /// From the helper's spawn to its `started` event.
     pub running: f64,
+    /// From the helper's spawn to the guest's system-ready marker.
     pub system: Option<f64>,
+    /// From the helper's spawn to the guest's login marker.
     pub login: Option<f64>,
+    /// From the helper's spawn to the guest's Aqua-ready marker.
     pub aqua: Option<f64>,
+    /// From the stop request to the helper's exit.
     pub stop_to_exit: f64,
     /// Why the run ended early (the helper died, or the VM stopped), when it did.
     pub failure: Option<String>,

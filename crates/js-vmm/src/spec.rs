@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 /// A directory shared into the guest with its own virtiofs tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaggedShare {
+    /// The virtiofs tag the guest mounts the share by.
     pub tag: String,
+    /// The host directory that is shared.
     pub path: PathBuf,
     /// When set, the share is a multiple-directory share that lists `path` under this name;
     /// otherwise a single-directory share.
@@ -39,7 +41,9 @@ pub struct ExecBridge {
 pub struct VmSpec {
     /// The bundle directory (a clone, never the prepared base).
     pub bundle: PathBuf,
+    /// The number of virtual CPUs.
     pub cpus: u32,
+    /// The guest's memory in MiB.
     pub memory_mib: u64,
     /// Whether the VM has a graphics device (a display with no host window).
     pub graphics: bool,
@@ -88,33 +92,62 @@ impl VmSpec {
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
     /// The configuration validated; the start call is next.
-    Configured { ms: u64 },
+    Configured {
+        /// Milliseconds since the helper began.
+        ms: u64,
+    },
     /// The start call's completion handler reported success, `ms` after the helper began.
-    Started { ms: u64 },
+    Started {
+        /// Milliseconds since the helper began.
+        ms: u64,
+    },
     /// The VM changed state (`running`, `stopped`, `paused`, `error`, ...).
-    State { state: String, ms: u64 },
+    State {
+        /// The state's name (`running`, `stopped`, `paused`, `error`, ...).
+        state: String,
+        /// Milliseconds since the helper began.
+        ms: u64,
+    },
     /// A guest connected to a vsock port the host listens on.
-    Vsock { port: u32 },
+    Vsock {
+        /// The vsock port the guest connected to.
+        port: u32,
+    },
     /// The guest wrote `text` to a console port.
-    Console { port: String, text: String },
+    Console {
+        /// The name of the console port the guest wrote to.
+        port: String,
+        /// What the guest wrote, decoded as UTF-8 (lossily).
+        text: String,
+    },
     /// The VM stopped: the guest shut down after a shutdown request, or the parent closed
     /// the helper's stdin and the VM was force-stopped.
-    Stopped { ms: u64 },
+    Stopped {
+        /// Milliseconds since the helper began.
+        ms: u64,
+    },
     /// The helper sent the guest the `shutdown` command over vsock (`guest_command`) and
     /// this is how it went. `acked`: the guest's daemon answered `ack`, so the guest is
     /// shutting itself down and the helper waits for it; otherwise `detail` says why not
     /// and the helper has fallen back to the framework's stop request (the guest's
     /// power-button request).
     ShutdownCommand {
+        /// Whether the guest's daemon answered `ack`.
         acked: bool,
+        /// What happened: `acked`, or why the command did not get through.
         detail: String,
+        /// Milliseconds since the helper began.
         ms: u64,
     },
     /// A call failed. `code` is the Virtualization.framework error code name when there is
     /// one (`VirtualMachineLimitExceeded`).
     Error {
+        /// The step that failed: `configure`, `results`, `start`, `running` (the VM stopped
+        /// with an error), `shutdown` (the stop request failed) or `stop`.
         stage: String,
+        /// The error's message.
         message: String,
+        /// The Virtualization.framework error code name, when there is one.
         code: Option<String>,
     },
 }

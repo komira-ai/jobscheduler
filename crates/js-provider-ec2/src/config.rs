@@ -68,6 +68,8 @@ pub struct Ec2Config {
     pub(crate) max_machines: NonZeroUsize,
     pub(crate) enabled: bool,
     pub(crate) mode: Mode,
+    /// How long a launch that got no answer counts toward `max_machines` while no list shows
+    /// it. Not js-scaler's `Settings::unknown_hold`.
     pub(crate) unknown_hold: Duration,
     pub(crate) allowed: Option<BTreeSet<InstanceType>>,
 }
@@ -109,7 +111,9 @@ impl Ec2Config {
     }
 
     /// Sets how long a launch that got no answer counts toward `max_machines` while no
-    /// list shows it (ten minutes by default). After that a list is trusted to show it.
+    /// list shows it (600 seconds by default). After that a list is trusted to show it. This
+    /// is the provider's own cap guard, separate from the `unknown_hold` of js-scaler's
+    /// `Settings` (30 minutes by default), which settles the pool's record of the acquire.
     #[must_use]
     pub fn unknown_hold(mut self, hold: Duration) -> Self {
         self.unknown_hold = hold;

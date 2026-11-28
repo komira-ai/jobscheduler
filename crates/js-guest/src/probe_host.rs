@@ -16,6 +16,7 @@ use crate::frame::{self, Frame, Kind, SendError};
 use crate::probe::Host;
 use crate::vsock::{AF_VSOCK, HOST_CID, SOCKADDR_VM_LEN, set_io_timeout, sockaddr_vm};
 
+/// The probe's [`Host`] on the machine it runs on: real ids, files and commands.
 pub struct SystemHost;
 
 fn errno() -> i32 {

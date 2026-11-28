@@ -18,9 +18,11 @@ pub const VM_SERVICE: &str = "com.apple.Virtualization.VirtualMachine";
 /// One process table row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
+    /// The process id.
     pub pid: u32,
     /// CPU time used so far, in milliseconds.
     pub cpu_ms: u64,
+    /// The command name, which may hold spaces.
     pub command: String,
 }
 
@@ -91,7 +93,9 @@ pub struct Sample {
     /// Every VM service process: `(pid, cpu_ms)`. With two guests running, the service
     /// whose CPU rises belongs to the guest that executes.
     pub services: Vec<(u32, u64)>,
+    /// 512-byte blocks allocated to the disk image; `None` when it could not be examined.
     pub disk_blocks: Option<u64>,
+    /// The disk image's last change, in seconds since the Unix epoch; `None` as above.
     pub disk_mtime: Option<i64>,
 }
 
@@ -114,6 +118,7 @@ impl Sample {
         }
     }
 
+    /// The sample as a JSON object, for the report.
     #[must_use]
     pub fn json(&self) -> Value {
         json!({

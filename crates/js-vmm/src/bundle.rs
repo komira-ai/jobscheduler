@@ -12,9 +12,13 @@ use std::time::{Duration, Instant};
 
 use crate::system::System;
 
+/// The guest's disk image file.
 pub const DISK: &str = "disk.img";
+/// The auxiliary storage file holding the guest's boot state.
 pub const AUX: &str = "aux.img";
+/// The file holding the data representation of the guest's `VZMacHardwareModel`.
 pub const HARDWARE_MODEL: &str = "hardware-model";
+/// The file holding the data representation of the guest's `VZMacMachineIdentifier`.
 pub const MACHINE_ID: &str = "machine-identifier";
 
 /// The four file names, in the order they are cloned.
@@ -28,16 +32,22 @@ pub const SIZING: &str = "sizing.json";
 /// least 2 CPUs and 4 GiB of memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sizing {
+    /// The size of the guest's disk, in GiB.
     pub disk_gib: u64,
+    /// The number of CPUs, or `None` for the restore image's minimum.
     pub cpus: Option<u32>,
+    /// The memory in MiB, or `None` for the restore image's minimum.
     pub memory_mib: Option<u64>,
 }
 
 /// The sizes a base bundle was built with, as `sizing.json` records them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Recorded {
+    /// The number of CPUs the base was built with.
     pub cpus: u32,
+    /// The memory the base was built with, in MiB.
     pub memory_mib: u64,
+    /// The size of the base's disk, in GiB.
     pub disk_gib: u64,
 }
 
@@ -70,22 +80,46 @@ pub enum Identity {
 /// Why a bundle could not be used or cloned.
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
+    /// A file the bundle needs is not in the directory.
     #[error(
         "{dir} is not a prepared base bundle: {file} is missing (build one with `js-vmm image base`)"
     )]
-    Missing { dir: PathBuf, file: &'static str },
+    Missing {
+        /// The bundle directory that was checked.
+        dir: PathBuf,
+        /// The name of the file that is not in it.
+        file: &'static str,
+    },
+    /// `clonefile(2)` of one file failed.
     #[error("clonefile {src} -> {dst}: {source}")]
     Clone {
+        /// The file that was cloned.
         src: PathBuf,
+        /// Where the clone was to go.
         dst: PathBuf,
+        /// The error `clonefile(2)` returned.
         source: io::Error,
     },
+    /// The immutable flag on a cloned file could not be cleared.
     #[error("clear the immutable flag on {path}: {source}")]
-    Unflag { path: PathBuf, source: io::Error },
+    Unflag {
+        /// The cloned file whose flag could not be cleared.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: io::Error,
+    },
+    /// A new machine identifier could not be made.
     #[error("a new machine identifier: {0}")]
     NewIdentity(String),
+    /// A file of the clone could not be written.
     #[error("write {path}: {source}")]
-    Write { path: PathBuf, source: io::Error },
+    Write {
+        /// The file of the clone that could not be written.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: io::Error,
+    },
+    /// The destination of the clone already exists.
     #[error("{0} already exists: a clone never overwrites")]
     Exists(PathBuf),
 }

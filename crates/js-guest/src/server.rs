@@ -88,6 +88,7 @@ pub struct Agent {
 
 impl Agent {
     #[must_use]
+    /// The agent for `config`, before its command has started.
     pub fn new(config: Config) -> Self {
         Self { config, ran: false }
     }

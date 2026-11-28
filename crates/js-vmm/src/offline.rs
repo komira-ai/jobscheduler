@@ -22,6 +22,7 @@ pub struct Attach {
     pub device: String,
     /// Every `dev-entry`, in order.
     pub entries: Vec<String>,
+    /// The mount points of the attached volumes, in order.
     pub mounts: Vec<PathBuf>,
 }
 

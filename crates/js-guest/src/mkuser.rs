@@ -162,7 +162,9 @@ pub fn password_from(random: &[u8]) -> String {
 /// One argument of a command: text, or the password (which a frame never shows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arg {
+    /// Literal text.
     Text(String),
+    /// The generated password, which a frame never shows.
     Password,
     /// The path of a user's per-host preference file (`<dir>/<domain>.<hardware UUID><ext>`),
     /// given the directory, the domain and the extension; the UUID comes from the
@@ -197,9 +199,11 @@ pub enum Action {
 /// One step of the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
+    /// The step's name, as other steps and frames refer to it.
     pub id: String,
     /// The steps that must have succeeded.
     pub needs: Vec<String>,
+    /// What the step does.
     pub action: Action,
 }
 
@@ -482,6 +486,7 @@ impl From<&MkUserArgs> for Config {
 
 /// What the run asks of the guest; a fake in tests.
 pub trait MkUserHost {
+    /// Whether the process runs as root.
     fn is_root(&self) -> bool;
     /// Whether a user of that name exists.
     fn user_exists(&self, name: &str) -> bool;
@@ -516,6 +521,7 @@ pub trait MkUserHost {
     /// # Errors
     /// No connection or reply, or the host refused the frame.
     fn send(&self, port: u32, frame: &Frame) -> Result<(), SendError>;
+    /// Waits for `d`.
     fn pause(&self, d: Duration);
     /// Sends `frame` to the host on `port` and returns the body of its `ack`: the host's
     /// answer to a question.
@@ -540,7 +546,9 @@ pub trait MkUserHost {
 /// The frame that ends the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkUserSummary {
+    /// Whether the run reached its end; it is always set when the summary is made.
     pub complete: bool,
+    /// The name of the user the run was for.
     pub user: String,
     /// Every step with its status, in order.
     pub steps: Vec<(String, Status)>,
@@ -554,6 +562,7 @@ pub struct MkUserSummary {
     pub powering_off: bool,
     /// Names of the frames that never reached the host.
     pub undelivered: Vec<String>,
+    /// A note on how the run ended, if there is one.
     pub note: Option<String>,
     /// What became of the simulator's root setup ([`mkuser_prime::RootSetup`]); `image prime`
     /// is an error unless it is `done` or `not_needed`. Missing in a summary from an older guest.
@@ -568,6 +577,7 @@ pub struct MkUserSummary {
 /// How the run ended, for the exit status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finished {
+    /// The summary the run ended with.
     pub summary: MkUserSummary,
     /// The power-off command, when one was run: whether it started.
     pub power_off_started: Option<bool>,

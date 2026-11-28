@@ -20,6 +20,7 @@ use crate::wire::{OutputEntry, OutputKind, RunRequest, Usage};
 /// The names of the command's stdout and stderr in the outputs share. A requested
 /// output may not be either, or lie under either.
 pub const STDOUT: &str = "stdout";
+/// The name of the command's stderr in the outputs share.
 pub const STDERR: &str = "stderr";
 
 /// How often the leader is polled and the group's emptiness checked.
@@ -32,16 +33,27 @@ pub const DRAIN: Duration = Duration::from_secs(5);
 /// A request the shares do not allow, or that cannot be expressed to the OS.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RequestError {
+    /// The request has no program to run.
     #[error("argv is empty")]
     NoProgram,
+    /// An argument, environment entry or path holds a NUL byte, which the OS cannot take.
     #[error("{0:?} holds a NUL byte")]
     Nul(String),
+    /// An environment variable name is empty or contains `=`.
     #[error("environment name {0:?} is empty or holds '='")]
     EnvName(String),
+    /// A path that must be plain and relative to its share is not.
     #[error("{what} {path:?} is not a plain relative path")]
-    NotRelative { what: &'static str, path: String },
+    NotRelative {
+        /// Which part of the request holds the path (`output` or `cwd`).
+        what: &'static str,
+        /// The offending path, as the request gave it.
+        path: String,
+    },
+    /// A requested output is named `stdout` or `stderr`, or lies under one of them.
     #[error("output {0:?} is reserved for the command's stdout or stderr")]
     Reserved(String),
+    /// The working directory is not a directory inside the inputs share.
     #[error("cwd {0:?} is not a directory inside the inputs share")]
     Cwd(String),
 }
@@ -120,6 +132,7 @@ pub struct Running {
 pub struct Reaped {
     /// `Ok(code)` for an exit, `Err(signal)` for a signal.
     pub status: Result<i32, i32>,
+    /// The resource usage `wait4` reported for the leader.
     pub usage: Usage,
 }
 

@@ -45,9 +45,13 @@ pub const RECORD: &str = "prime-record";
 /// One root command of the probe, run in the priming boot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrepStep {
+    /// The id the step is recorded and reported under.
     pub id: String,
+    /// The command and its arguments.
     pub argv: Vec<String>,
+    /// How long the step may take.
     pub class: Class,
+    /// The ids of the steps that must have succeeded before this one runs.
     pub needs: Vec<String>,
     /// The record read at the start already covers it.
     pub done: bool,
@@ -83,6 +87,7 @@ impl Prep {
 /// How many times, and how far apart, [`ask_host`] tries to reach the host before it
 /// concludes that there is no answer.
 pub const ASK_ATTEMPTS: u32 = 20;
+/// How long [`ask_host`] waits between two tries.
 pub const ASK_PAUSE: std::time::Duration = std::time::Duration::from_secs(3);
 /// The name of the frame that asks the host whether this boot is the priming one.
 pub const QUESTION: &str = "prime-question";
@@ -151,7 +156,9 @@ pub struct Gated {
     /// runs the ones the record does not cover), never `mkuser`'s: it would race `sim` and
     /// power the clone off mid-probe.
     pub prep: Prep,
+    /// What the question to the host got.
     pub signal: Signal,
+    /// What becomes of the root setup in this boot.
     pub root_setup: RootSetup,
 }
 

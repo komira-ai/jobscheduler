@@ -25,14 +25,19 @@ use crate::spec::VmSpec;
 /// The host ends of one console port: the helper reads `from_guest` and keeps `_to_guest`
 /// open so the guest's reads never see end of file.
 pub struct ConsoleFds {
+    /// The console port's name, as the spec names it.
     pub name: String,
+    /// The read end of the pipe the guest writes this console's output to.
     pub from_guest: RawFd,
+    /// The write end of the pipe the guest reads from, held open and never written to.
     pub _to_guest_write: RawFd,
 }
 
 /// A configuration plus the descriptors of its console ports.
 pub struct Built {
+    /// The validated virtual machine configuration.
     pub config: Retained<VZVirtualMachineConfiguration>,
+    /// The host ends of each console port in the configuration.
     pub consoles: Vec<ConsoleFds>,
 }
 

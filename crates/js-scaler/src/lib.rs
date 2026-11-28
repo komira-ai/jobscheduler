@@ -190,16 +190,16 @@ use crate::scale::Claims;
 
 pub use budget::{Budgets, Totals, overrun};
 pub use input::{
-    AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
+    AcquireResult, HostFacts, HostMark, HostState, Input, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
     Brake, Cooldown, CooldownReason, Go, OLDEST, OfferCooldown, Phase, Record, Records,
     RecordsError, StoredExec, StoredOffer, VERSION,
 };
 pub use settings::{
-    ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked,
-    Health, LaunchMode, OFFER_COOLDOWN, ProviderSettings, QUOTA_BACKOFF, SIZE_TOLERANCE_PERCENT,
-    Settings, UNNAMED_PROVIDER,
+    ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER,
+    BOOT_TIMEOUT, Blocked, Health, LaunchMode, OFFER_COOLDOWN, ProviderSettings, QUOTA_BACKOFF,
+    SIZE_TOLERANCE_PERCENT, Settings, UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
@@ -259,7 +259,7 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
                     [
                         host.state == HostState::Live,
                         !host.busy,
-                        [None, Some(Mark::Draining)].contains(&host.mark),
+                        [None, Some(HostMark::Draining)].contains(&host.mark),
                     ]
                     .into_iter()
                     .all(|ok| ok)

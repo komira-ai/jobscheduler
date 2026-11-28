@@ -44,6 +44,7 @@ pub struct Queued<T>(T);
 unsafe impl<T> Send for Queued<T> {}
 
 impl<T> Queued<T> {
+    /// Wraps `v` for use on one dispatch queue.
     pub fn new(v: T) -> Self {
         Self(v)
     }
@@ -78,6 +79,7 @@ impl<T> Shared<T> {
         Self(v)
     }
 
+    /// The wrapped value.
     pub fn get(&self) -> &T {
         &self.0
     }

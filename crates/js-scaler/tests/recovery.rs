@@ -332,7 +332,7 @@ fn a_retry_uses_the_step_and_waits_for_a_healthy_pool() {
     )];
     rig.tick(at(SECOND));
 
-    rig.pool().health = Health::Failing;
+    rig.pool().health = Health::Unavailable;
     assert!(rig.tick(at(13 * SECOND)).is_empty());
     assert_eq!(rig.phase(0), Phase::Planned);
 

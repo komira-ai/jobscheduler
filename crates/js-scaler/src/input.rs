@@ -10,6 +10,13 @@ use js_types::{HostId, ProviderId, RequestId};
 use crate::budget::Budgets;
 use crate::settings::{Health, Settings};
 
+/// Whether the registry hears from a host. Only `Live` is acted on: a host in either other
+/// state covers no request, is never drained and is never released on its silence.
+pub use js_types::HostState;
+
+/// How a host is set aside: for whole-node use, or to be scaled away.
+pub use js_types::HostMark;
+
 /// One request waiting for a host, in queue order: the server's shell gives one for each
 /// queued job that holds no allocation. No rule of the step reads how long a request has
 /// waited.
@@ -26,40 +33,6 @@ pub struct Waiting {
     pub reserved: Option<HostId>,
 }
 
-/// How a host is set aside (`js_registry::HostMark`, variant for variant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mark {
-    /// Set aside for a waiting request.
-    Reserved,
-    /// Committed to work: kept like a busy host.
-    Held,
-    /// Marked by the scaler: it takes no start of any kind.
-    Draining,
-    /// Marked by the scaler: it is being given back.
-    Releasing,
-}
-
-/// Whether the registry hears from a host (`js_registry::HostState`, variant for variant).
-///
-/// Only `Live` is acted on: a host in either other state covers no request, is never
-/// drained and is never released on its silence. The registry keeps the host's booking in
-/// both, and so does the scaler. The host covers nothing, but the machine it stands for does
-/// while the scaler is new and the host has not said hello since the restart: until then,
-/// for `boot_timeout` from the restart, the machine's stored offer covers a request it
-/// fits, so the request is not given a second machine. Only a machine in the registered
-/// phase is awaited, not a draining one: a draining machine takes no new lease, so it could
-/// not serve the request it would hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostState {
-    /// Said hello or heartbeat within grace.
-    Live,
-    /// Silent past grace. Silence alone releases nothing.
-    Lost,
-    /// Put back after a restart of the registry and not heard from since: its booking is
-    /// held and cannot be seen, so it is treated as `Lost`.
-    Awaiting,
-}
-
 /// One host the registry knows, as the scaler needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFacts {
@@ -68,7 +41,14 @@ pub struct HostFacts {
     pub id: HostId,
     /// The pool the host belongs to.
     pub pool: String,
-    /// Whether the host is live.
+    /// Whether the host is live. Only `Live` is acted on: a host in either other state
+    /// covers no request, is never drained and is never released on its silence. The registry
+    /// keeps the host's booking in both, and so does the scaler. The host covers nothing, but
+    /// the machine it stands for does while the scaler is new and the host has not said hello
+    /// since the restart: until then, for `boot_timeout` from the restart, the machine's stored
+    /// offer covers a request it fits, so the request is not given a second machine. Only a
+    /// machine in the registered phase is awaited, not a draining one: a draining machine takes
+    /// no new lease, so it could not serve the request it would hold.
     pub state: HostState,
     /// The shape the host announced, in the form of an offer so one rule
     /// ([`Offer::fit`]) judges a host and an offer alike. Its price and availability are
@@ -79,7 +59,7 @@ pub struct HostFacts {
     /// being judged against the offer: nothing is condemned and no cooldown starts.
     pub shape: Option<Offer>,
     /// How the host is set aside, if it is.
-    pub mark: Option<Mark>,
+    pub mark: Option<HostMark>,
     /// Whether the host holds work: the server's shell sets it when a live (booked or
     /// releasing) job allocation is on the host, a whole-host one included, or the
     /// registry still has runs of it to finish. A lease the registry books on the host does

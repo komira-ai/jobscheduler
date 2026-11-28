@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use js_elastic::HostStatus;
-use js_scaler::{Blocked, Mark, Phase};
+use js_scaler::{Blocked, HostMark, Phase};
 
 /// The count of the pool's failure brake, zero when it has none.
 fn failures(rig: &Rig) -> u32 {
@@ -68,7 +68,7 @@ fn a_reclaimed_booting_or_draining_machine_takes_the_list_route() {
     let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
     let now = 2 * SECOND + 10 * MINUTE;
     rig.tick(at(now));
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     rig.tick(at(now + SECOND));
     assert_eq!(rig.phase(0), Phase::Draining);
     rig.input.reclaimed = vec!["i-1".to_owned()];

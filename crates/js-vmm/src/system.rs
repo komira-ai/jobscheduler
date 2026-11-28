@@ -15,12 +15,15 @@ use crate::spec::{Event, VmSpec};
 /// What waiting for a VM helper's next event found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Poll {
+    /// The helper sent an event.
     Event(Event),
     /// Nothing arrived within the wait.
     Quiet,
     /// The helper is gone: its exit code, or the signal that ended it.
     Gone {
+        /// The helper's exit code, when it exited.
         code: Option<i32>,
+        /// The signal that ended it, when one did.
         signal: Option<i32>,
     },
 }
@@ -40,6 +43,7 @@ pub trait Clock: Send + Sync {
 pub struct RealClock(Instant);
 
 impl RealClock {
+    /// A clock whose origin is now.
     #[must_use]
     pub fn new() -> Self {
         Self(Instant::now())
@@ -64,6 +68,7 @@ impl Clock for RealClock {
 /// A running VM helper process. It is `Send`: the VM driver of a lease keeps it between
 /// calls made from different threads.
 pub trait VmProcess: Send {
+    /// The operating system process id of the helper.
     fn pid(&self) -> u32;
     /// The next event, waiting up to `wait`.
     fn poll(&mut self, wait: Duration) -> Poll;
@@ -89,20 +94,26 @@ pub trait VmProcess: Send {
 pub struct OfflineFile {
     /// Path inside the guest's Data volume, without a leading slash.
     pub path: String,
+    /// The bytes of the file.
     pub contents: Vec<u8>,
+    /// The file's permission bits (as in `chmod`).
     pub mode: u32,
 }
 
 /// The facts of a binary's code signature that matter to the virtualization entitlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
+    /// Whether the signature is ad hoc (no signing identity).
     pub adhoc: bool,
+    /// Whether the hardened runtime flag is set.
     pub hardened_runtime: bool,
+    /// Whether the binary carries the virtualization entitlement.
     pub virtualization_entitlement: bool,
     /// The raw `codesign` text, kept in the report.
     pub raw: String,
 }
 
+/// The host operations the probes use: files, processes, the VM helper and the guest's disk.
 pub trait System {
     /// The clock the probes wait by. Every call may return a new clock with its own origin:
     /// only differences between readings of one clock mean anything.
@@ -133,7 +144,9 @@ pub trait System {
     /// # Errors
     /// Not root, or `purge` failed.
     fn purge_cache(&self) -> Result<(), String>;
+    /// The user id this process runs as.
     fn uid(&self) -> u32;
+    /// The process id of this process's parent.
     fn ppid(&self) -> u32;
     /// The launchd domain this process runs in (`launchctl managername`: `System` for a
     /// launch daemon, `Aqua` or `Background` for a login session); `None` when unknown.

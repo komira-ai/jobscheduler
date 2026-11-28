@@ -11,10 +11,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "js-vmm", version)]
 pub struct Cli {
+    /// The command to run.
     #[command(subcommand)]
     pub command: Cmd,
 }
 
+/// The commands of `js-vmm`.
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Run one feasibility gate and print its result as one JSON object.
@@ -28,6 +30,7 @@ pub enum Cmd {
     /// the VM. The probes start this as a child process.
     #[command(hide = true)]
     VmRun {
+        /// Path of the spec file to run.
         #[arg(long)]
         spec: PathBuf,
     },
@@ -95,10 +98,13 @@ pub struct Common {
     pub no_matrix: bool,
 }
 
+/// The arguments of `probe`.
 #[derive(Debug, Args)]
 pub struct ProbeArgs {
+    /// The gate to run.
     #[arg(value_enum, ignore_case = true)]
     pub gate: Gate,
+    /// The options every probe takes.
     #[command(flatten)]
     pub common: Common,
     /// The user id G5 starts the helper as (default 59001); needs root.
@@ -118,7 +124,9 @@ pub struct ProbeArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum Graphics {
+    /// With a graphics device.
     On,
+    /// Without a graphics device.
     Off,
     /// Without graphics first, then with.
     Both,
@@ -129,8 +137,10 @@ fn parse_guest_user(name: &str) -> Result<String, String> {
     js_guest::mkuser::check_name(name).map(|()| name.to_owned())
 }
 
+/// The arguments of `probe-bench`.
 #[derive(Debug, Args)]
 pub struct BenchArgs {
+    /// The options every probe takes.
     #[command(flatten)]
     pub common: Common,
     /// Runs per measure, cold and warm each.
@@ -138,6 +148,7 @@ pub struct BenchArgs {
     pub runs: u32,
 }
 
+/// The subcommands of `image`.
 #[derive(Debug, Subcommand)]
 pub enum ImageCmd {
     /// Install macOS from a restore image into a new base bundle.

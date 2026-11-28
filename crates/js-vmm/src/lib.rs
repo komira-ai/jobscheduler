@@ -7,11 +7,6 @@
 //! [`system::System`] trait and runs in unit tests on any OS; the one place that calls
 //! Virtualization.framework is `vz` (macOS only), reached through `real`.
 
-// Moved unchanged from a workspace that does not set `missing_docs`: public fields,
-// variants and functions are undocumented. Remove this once they are documented
-// (komira-ai/jobscheduler#30).
-#![allow(missing_docs)]
-
 pub mod app;
 pub mod bench;
 pub mod bundle;

@@ -33,17 +33,13 @@ pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 pub use marks::Busy;
 
-/// Where a host's session stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostState {
-    /// The host was put back after a restart ([`Registry::restore_tainted`]) and has not
-    /// said hello since.
-    Awaiting,
-    /// The host said hello or heartbeat within the grace period.
-    Live,
-    /// The host has been silent for longer than the grace period.
-    Lost,
-}
+/// Where a host's session stands. A host put back after a restart
+/// ([`Registry::restore_tainted`]) is `Awaiting` until it says hello.
+pub use js_types::HostState;
+
+/// How a host is set aside: for whole-node use, or to be scaled away. The registry sets
+/// only [`HostMark::Draining`] and [`HostMark::Releasing`].
+pub use js_types::HostMark;
 
 /// One host as the registry knows it: what an operator would list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,24 +125,6 @@ pub struct HostView {
     /// reading as `load` (a kill at a lease's own limit is not counted): `None` exactly when
     /// `load` is `None` or the agent sent none.
     pub actions_oom_events: Option<u64>,
-}
-
-/// How a host is set aside: for whole-node use, or to be scaled away. The registry sets
-/// only [`HostMark::Draining`] and [`HostMark::Releasing`]; the other two are the
-/// vocabulary of the host listing and the scaler's view, which the registry no longer
-/// produces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostMark {
-    /// Set aside for a waiting request.
-    Reserved,
-    /// A whole-node lease is committed on it.
-    Held,
-    /// Marked by [`Registry::drain`]: it holds no run and takes no new job. Only
-    /// [`Registry::undrain`] or [`Registry::release_host`] ends the mark.
-    Draining,
-    /// Marked by [`Registry::release_host`]: the host is being given back and takes no
-    /// job. Nothing clears the mark; [`Registry::remove`] drops the host.
-    Releasing,
 }
 
 struct State {

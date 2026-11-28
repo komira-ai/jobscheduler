@@ -18,6 +18,9 @@ pub enum LaunchMode {
 
 /// What the pool's background checks say. Only `Available` lets a launch through; a
 /// pool in any state still scales down.
+///
+/// The lease server's check state (`checks::State`) maps onto this name for name:
+/// `Checking`, `Available` and `Unavailable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
     /// The first full check pass has not finished.
@@ -25,7 +28,7 @@ pub enum Health {
     /// The checks pass.
     Available,
     /// A check fails.
-    Failing,
+    Unavailable,
 }
 
 /// The settings of one elastic pool. Money is in the smallest part of the pool's price
@@ -69,7 +72,8 @@ pub struct Settings {
     /// least 1 (a smaller figure is read as 1).
     pub boot_fail_trip_after: u32,
     /// How long an unanswered or unseen acquire is waited for before it is given up on,
-    /// and the least gap between the two clean lists that settle it.
+    /// and the least gap between the two clean lists that settle it. The providers keep a
+    /// separate, shorter hold (600 seconds) for their own `max_machines` cap.
     pub unknown_hold: Duration,
     /// The most launches one step makes.
     pub max_step: usize,
@@ -208,6 +212,10 @@ const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
 /// The default of [`Settings::prepare_timeout`]: 10 minutes, the registry's default.
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// The default of [`Settings::boot_timeout`]: 15 minutes. It is also the lease server's
+/// default for a pool table without `boot_timeout`.
+pub const BOOT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// The default of [`Settings::boot_fail_cooldown_max`]: 2 hours.
 pub const BOOT_FAIL_COOLDOWN_MAX: Duration = Duration::from_secs(2 * 3600);
 
@@ -238,7 +246,7 @@ impl Settings {
             max_spend_per_hour,
             max_spend_per_day,
             idle: Duration::from_secs(10 * 60),
-            boot_timeout: Duration::from_secs(15 * 60),
+            boot_timeout: BOOT_TIMEOUT,
             token_margin: Duration::from_secs(5 * 60),
             boot_fail_cooldown: Duration::from_secs(10 * 60),
             boot_fail_cooldown_max: BOOT_FAIL_COOLDOWN_MAX,

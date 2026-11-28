@@ -25,10 +25,6 @@
 //! It serves a Unix socket. The host side that calls it is a VM driver (over a fake
 //! host's socket pair in tests).
 
-// Moved from kbf, which has no `missing_docs` rule: the public items below still lack doc
-// comments. Tracked in komira-ai/jobscheduler#32, which removes this allow.
-#![allow(missing_docs)]
-
 #[cfg(test)]
 mod api_tests;
 pub mod client;

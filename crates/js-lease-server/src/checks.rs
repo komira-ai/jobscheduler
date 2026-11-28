@@ -105,12 +105,14 @@ impl Health {
         }
     }
 
-    /// How the scaler reads the pool: it launches only while the checks pass.
+    /// How the scaler reads the pool: the same-named [`js_scaler::Health`] for each
+    /// [`State`] (`Checking`, `Available`, `Unavailable`). It launches only while the
+    /// checks pass.
     pub(crate) fn for_scaler(&self) -> js_scaler::Health {
         match self.state() {
             State::Checking => js_scaler::Health::Checking,
             State::Available => js_scaler::Health::Available,
-            State::Unavailable => js_scaler::Health::Failing,
+            State::Unavailable => js_scaler::Health::Unavailable,
         }
     }
 
@@ -433,6 +435,40 @@ mod tests {
         health.passes = 1;
         assert_eq!(health.for_scaler(), js_scaler::Health::Available);
         health.notes = vec!["catalog: no offers".to_owned()];
-        assert_eq!(health.for_scaler(), js_scaler::Health::Failing);
+        assert_eq!(health.for_scaler(), js_scaler::Health::Unavailable);
+    }
+
+    /// Asserts that each state of the checks maps to the scaler health of the same name,
+    /// and that `state` reports it, a pool with a note but no pass still being checked. It
+    /// catches a state mapped onto the wrong health.
+    #[test]
+    fn for_scaler_maps_every_state_to_the_same_named_health() {
+        let notes = vec!["catalog: no offers".to_owned()];
+        let checking = Health {
+            notes: notes.clone(),
+            ..Health::default()
+        };
+        let available = Health {
+            passes: 1,
+            ..Health::default()
+        };
+        let unavailable = Health {
+            passes: 1,
+            notes,
+            ..Health::default()
+        };
+        let cases = [
+            (checking, State::Checking, js_scaler::Health::Checking),
+            (available, State::Available, js_scaler::Health::Available),
+            (
+                unavailable,
+                State::Unavailable,
+                js_scaler::Health::Unavailable,
+            ),
+        ];
+        for (health, state, scaler) in cases {
+            assert_eq!(health.state(), state);
+            assert_eq!(health.for_scaler(), scaler);
+        }
     }
 }

@@ -8,7 +8,7 @@ use js_sched::failover::{AcquireMemory, Refused};
 use js_types::RequestId;
 
 use crate::block;
-use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
+use crate::input::{AcquireResult, HostFacts, HostMark, HostState, Input, PoolInput};
 use crate::record::{CooldownReason, OfferCooldown, Phase, Record, Records, StoredOffer};
 use crate::settings::Blocked;
 use crate::state::{Action, PlanLine, State};
@@ -747,7 +747,7 @@ impl<'a> Pass<'a> {
             .any(|each| each.reserved.as_ref() == Some(&host.id));
         let working = [
             (host.busy, host.lease_given_up) == (true, false),
-            matches!(host.mark, Some(Mark::Held | Mark::Reserved)),
+            matches!(host.mark, Some(HostMark::Held | HostMark::Reserved)),
             requested,
         ];
         let idle = !working.into_iter().any(|work| work);
@@ -765,7 +765,7 @@ impl<'a> Pass<'a> {
             return;
         }
         let due = [ripe, idle];
-        let marked = host.mark == Some(Mark::Releasing);
+        let marked = host.mark == Some(HostMark::Releasing);
         match (due.into_iter().all(|ok| ok), marked, host.lease_given_up) {
             (false, _, _) | (true, false, false) => {}
             (true, true, _) => {
@@ -806,12 +806,12 @@ impl<'a> Pass<'a> {
     /// released, whatever the scaler had last done with it. For a draining record, a mark
     /// that is still `Draining` changes nothing, and any other means the drain did not
     /// take (the host was busy) or was undone, so the host is registered again.
-    fn on_mark(&mut self, i: usize, mark: Option<Mark>) {
+    fn on_mark(&mut self, i: usize, mark: Option<HostMark>) {
         match (self.records.instances[i].phase, mark) {
-            (_, Some(Mark::Releasing)) => {
+            (_, Some(HostMark::Releasing)) => {
                 self.start_release(i);
             }
-            (Phase::Draining, Some(Mark::Draining)) => {}
+            (Phase::Draining, Some(HostMark::Draining)) => {}
             (Phase::Draining, _) => {
                 self.go(i, Phase::Registered);
             }

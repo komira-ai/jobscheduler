@@ -1,7 +1,7 @@
 //! What a job is, said once: the container it runs and what it needs of a host.
 //!
 //! A job never names a cloud, an image of a machine or an instance type; those live in
-//! the pool that serves it. [`ContainerSpec`] is the container, [`Requirements`] is the
+//! the pool that serves it. [`JobContainer`] is the container, [`Requirements`] is the
 //! host it needs. A lease request still carries resources and capabilities only, so
 //! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `os_version`, `disk-gib`, `exec`
 //! and the `accelerator.*` keys from the capabilities the request requires. A job's image is
@@ -173,9 +173,11 @@ impl ImageDigestRef {
     }
 }
 
-/// The container a job runs.
+/// The job's container request: the image, command, platform, network and ports the job
+/// asks for. The host side builds its own per-lease container from it
+/// (`js_contain::container::ContainerSpec`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContainerSpec {
+pub struct JobContainer {
     /// The image, pinned by digest.
     pub image: ImageDigestRef,
     /// The command and its arguments.
@@ -190,7 +192,7 @@ pub struct ContainerSpec {
     pub ports: Vec<PortMap>,
 }
 
-impl ContainerSpec {
+impl JobContainer {
     /// The container that runs `command` in `image`, with no platform named, no network
     /// ([`JobNetwork::None`]) and no ports.
     #[must_use]
@@ -744,9 +746,9 @@ mod tests {
             ImageDigestRef::parse(&format!("registry.example/team/app:1.2@sha256:{HEX}")).unwrap();
         assert_eq!(image.name(), "registry.example/team/app:1.2");
         assert_eq!(image.digest(), format!("sha256:{HEX}"));
-        let spec = ContainerSpec {
+        let spec = JobContainer {
             platform: Some((Os::Macos, Arch::Arm64)),
-            ..ContainerSpec::new(image.clone(), vec!["run".into(), "--fast".into()])
+            ..JobContainer::new(image.clone(), vec!["run".into(), "--fast".into()])
         };
         assert_eq!(spec.image, image);
         assert_eq!(spec.command.len(), 2);
@@ -858,11 +860,11 @@ mod tests {
     #[test]
     fn none_is_the_default_and_has_loopback_only() {
         let image = ImageDigestRef::parse(&format!("app@sha256:{HEX}")).unwrap();
-        let spec = ContainerSpec::new(image, vec!["run".into()]);
+        let spec = JobContainer::new(image, vec!["run".into()]);
         assert_eq!(spec.network, JobNetwork::None);
         assert_eq!(JobNetwork::default(), JobNetwork::None);
         assert!(spec.ports.is_empty());
-        let open = ContainerSpec {
+        let open = JobContainer {
             network: JobNetwork::Open,
             ports: vec![PortMap {
                 host: 8080,

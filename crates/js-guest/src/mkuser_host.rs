@@ -12,6 +12,7 @@ use crate::probe::Host;
 use crate::probe_host::SystemHost;
 use crate::sim_run::{ProcessRunner, SystemClock, read_regular};
 
+/// The real guest the user-creation run acts on: it runs commands and talks to the host.
 pub struct RealMkUserHost {
     runner: ProcessRunner<SystemClock>,
     host: SystemHost,
@@ -19,6 +20,7 @@ pub struct RealMkUserHost {
 
 impl RealMkUserHost {
     #[must_use]
+    /// A host that runs commands with the environment a launch daemon needs.
     pub fn new() -> Self {
         // A launch daemon starts with neither HOME nor PATH.
         let env = [

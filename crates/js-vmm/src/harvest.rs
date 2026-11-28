@@ -21,8 +21,11 @@ pub enum Item {
     /// The regular files directly in `dir` whose names start with `prefix` and end with
     /// `suffix`.
     Matching {
+        /// The directory to look in, relative to the Data volume's root.
         dir: &'static str,
+        /// The start every matching file name has.
         prefix: &'static str,
+        /// The end every matching file name has.
         suffix: &'static str,
     },
     /// A directory and everything below it (regular files and directories only).
@@ -57,9 +60,13 @@ pub const STATS: [&str; 2] = ["private/var/db/.AppleSetupDone", "private/var/log
 /// The caps on one harvest.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// The largest single file copied, in bytes.
     pub max_file_bytes: u64,
+    /// The most bytes copied across all files, in bytes.
     pub max_total_bytes: u64,
+    /// The most entries visited.
     pub max_entries: usize,
+    /// The deepest directory level descended into.
     pub max_depth: usize,
 }
 

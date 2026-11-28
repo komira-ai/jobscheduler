@@ -37,7 +37,9 @@ pub trait Host {
     fn ids(&self) -> (u32, u32);
     /// The launchd session type (`System`, `Aqua`, ...).
     fn session(&self) -> String;
+    /// Whether `path` exists.
     fn exists(&self, path: &Path) -> bool;
+    /// Whether a process named `name` is running.
     fn process_running(&self, name: &str) -> bool;
     /// Tries a guest-side vsock connection to the host on `port`.
     fn vsock(&self, port: u32) -> Value;
@@ -53,6 +55,7 @@ pub trait Host {
     fn mount_tag(&self, tag: &str, mountpoint: &Path) -> Value;
     /// Whether the automount share at `dir` can be read.
     fn automount(&self, dir: &Path) -> Value;
+    /// Waits for `d`.
     fn pause(&self, d: Duration);
 }
 
@@ -87,6 +90,7 @@ pub struct GuestArgs {
     #[arg(long, default_value_t = 5000)]
     pub vsock_port: u32,
     #[arg(long, default_value = "kbf.probe")]
+    /// The name of the console port to look for.
     pub console_name: String,
     /// The virtiofs tag to mount.
     #[arg(long, default_value = "kbfprobe")]
@@ -100,8 +104,10 @@ pub struct GuestArgs {
 #[derive(Debug, Clone, clap::Args)]
 pub struct ReadyArgs {
     #[arg(long)]
+    /// The file the result is written to if the host cannot be reached.
     pub out: PathBuf,
     #[arg(long)]
+    /// Wait for this path to exist first.
     pub wait_path: Option<PathBuf>,
     /// Wait for this process (for instance `loginwindow`) to be running first.
     #[arg(long)]
@@ -177,7 +183,10 @@ pub fn started_line(host: &dyn Host, out: &Path) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivered {
     /// The host acknowledged the frame on this attempt.
-    Vsock { attempt: u32 },
+    Vsock {
+        /// The attempt that worked, counted from 1.
+        attempt: u32,
+    },
     /// Vsock could not be used; the file is in the share.
     Share,
 }

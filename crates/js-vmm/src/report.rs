@@ -10,15 +10,20 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
+    /// The probe ran and `details` holds the answer.
     Ok,
+    /// The probe could not run, or not all of it, without a manual step.
     NeedsManual,
+    /// The probe broke on this host.
     Error,
 }
 
 /// One probe's result: printed as one JSON object on one line.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
+    /// The name of the probe that produced this report.
     pub probe: String,
+    /// How the probe ended.
     pub status: Status,
     /// What was found, in one sentence (status `ok`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,8 +96,11 @@ impl Report {
 /// percentile above the median is claimed).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Summary {
+    /// The number of samples.
     pub n: usize,
+    /// The median of the samples, in milliseconds.
     pub median_ms: f64,
+    /// The largest sample, in milliseconds.
     pub max_ms: f64,
 }
 

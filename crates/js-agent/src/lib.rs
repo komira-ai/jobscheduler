@@ -393,7 +393,7 @@ pub use facts::{
 };
 use health::{Health, Route};
 use hold_cordon::{Keeper, Seams as KeeperSeams};
-pub use host::{Offer, StoreView, offer};
+pub use host::{PreparedHello, StoreView, offer};
 pub use identity::{IdentityFlags, IdentitySourceKind};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
