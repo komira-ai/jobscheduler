@@ -484,6 +484,64 @@ ls "$2" >/dev/null 2>&1 && echo root-listed || echo root-refused
 (echo x > .kbf-tree/new) 2>/dev/null && echo wrote || echo write-refused
 ./.kbf-tree/run.sh 2>/dev/null || echo exec-refused"#;
 
+/// Starts run r1 under the real profile, with the trees root the one mount root that is no
+/// read deny (as `native_fs::denied_roots` makes the denies), or with it among the read
+/// denies too (`deny_root`), its tree at `rel` below the run's folder of the provider and run
+/// r2's tree at the same `rel` below r2's, and runs [`TREE_CHECKS`]: what it printed, once its
+/// link was found to lead to its tree and its tree was found unwritten.
+fn tree_checks(name: &str, deny_root: bool, rel: &str) -> (Status, String) {
+    use js_agent::lifecycle::FsPrepared;
+    use js_agent::native::MountRoot;
+
+    let mut rig = MacRig::with(&format!("{name}-{deny_root}"), |config, dir| {
+        let root = denied(dir, "trees");
+        let roots = vec![MountRoot {
+            path: root.as_str().into(),
+            read_only: true,
+            trees: true,
+        }];
+        config.read_denies = js_agent::native_fs::denied_roots(&roots)
+            .map(|root| AbsPath::new(&root.path).unwrap())
+            .collect();
+        if deny_root {
+            config.read_denies.push(root);
+        }
+        config.mount_roots = roots;
+    });
+    let root = fs::canonicalize(rig.dir.path("trees")).unwrap();
+    let (own, other) = (
+        root.join("mount-provider/aa/6a732e7231").join(rel),
+        root.join("mount-provider/aa/6a732e7232").join(rel),
+    );
+    for (tree, text) in [(&own, "tree one\n"), (&other, "tree two\n")] {
+        fs::create_dir_all(tree).unwrap();
+        fs::write(tree.join("data.txt"), text).unwrap();
+        let script = tree.join("run.sh");
+        fs::write(&script, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    let mounts = tree_mount(&own);
+    assert_eq!(rig.rt.check_job_fs(&mounts, &[]), Ok(()));
+    assert_eq!(rig.rt.resolve_fs("r1", "", &mounts, 0), FsPrepared::Ready);
+    let (other, listed) = (other.display().to_string(), root.display().to_string());
+    let id = rig.start(
+        "r1",
+        "/bin/sh",
+        &["-c", TREE_CHECKS, "sh", other.as_str(), listed.as_str()],
+    );
+    let status = rig.settle(&id);
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    let link = fs::read_link(rig.exec().join(".kbf-tree")).unwrap();
+    let wrote = own.join("new").exists();
+    rig.rt.remove(&id).unwrap();
+    assert_eq!(link, own);
+    assert!(!wrote, "the job wrote its tree");
+    (status, tail.stdout)
+}
+
+/// What [`TREE_CHECKS`] prints in a job that reads its own tree and nothing else.
+const OWN_TREE_ONLY: &str = "tree one\nother-refused\nroot-refused\nwrite-refused\nexec-refused\n";
+
 /// Asserts under the real profile, with the trees root the one mount root that is no read
 /// deny (as `native_fs::denied_roots` makes the denies), that a job reads its own tree
 /// through its link `exec/.kbf-tree`, is refused run B's tree beside it and the listing of the
@@ -494,67 +552,29 @@ ls "$2" >/dev/null 2>&1 && echo root-listed || echo root-refused
 /// hides every tree.
 #[test]
 fn a_job_reads_its_own_tree_and_nothing_else_below_the_trees_root() {
-    use js_agent::lifecycle::FsPrepared;
-    use js_agent::native::MountRoot;
-
-    let run = |deny_root: bool| {
-        let mut rig = MacRig::with(&format!("trees-{deny_root}"), |config, dir| {
-            let root = denied(dir, "trees");
-            let roots = vec![MountRoot {
-                path: root.as_str().into(),
-                read_only: true,
-                trees: true,
-            }];
-            config.read_denies = js_agent::native_fs::denied_roots(&roots)
-                .map(|root| AbsPath::new(&root.path).unwrap())
-                .collect();
-            if deny_root {
-                config.read_denies.push(root);
-            }
-            config.mount_roots = roots;
-        });
-        let root = fs::canonicalize(rig.dir.path("trees")).unwrap();
-        let (own, other) = (
-            root.join("mount-provider/aa/6a732e7231/0"),
-            root.join("mount-provider/aa/6a732e7232/0"),
-        );
-        for (tree, text) in [(&own, "tree one\n"), (&other, "tree two\n")] {
-            fs::create_dir_all(tree).unwrap();
-            fs::write(tree.join("data.txt"), text).unwrap();
-            let script = tree.join("run.sh");
-            fs::write(&script, "#!/bin/sh\necho ran\n").unwrap();
-            fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-                .unwrap();
-        }
-        let mounts = tree_mount(&own);
-        assert_eq!(rig.rt.check_job_fs(&mounts, &[]), Ok(()));
-        assert_eq!(rig.rt.resolve_fs("r1", "", &mounts, 0), FsPrepared::Ready);
-        let (other, listed) = (other.display().to_string(), root.display().to_string());
-        let id = rig.start(
-            "r1",
-            "/bin/sh",
-            &["-c", TREE_CHECKS, "sh", other.as_str(), listed.as_str()],
-        );
-        let status = rig.settle(&id);
-        let tail = rig.rt.log_tail(&id).unwrap().unwrap();
-        let link = fs::read_link(rig.exec().join(".kbf-tree")).unwrap();
-        let wrote = own.join("new").exists();
-        rig.rt.remove(&id).unwrap();
-        assert_eq!(link, own);
-        assert!(!wrote, "the job wrote its tree");
-        (status, tail.stdout)
-    };
     assert_eq!(
-        run(false),
-        (
-            exited(0),
-            "tree one\nother-refused\nroot-refused\nwrite-refused\nexec-refused\n".to_owned()
-        )
+        tree_checks("trees", false, "0"),
+        (exited(0), OWN_TREE_ONLY.to_owned())
     );
-    let (_, denied_root) = run(true);
+    let (_, denied_root) = tree_checks("trees", true, "0");
     assert!(
         !denied_root.starts_with("tree one"),
         "a job read its tree with the trees root denied: {denied_root}"
+    );
+}
+
+/// Asserts under the real profile that a job whose tree the provider answered under a
+/// numbered attempt (`<run>/a44/0`, as tierstore answers a source whose calls name attempt
+/// 44) is admitted, started, and reads its tree through its link, and is refused run B's tree
+/// of the same attempt, the listing of the root, a write into its tree and a run of a script
+/// there, as a job whose tree is unnumbered is. Catches the refusal at the lookup of every
+/// start whose provider answered a numbered attempt, which on the Macs is every start that
+/// mounts a tree, and a numbered tree granted wider than an unnumbered one.
+#[test]
+fn a_job_whose_tree_has_a_numbered_attempt_starts_and_reads_it() {
+    assert_eq!(
+        tree_checks("trees-a", false, "a44/0"),
+        (exited(0), OWN_TREE_ONLY.to_owned())
     );
 }
 
