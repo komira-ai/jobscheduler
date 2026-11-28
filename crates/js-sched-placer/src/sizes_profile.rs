@@ -88,7 +88,7 @@ impl Curves {
 
 /// What one class has learned: a profile of its CPU and one of its memory, and when its latest
 /// run ended.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct ClassProfile {
     /// The CPU profile, in sixteenths of a core.
     cpu: Profile,
@@ -113,7 +113,7 @@ impl ClassProfile {
 }
 
 /// The profiles of every class, at most [`MAX_PROFILES`] of them.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Profiles {
     classes: BTreeMap<Key, ClassProfile>,
     /// How the checks of the runs freed while serving came out.

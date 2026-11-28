@@ -1,5 +1,5 @@
-//! What a read of the freed runs ([`JobStore::freed_page`]) returns and asks the store for:
-//! the freed entries newest first a page at a time, the allocation and job rows they point at
+//! What a read of the freed runs ([`JobStore::freed_page`], [`JobStore::freed_page_oldest_first`])
+//! returns and asks the store for: the freed entries newest (or oldest) first a page at a time, the allocation and job rows they point at
 //! [`SWEEP_BATCH`] keys to a read, and the entries it passes over. Counted on a recording store
 //! over the in-memory fake, every clock the test's.
 
@@ -112,6 +112,41 @@ fn the_freed_runs_are_read_newest_first_a_page_at_a_time_in_batched_reads() {
     assert_eq!(scans, 2, "{reads:?}");
     assert_eq!(batches, [half, half, half, half, 200, 200]);
     assert_eq!(reads.len(), 2 + 6, "no other read, and no get of one row");
+}
+
+/// Asserts that a read of 1,200 freed runs oldest free first pages them the other way: a first
+/// page of the 1,000 freed first and a second of the 200 freed last, whatever the order of their
+/// ids, each one scan of the freed entries forward; and that the read ends after the newest.
+/// Catches an oldest-first read that walks newest first, one whose resume goes back toward older
+/// frees (it would read the first page again), and one that never ends.
+#[test]
+fn the_freed_runs_are_read_oldest_first_when_asked() {
+    let rig = rig();
+    let ids_freed: Vec<JobId> = (0..1200)
+        .map(|n| freed(&rig, &format!("f-{:04}", 1199 - n)))
+        .collect();
+    let (jobs, recording, _) = &rig;
+    recording.clear();
+    let first = jobs
+        .freed_page_oldest_first(None, MAX_PAGE)
+        .expect("a page");
+    let resume = first.resume.as_ref();
+    let second = jobs
+        .freed_page_oldest_first(resume, MAX_PAGE)
+        .expect("a page");
+    let mut oldest: Vec<&str> = ids_freed[..1000].iter().map(JobId::as_str).collect();
+    let mut newest: Vec<&str> = ids_freed[1000..].iter().map(JobId::as_str).collect();
+    oldest.sort_unstable();
+    newest.sort_unstable();
+    assert_eq!((ids(&first), first.entries), (oldest, 1000));
+    assert_eq!((ids(&second), second.entries), (newest, 200));
+    assert_eq!(second.resume, None, "the newest free ends the read");
+    let scans = recording
+        .reads()
+        .iter()
+        .filter(|read| matches!(read, Read::ScanRange(prefix) if prefix == keys::FREED))
+        .count();
+    assert_eq!(scans, 2);
 }
 
 /// Asserts that a page passes over the freed entries it cannot teach from and keeps the rest:

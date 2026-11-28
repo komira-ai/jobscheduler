@@ -203,20 +203,22 @@ was given or at what a run that waited used: what it is booked rises with the ru
 runs that used less.
 
 **Where the history lives.** Nowhere new: after its start the server teaches the estimator every ended job its job store still holds
-(seven days by default), in the order they ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
+(seven days by default), oldest free first and each page in the order its jobs ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
 The start does not wait for it: it reads the live allocations and the runs of the newest freed allocations (at most ten pages of a
 thousand, newest free first, by the index of the frees), so what it reads does not grow with the history, and the server answers ready;
-the ended jobs are read after that, a page of the freed allocations at a time while it serves, each page one scan of the index and
-batched reads of its allocation and job rows (before, one read per job). The runs the passes free meanwhile are held and taught after
-the ended jobs, which are taught in the order they ended, so the history once taught is the one a server that read everything before
-its first pass holds. Until then a job that books nothing is sized from an interim history: the history as the read began (nothing, at
+the ended jobs are read after that, a page of the freed allocations at a time while it serves, oldest free first, each page one scan
+of the index and batched reads of its allocation and job rows (before, one read per job). Each page is taught as it is read, in the
+order its jobs ended, to a copy of the history the teaching keeps apart (no pass sizes from it), and then dropped: a teaching holds one
+page of ended jobs, not the store's whole history (held until the last page before, it came to about 6.9 GiB of a farm's seven days of
+jobs). The runs the passes free meanwhile are held and taught after the ended jobs, which are taught in the order they were freed, so
+the history once taught is the one a server that read everything before its first pass holds, but for a job freed a page or more
+after jobs that ended later, taught where its free came, as a pass that saw it freed teaches it. Until then a job that books nothing is sized from an interim history: the history as the read began (nothing, at
 a start), taught the newest runs the start read, in the order they ended, and each run as a pass frees it (a run learned before any
 host is known once one is), and dropped once the ended jobs are taught. So from the first pass after a start a job books its class's
 recent runs, else its fallback's, else its client's, and the cold size only for a class, a fallback and a client with no run among
-them, not for the minutes a read of seven days of jobs takes. The history itself is still taught only once its whole read ends:
-a server stopped before that (released again minutes later) starts from the newest runs again, never from the history it read.
-Teaching the history page by page as the read goes, and a snapshot of the learned sizes in the state store loaded at the start, are
-not built. A failed read of the newest runs is logged and the interim history keeps those read before it; a failed read of the
+them, not for the minutes a read of seven days of jobs takes. The history the passes size from is still the copy's only once the
+whole read ends: a server stopped before that (released again minutes later) starts from the newest runs again, never from the
+history it read. A snapshot of the learned sizes in the state store loaded at the start is not built. A failed read of the newest runs is logged and the interim history keeps those read before it; a failed read of the
 ended jobs is logged and the history is taught the held runs alone. Each job's usage history row now carries what its host reported
 (`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
 used beside what it booked, and carries the name of the job's class as it is as its `class` (the history key, else the `size-class`
