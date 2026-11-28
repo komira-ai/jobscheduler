@@ -706,8 +706,11 @@ async fn get_metrics_at_on_answers_the_curve_classes_and_each_curve_hosts_peak()
 
 /// Asserts that an agent's refusal code is a label of its own only when it is 1 to 64 characters
 /// of `a-z`, `0-9` and `-` (a code with a digit among them), and is counted as `other` otherwise (a capital, a space, a quote,
-/// no characters, 65 characters), and that with no refusal counted the family is only its HELP
-/// and TYPE lines. Catches a label value the agent's text chooses without bound.
+/// no characters, 65 characters, nothing before a colon); that a detail with text after its
+/// code (a provider's reason) is counted under the code, as the code alone is; and that with
+/// no refusal counted the family is only its HELP and TYPE lines. Catches a label value the
+/// agent's text chooses without bound, and a provider's refusals with a reason counted as
+/// `other`.
 #[test]
 fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
     let seen = super::render::Snapshot {
@@ -733,18 +736,22 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
         "",
         &longest,
         &too_long,
+        "provider-refused: tree list not supported: missing_sidecar",
+        "provider-refused",
+        ": no code",
     ] {
         recorder.start_refused(&host, code);
     }
     let expected = BTreeMap::from([
         (("h".to_owned(), "no-capacity".to_owned()), 1),
         (("h".to_owned(), "tree-v2".to_owned()), 1),
-        (("h".to_owned(), "other".to_owned()), 5),
+        (("h".to_owned(), "provider-refused".to_owned()), 2),
+        (("h".to_owned(), "other".to_owned()), 6),
         (("h".to_owned(), longest), 1),
     ]);
     assert_eq!(recorder.start_refusals(), expected);
     let text = render(&seen, &recorder);
-    let line = "\njs_agent_start_refusals_total{host=\"h\",code=\"other\"} 5\n";
+    let line = "\njs_agent_start_refusals_total{host=\"h\",code=\"other\"} 6\n";
     assert!(text.contains(line), "{line} is not in:\n{text}");
 }
 

@@ -29,6 +29,7 @@
 //! [`Runtime::assemble_fs`]: crate::lifecycle::Runtime::assemble_fs
 //! [`Runtime::begin_create`]: crate::lifecycle::Runtime::begin_create
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use js_agent_wire::{Isolation, JobSpec};
@@ -236,7 +237,7 @@ impl Lifecycle {
                     job.taint(&mut self.taint, super::blind_taint(run_id), events);
                 }
                 job.result =
-                    Some(job.report(js_agent_wire::Outcome::FailedToStart, None, Some(why)));
+                    Some(job.report(js_agent_wire::Outcome::FailedToStart, None, Some(&*why)));
                 job.note(finding, message, events);
                 events.push(Event::ResultReady {
                     run_id: run_id.clone(),
@@ -499,7 +500,7 @@ fn created(answer: Created) -> Next {
 /// The failure of a run whose directories or files could not be made.
 fn scratch_failure(why: std::io::Error) -> Failure {
     (
-        detail::SCRATCH_FAILED,
+        Cow::Borrowed(detail::SCRATCH_FAILED),
         code::SCRATCH_FAILED,
         why.to_string(),
         false,
@@ -525,7 +526,12 @@ fn fs_ready(answer: FsPrepared) -> Result<bool, Failure> {
     match answer {
         FsPrepared::Ready => Ok(true),
         FsPrepared::Pending => Ok(false),
-        FsPrepared::Refused(refused) => Err((refused.code, code::START_FAILED, refused.why, false)),
+        FsPrepared::Refused(refused) => Err((
+            Cow::Borrowed(refused.code),
+            code::START_FAILED,
+            refused.why,
+            false,
+        )),
         FsPrepared::Failed(why) => Err(runtime_failure(&why)),
     }
 }

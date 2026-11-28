@@ -192,7 +192,10 @@ fn a_prepare_refused_after_the_restart_fails_the_start_provider_refused() {
     h.life.step();
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.outcome, Outcome::FailedToStart);
-    assert_eq!(result.detail.as_deref(), Some(refusal::PROVIDER_REFUSED));
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("provider-refused: no such tree")
+    );
     assert_eq!(
         finding(&h, "j1", "start-failed"),
         "the provider tier refused source 0: no such tree"

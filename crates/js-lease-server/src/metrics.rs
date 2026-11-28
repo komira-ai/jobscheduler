@@ -212,9 +212,11 @@ fn retry_slot(outcome: RetryOutcome) -> usize {
 /// The longest refusal code of an agent that is kept as a metric label value.
 const CODE_LABEL_MAX: usize = 64;
 
-/// The label value an agent's refusal `code` is counted under: the code itself when it is 1 to
+/// The label value an agent's refusal `detail` is counted under: its code, the part before the
+/// first `:` (a provider's refusal carries the provider's reason after it), when that is 1 to
 /// [`CODE_LABEL_MAX`] characters of `a-z`, `0-9` and `-`, and `other` otherwise.
-fn code_label(code: &str) -> &str {
+fn code_label(detail: &str) -> &str {
+    let code = detail.split(':').next().unwrap_or_default();
     let plain = (1..=CODE_LABEL_MAX).contains(&code.len())
         && code
             .bytes()

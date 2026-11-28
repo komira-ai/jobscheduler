@@ -294,7 +294,7 @@ message Attempt {
   optional int32 exit_code = 5;
   ResultReason reason = 6;
   StartFailureCode start_failure = 7;
-  string start_failure_detail = 8;    // the agent's code, as on Job
+  string start_failure_detail = 8;    // the agent's code, then any text after a colon, as on Job
   bool retried = 9;                   // another attempt was queued after it
 }
 

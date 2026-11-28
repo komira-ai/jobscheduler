@@ -173,8 +173,10 @@ fn attempt_end_classes_every_end() {
 
 /// Asserts that a refusal is classed by the agent's code, the part of its detail before the
 /// first colon: a plain code as it is, a requeue-bound detail naming hosts by its code, a
-/// detail with no code as the empty code, and the other failures of a refusal by their kind
-/// whatever the detail. Catches a code read with its host list, which no table names.
+/// provider's refusal by its code whatever reason follows it (a reason with colons of its
+/// own included), a detail with no code as the empty code, and the other failures of a
+/// refusal by their kind whatever the detail. Catches a code read with its host list or its
+/// reason, which no table names.
 #[test]
 fn attempt_end_reads_a_refusal_by_its_code() {
     let cases = [
@@ -189,6 +191,13 @@ fn attempt_end_reads_a_refusal_by_its_code() {
         (
             refused(StartFailure::AgentRefused, "no-capacity: h1"),
             refused_with("no-capacity"),
+        ),
+        (
+            refused(
+                StartFailure::AgentRefused,
+                "provider-refused: tree list not supported: missing_sidecar",
+            ),
+            refused_with("provider-refused"),
         ),
         (
             refused(StartFailure::AgentRefused, ": h1"),
@@ -315,8 +324,9 @@ fn next_ends_the_last_attempt_as_exhausted() {
 }
 
 /// Asserts that an end that never retries ends the job with attempts left and is not
-/// exhaustion, and that a refusal naming the job's own fault does not retry either. Catches
-/// an exit or a job's fault counted as attempts run out.
+/// exhaustion, and that a refusal naming the job's own fault does not retry either, with or
+/// without text after its code (a provider's reason). Catches an exit or a job's fault
+/// counted as attempts run out, and a provider's refusal retried for the reason after it.
 #[test]
 fn next_ends_an_end_that_never_retries() {
     let (_store, jobs) = tables();
@@ -328,6 +338,11 @@ fn next_ends_an_end_that_never_retries() {
         JobEnd::FailedToStart(StartFailure::ExclusiveNotReady),
         refused(StartFailure::AgentRefused, "invalid-job"),
         refused(StartFailure::AgentRefused, "invalid-job: why"),
+        refused(StartFailure::AgentRefused, "provider-refused"),
+        refused(
+            StartFailure::AgentRefused,
+            "provider-refused: tree list not supported: missing_sidecar",
+        ),
     ];
     for end in ends {
         assert_eq!(next(&job, &end), Next::End { exhausted: false }, "{end:?}");

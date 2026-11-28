@@ -453,8 +453,8 @@ fn advance(
 /// one, when it is well formed ([`CpuSeries::new`]); a series that is not is dropped. Its
 /// `memory_series` is kept the same way ([`MemorySeries::new`]).
 ///
-/// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
-/// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
+/// A start the agent refused keeps the agent's detail (its code, or its code, `: ` and text
+/// after it, such as a provider's reason) whole as the job's start failure detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
 /// [`StartFailure::AgentRefused`] for any other code and for a refusal without one. A job that
 /// ran and whose result names an input that failed (`input_failure`) is failed for its input
 /// ([`JobEnd::InputFailed`]), whatever its outcome, with the exit status it reported: the
@@ -545,9 +545,10 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     Some(end)
 }
 
-/// The end of a start the agent refused with the code `detail`: `input-unavailable` is the
-/// host's input failing ([`StartFailure::InputUnavailable`]), every other code the agent's
-/// refusal ([`StartFailure::AgentRefused`]), each keeping the code; a refusal without a code
+/// The end of a start the agent refused with `detail`, its code or its code, `: ` and text
+/// after it: `input-unavailable` is the host's input failing
+/// ([`StartFailure::InputUnavailable`]), every other detail the agent's refusal
+/// ([`StartFailure::AgentRefused`]), each keeping the detail whole; a refusal without a code
 /// keeps none.
 fn refused(detail: Option<&str>) -> JobEnd {
     let Some(detail) = detail else {

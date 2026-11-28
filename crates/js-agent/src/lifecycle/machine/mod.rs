@@ -21,6 +21,7 @@ mod prepare;
 mod provided;
 mod provider_record;
 mod providing;
+mod reason;
 mod rootfs;
 mod run_dirs;
 mod silence;
@@ -29,6 +30,7 @@ mod tails;
 mod timeline;
 mod vm;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -101,14 +103,15 @@ enum Bound {
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
 
-/// A start that failed after the slot was taken: the detail for the wire, the finding's
-/// code, its text, and whether the agent cannot see the host (see `RuntimeError::blind`).
-type Failure = (&'static str, &'static str, String, bool);
+/// A start that failed after the slot was taken: the detail for the wire (a code, or a code
+/// and the reason a provider gave, `reason`), the finding's code, its text, and whether the
+/// agent cannot see the host (see `RuntimeError::blind`).
+type Failure = (Cow<'static, str>, &'static str, String, bool);
 
 /// The failure of a runtime call that was to create the container.
 fn runtime_failure(why: &RuntimeError) -> Failure {
     (
-        detail::RUNTIME_FAILED,
+        Cow::Borrowed(detail::RUNTIME_FAILED),
         code::START_FAILED,
         why.to_string(),
         why.is_blind(),
