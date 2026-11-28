@@ -64,7 +64,10 @@ pub enum Reason {
     /// The hold file of the agent's state root could not be read, written or ended.
     HoldFailed,
     /// A Mac's host setup is not complete and `prepare` could not complete it: the helper's
-    /// socket group, the agent's state root or the scratch root's own volume (exit 75).
+    /// socket group, the agent's state root or the scratch root's own volume; or, on any host, a
+    /// path or user of the host's neighbours that its flags name and the agent's start would
+    /// refuse (a mount root, a mount provider's directory or user, a Mac's trees root or put
+    /// root) is not there (exit 75).
     HostSetupMissing,
     /// The system refused a call of a Mac's host setup (`EPERM`), which no retry changes: the
     /// path and the error are named (exit 1).

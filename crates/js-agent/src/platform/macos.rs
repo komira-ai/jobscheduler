@@ -486,7 +486,7 @@ pub(crate) fn jobs(
 
 /// The uid and the primary group of the user `name` in the directory service, as
 /// [`uid_of_name`] looks it up: the put ingest's node (`--native-put-user`).
-fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
+pub(super) fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
     use js_mac_session::helper::Host as _;
     let account = js_mac_session::macos::MacHost.account(name)?;
     Ok(account.map(|account| crate::mac_put::Node {

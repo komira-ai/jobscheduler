@@ -21,10 +21,16 @@ export_file(
 # image) started and driven from outside. release.yml's job `blackbox`, the gate before the farm,
 # builds this target on the build farm after `publish` (buildrules runs a test as a build action,
 # so the build is the run), and only when it passed is the farm told about the release
-# (docs/release.md, step 8a). Each black-box test target joins `test_deps`. None has yet: today
-# the gate's tests are the release jobs `check-apt` and `beta-macos-first-install`, which
-# `blackbox` needs, and this suite builds nothing.
+# (docs/release.md, step 8a). Each black-box test target joins `test_deps`. The gate's other tests
+# are the release jobs `check-apt` and `beta-macos-first-install`, which `blackbox` needs. A
+# `blackbox_test` (buildrules rules/blackbox) runs under `buck2 test`, not `buck2 build`: the gate
+# runs its targets once it calls `buck2 test` with the release's own package
+# (`-c blackbox.js_agent_url=... -c blackbox.js_agent_sha256=... -c blackbox.js_agent_size=...`).
 test_suite(
     name = "blackbox",
-    test_deps = [],
+    test_deps = [
+        # The update hook's prepare of the js-agent .deb refuses an update whose agent would not
+        # start on the host's flags (a mount root missing).
+        "//blackbox/js-agent-prepare:test",
+    ],
 )

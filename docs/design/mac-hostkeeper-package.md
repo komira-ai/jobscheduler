@@ -321,6 +321,14 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
   refuses (`EPERM`) fails `prepare` instead (`host_setup_refused`, exit 1), naming the path and the error, and is not
   retried as if it could pass. `cutover` never starts an agent whose roots share a device or a helper whose socket
   group is missing.
+- A path or user of the Mac's neighbours that the flags file names is not there: tierstore's mount (a
+  `--mount-root-ro`, the `--native-trees-root`), the directory of its provider socket or its account
+  (`--mount-provider`, `--mount-provider-user`), or its put directory or account (`--native-put-root`,
+  `--native-put-user`). Before `prepare` does anything else it runs the agent's own start checks of those flags on
+  the host's flags file, and defers `host_setup_missing` (exit 75) naming the flag, with nothing read or written:
+  the new agent would refuse to start, and so would the old one on the same flags, so a cutover would leave the Mac
+  with no agent. The old agent keeps running and keeps its session; hostkeeper retries later, and the update goes on
+  once the neighbour is there.
 - The agent cannot mount the scratch volume at a start (no `js-agent-scratch` in the Data volume's container, or
   `diskutil` fails): the agent exits naming `--scratch-root` and the cause, and launchd starts it again after its
   throttle interval; during an update `verify` sees no hello and the release is rolled back.

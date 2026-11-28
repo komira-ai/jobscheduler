@@ -19,6 +19,10 @@ pub use linux::*;
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::*;
+#[cfg(target_os = "macos")]
+mod macos_neighbours;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_neighbours::neighbours;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("js-agent builds for Linux (the crun runtime) and macOS (the native runtime) only");

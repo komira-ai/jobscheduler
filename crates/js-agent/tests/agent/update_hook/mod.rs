@@ -31,6 +31,7 @@ mod lease_stub;
 mod machine;
 mod machine_flags;
 mod machine_host_certificate;
+mod machine_neighbours;
 mod machine_root;
 #[allow(dead_code)]
 mod maintain_rig;

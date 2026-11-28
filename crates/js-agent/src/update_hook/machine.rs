@@ -340,6 +340,13 @@ fn read_flags(flags_file: &Path, machine: &Machine<'_>) -> Result<Cli, String> {
         .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))
 }
 
+/// The first refusal of the agent's start among the paths and users of the host's neighbours
+/// that the flags `cli` name ([`crate::platform::neighbours`]), `None` when the start would take
+/// them all.
+fn neighbours_problem(cli: &Cli) -> Option<String> {
+    crate::platform::neighbours(cli).err()
+}
+
 /// Whether the flags set an egress ceiling above `none` (`--egress allow-list` or `open`): an
 /// agent started with one wires each run's network, so an update hands the runs over only
 /// between agents that both list `egress-handover` (see `prepare`).
@@ -599,6 +606,13 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     // A flags file that cannot be read names no host certificate: a first install then goes by
     // the join token as before, and a step that asks the lease server ends with the reason.
     let flags = read_flags(&params.flags_file, machine);
+    // Before `prepare` looks at anything else: a path or user of the host's neighbours that the
+    // agent's start would refuse defers the update with nothing changed (see `prepare`).
+    if invocation.step == Step::Prepare
+        && let Some(problem) = flags.as_ref().ok().and_then(neighbours_problem)
+    {
+        return step::neighbours_missing(params, &problem);
+    }
     let host_identity = flags.as_ref().ok().and_then(identity_of);
     // A flags file that cannot be read says nothing of the egress: it counts as one, and the
     // update hands over only between agents that both keep egress wiring.
