@@ -180,7 +180,7 @@ fn submit_phases(out: &mut String, recorder: &Recorder) {
     }
 }
 
-fn counter(out: &mut String, name: &str, help: &str, value: u64) {
+pub(super) fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     family(out, name, "counter", help);
     let _ = writeln!(out, "{name} {value}");
 }

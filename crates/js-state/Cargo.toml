@@ -33,8 +33,9 @@ rusqlite.workspace = true
 rustls = { workspace = true, optional = true }
 rustix = { workspace = true, features = ["fs"] }
 thiserror.workspace = true
-# `rt` only, to ask whether the calling thread is inside a runtime (postgres/conn.rs).
-tokio = { workspace = true, optional = true, features = ["rt"] }
+# `rt` to ask whether the calling thread is inside a runtime, and `rt-multi-thread` to make a
+# call in place on a thread of a multi-thread one (`block_in_place`, postgres/conn.rs).
+tokio = { workspace = true, optional = true, features = ["rt", "rt-multi-thread"] }
 tokio-rustls = { workspace = true, optional = true }
 # A change feed row of a kind this build does not know is skipped and logged.
 tracing.workspace = true
