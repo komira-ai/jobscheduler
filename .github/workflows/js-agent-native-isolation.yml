@@ -16,12 +16,17 @@
 #
 # It is called, never started by a pull request: by release.yml's `beta-macos-isolation` on a
 # push to main, which reports its verdict (a failure is a red release run and a RELEASE-RED
-# issue) but does not hold back `promote-macos`. On a hosted runner the test reaches no verdict
-# today: launchd refuses the launch agent of the uid's `user/<uid>` domain to the job and to root
-# with "Bootstrap failed: 5: Input/output error" (the uid has no login session there), which the
-# design does not take as the proof that the kind has no path (docs/design/mac-lease-teardown.md),
-# so the minimum set is not met. The gate belongs on a farm Mac, whose pool uids are real
-# accounts; see docs/design/jobscheduler-design.md, section 12.2. A manual run (`gh workflow run
+# issue) but does not hold back `promote-macos`. On a hosted runner the test cannot pass today,
+# for two reasons. Its verdict is FAIL: the POSIX named semaphore run A made survives, and run B
+# opens it by its name. The job profile allows `sem_open` on purpose (Python's `multiprocessing`
+# locks), and macOS lists no semaphore names, so no reset can remove one
+# (docs/design/mac-lease-teardown.md); that row fails the test on any Mac until it is decided.
+# Its minimum set is not met either: launchd refuses the launch agent of the uid's `user/<uid>`
+# domain to the job and to root with "Bootstrap failed: 5: Input/output error" (the uid has no
+# login session there), which the design does not take as the proof that the kind has no path.
+# The gate belongs on a farm Mac, whose pool uids are real accounts; see
+# docs/design/jobscheduler-design.md, section 12.2, and docs/design/mac-isolation-on-farm.md. A
+# manual run (`gh workflow run
 # js-agent-native-isolation.yml --ref <branch>`) runs the same job on a branch.
 # js-agent-native-isolation-test.yml builds the binary for an operator's own Mac instead.
 # It sets no environment variable: the test binaries are not shipped, so no deployment target

@@ -80,7 +80,7 @@
 # `promote-macos` adds the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release
 # when the first four and `publish` succeeded. `beta-macos-isolation` holds nothing back yet: its
 # failure makes the run red and `release-red` reports it, but the macOS archives are added
-# without it, since on a hosted runner the test reaches no verdict (the header of
+# without it, since on a hosted runner the test cannot pass (the header of
 # js-agent-native-isolation.yml says why). `pkg-upload` puts the signed package in the package
 # repository (`pkg/jobscheduler/<version>/`) and maps `js-agent` to `pkg/jobscheduler` in the
 # repository's descriptor (`hostkeeper-repository.json`, which a coordinator reads to find the
