@@ -73,8 +73,9 @@ impl Live {
     /// `node/` row, at the version read, and then its mark row, so no server counts the
     /// machine in its pool's cap or offers it a job while the row would still read live. A
     /// row that changed between the read and the delete is read again, once; a failure is
-    /// logged, and the row is forgotten once it is silent long enough
-    /// ([`js_jobs::JobStore::forget_silent_nodes`]).
+    /// logged, and the row is forgotten once it is silent long enough and holds nothing
+    /// ([`js_jobs::JobStore::forget_silent_nodes`]). While the row stays, the job pass reads
+    /// the host present and its live jobs stay as they are (design `multi-instance.md`, G6).
     pub(super) fn forget_removed(&self, host: &HostId) {
         let Some(jobs) = &self.agents.jobs else {
             return;
@@ -89,10 +90,10 @@ impl Live {
         match forgot {
             Ok(true) => {}
             Ok(false) => {
-                warn!(%host, "the removed host's row changed under two deletes; it is forgotten once silent")
+                warn!(%host, "the removed host's row changed under two deletes; while it stays, the host's jobs are not settled")
             }
             Err(error) => {
-                warn!(%host, %error, "cannot delete the removed host's row; it is forgotten once silent")
+                warn!(%host, %error, "cannot delete the removed host's row; while it stays, the host's jobs are not settled")
             }
         }
         self.keep_mark(host, None);
