@@ -27,7 +27,7 @@ use crate::config::{Cli, Config};
 use crate::job_store::{ServerIds, ServerJobs};
 use crate::ticker::channel_ticker;
 
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
+pub(super) const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// A server over the database of `url` whose agent routes are on a port of their own, with its
 /// directory named `name`; its job store and the other server's read `store_clock`.
@@ -81,7 +81,7 @@ async fn server(
 }
 
 /// The other server's job tables over the database of `url`, on `store_clock`.
-fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJobs {
+pub(super) fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJobs {
     let config = PostgresConfig::parse(url).unwrap();
     let store: Arc<dyn Store> = Arc::new(
         PostgresStore::open(&config)
@@ -114,7 +114,7 @@ fn listening_on(url: &str) {
 }
 
 /// `body` POSTed to `path` of `addr` with the join token; the status and the body's JSON.
-async fn post(addr: std::net::SocketAddr, path: &str, body: &Value) -> (u16, Value) {
+pub(super) async fn post(addr: std::net::SocketAddr, path: &str, body: &Value) -> (u16, Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let body = body.to_string();
@@ -175,7 +175,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
     reply
 }
 
-fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
+pub(super) fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
     let mut spec = spec();
     spec.needs =
         js_jobs::Needs::Shape(js_types::Resources::new(cpu_millis, 1 << 30, 0, None).unwrap());
@@ -188,7 +188,7 @@ fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
 }
 
 /// A database of its own for one test, made outside any runtime.
-fn database() -> (TestDatabase, String) {
+pub(super) fn database() -> (TestDatabase, String) {
     let database = test_database();
     let url = database.url();
     (database, url)
@@ -225,7 +225,11 @@ fn a_job_another_server_queued_is_placed_and_started_on_a_beat_held_here() {
 /// the start that server wrote would wait for the host's next heartbeat. With the host's
 /// heartbeat held here, the other server queues a job too big for any pass to place (so this
 /// server places nothing) and places it on the host itself; the held beat is answered with its
-/// start.
+/// start. The other server places the job once this server's pass, which the queue's notice
+/// brings, has written the job's queue status: both write the job's row, each conditional on
+/// the version it read, so a placement read before that write would be refused as stale, as
+/// it is between any two servers. Once the status stands no later pass of this server writes
+/// the row again.
 #[test]
 fn a_start_another_server_wrote_ends_a_beat_held_here() {
     let (_database, url) = database();
@@ -242,6 +246,13 @@ fn a_start_another_server_wrote_ends_a_beat_held_here() {
             let (other, job, id) = (Arc::clone(&other), queued(&id, 16_000), id.clone());
             tokio::task::spawn_blocking(move || {
                 other.insert_queued(job).unwrap();
+                let unnoted = |other: &ServerJobs| {
+                    let job = other.get_job(&id).unwrap().unwrap();
+                    job.queue.code() == js_types::QueueCode::Unspecified
+                };
+                while unnoted(&other) {
+                    std::thread::yield_now();
+                }
                 let booked = Booked::Shape {
                     cpu_millis: 1500,
                     memory_bytes: 1 << 30,

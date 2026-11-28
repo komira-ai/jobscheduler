@@ -214,7 +214,7 @@ allow_sqlite_store = false                         # true only for tests and sin
 
 `--metrics-listen <addr>` (`server.metrics_listen`) serves `GET /metrics` on a port of its own, in the Prometheus text format
 (version 0.0.4, content type `text/plain; version=0.0.4; charset=utf-8`). It is off by default: without it the server binds no other
-port and counts nothing. Any other path, on that port, is answered as an unknown route, and the lease port does not serve `/metrics`.
+port and records no events (the counts of its own work, `js_blocking_tasks_total` and its store's, are kept either way). Any other path, on that port, is answered as an unknown route, and the lease port does not serve `/metrics`.
 
 | family | kind | labels | what |
 |---|---|---|---|
@@ -261,6 +261,10 @@ port and counts nothing. Any other path, on that port, is answered as an unknown
 | `js_run_memory_kills_total` | counter | | the runs freed while serving that ended killed at their own memory limit |
 | `js_curve_checks_total` | counter | `resource`, `status` | the runs freed while serving, by the profile that checked them (`cpu` or `memory`) and the status of the check: `learned`, `not-learned`, `no-series`, `partial`, `disagrees` or `not-a-success`; every pair is written, at 0 too; all 0 at `placement_curves = "off"` |
 | `js_curve_overruns_total` | counter | `resource` | of the checked runs, those whose peak was more than a quarter above the peak their class's profile predicted |
+| `js_blocking_tasks_total` | counter | | the tasks the server ran on the runtime's pool for blocking calls (its store calls, file writes and syncs), each a hand-off to a thread of that pool and back; counted for the whole process from its start |
+| `js_queue_status_writes_total` | counter | | the queue statuses of queued jobs a pass did not place that the pass wrote, each a read of the job and a transaction of its own: the job waits for another reason, or the detail of its wait changed. A job whose status stands is not written, so a rate near the rate of passes times the queued jobs means every pass rewrites every queued job |
+| `js_store_statements_total` | counter | | the messages carrying statements the server's Postgres store sent, each a round trip: a read is one, a transaction one for each of its statements; written over a Postgres store only. Its rate over the rate of ticks or heartbeats is what a tick or a beat costs the database |
+| `js_store_call_threads_total` | counter | | the threads the server's Postgres store started to make a call away from the runtime; written over a Postgres store only, and 0 while every call is made on the runtime's pool for blocking calls, where the client runs in place. A rise means each call starts and ends a thread, which at thousands of statements a second keeps every thread of the server waking |
 
 The counters count from the start of the process; a start failure or a loss is counted as its commit lands, so a pass that fails later
 still counts what it ended. The gauges are read at each scrape from the state `GET /v1/hosts` and the job service read, holding no lock
