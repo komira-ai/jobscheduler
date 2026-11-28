@@ -585,6 +585,8 @@ against them, not built in this one.
    A memory under-prediction kills jobs that are not its own and teaches no class. The memory shadow (section 2)
    gives the first condition's evidence in its own terms, how much sooner the curves would place and how often a
    host's projection is too low; the host-OOM signal is still missing.
+   The owner has since asked for memory placement by profile. [memory-over-time.md](memory-over-time.md) designs
+   it on this shadow, gated on its counts and a signal for host kills, as this answer asked.
 5. **Are the four checks and their thresholds right?** They are 16 runs, 80%, 3 of 16 more than 25% over, and 12 of
    16 usable.
    **Recommend: yes, as starting values to set from the decide-in-shadow days.** Checks 1 and 2 are the profile's
@@ -619,4 +621,5 @@ against them, not built in this one.
   automatic checks.
 - **Memory curves (remaining maximum)** (question 4). In shadow the projection is per slot, not the remaining
   maximum: a job is projected to hold each slot's 90th percentile, and the margin and the residual carry the risk.
+  Booking by it is designed in [memory-over-time.md](memory-over-time.md).
 - **Throttling or killing on a wrong estimate.** Ruled out by the owner (`cpu-over-time.md` section 7).
