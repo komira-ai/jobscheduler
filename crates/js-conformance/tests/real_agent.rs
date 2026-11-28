@@ -324,6 +324,7 @@ fn a_job_stop_kills_the_job_and_its_result_is_taken() {
     agent.beat(&registry);
     agent.command(vec![Command::JobStop {
         job_id: "job-1".into(),
+        reason: None,
     }]);
 
     let reply = agent.beat(&registry);
@@ -424,7 +425,7 @@ fn words(reply: &HeartbeatReply) -> Vec<String> {
         Command::Stop { run_id } => format!("stop {run_id}"),
         Command::Cancel { run_id } => format!("cancel {run_id}"),
         Command::JobStart(spec) => format!("job_start {}", spec.job_id),
-        Command::JobStop { job_id } => format!("job_stop {job_id}"),
+        Command::JobStop { job_id, .. } => format!("job_stop {job_id}"),
         Command::Unknown => "unknown".into(),
     };
     reply.commands.iter().map(word).collect()

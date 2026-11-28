@@ -142,6 +142,7 @@ fn job_messages_have_the_documented_wire_form() {
 
     let stop = Command::JobStop {
         job_id: "job-1".into(),
+        reason: None,
     };
     assert_eq!(
         serde_json::to_value(&stop).unwrap(),
@@ -350,6 +351,7 @@ fn every_field_of_a_job_start_is_checked() {
     expect(
         Command::JobStop {
             job_id: "-x".into(),
+            reason: None,
         }
         .validate()
         .unwrap_err(),
@@ -413,6 +415,7 @@ fn an_overlong_job_listing_is_refused() {
     };
     let stop = Command::JobStop {
         job_id: "j1".into(),
+        reason: None,
     };
     let reply = |job_acks, retired_acks| HeartbeatReply {
         commands: vec![stop.clone()],
@@ -712,7 +715,8 @@ fn per_job_messages_ignore_what_they_do_not_know() {
         [
             Command::Unknown,
             Command::JobStop {
-                job_id: "j2".into()
+                job_id: "j2".into(),
+                reason: None,
             }
         ]
     );

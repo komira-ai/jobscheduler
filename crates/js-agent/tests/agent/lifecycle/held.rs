@@ -214,6 +214,7 @@ fn the_retired_list_is_written_with_the_allocations_and_read_back() {
     h.stop("r9");
     h.apply(vec![Command::JobStop {
         job_id: "j9".to_owned(),
+        reason: None,
     }]);
     assert_eq!(
         json_of(&retired_file(&h)),

@@ -20,7 +20,7 @@ use crate::agent_api::job_rig::{BOOKED, placed, result, spec, tables};
 use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
-use crate::per_job::{BeatContext, JobReply, serve};
+use crate::per_job::{BeatContext, JobReply, RowState, serve};
 
 #[path = "job_held_bundle_tests.rs"]
 mod bundle;
@@ -118,7 +118,7 @@ fn beat_under(
         state: HeldState::ExitedUnacked,
         result: Some(listed),
     }];
-    serve(jobs, &context, &listing, &[], 8, None)
+    serve(jobs, &context, (&listing, &[]), 8, RowState::default())
 }
 
 /// The verdict on the one result a heartbeat of the host of `allocation` lists, refused with
@@ -243,9 +243,10 @@ fn a_start_refused_as_held_sends_the_job_back_to_the_queue_and_counts_no_failure
     }
 }
 
-/// A requeued job's refusal listed again (its verdict was lost) is answered `Stale` with a
-/// stop, as for any job the host holds no live allocation of: it is not requeued twice and
-/// counts nothing. Catches a second requeue, or a refusal counted, for one refusal.
+/// A requeued job's refusal listed again (its verdict was lost) is answered `Stale` and named
+/// in `unknown_jobs`, with no stop: the store records no attempt of the job on the host, and
+/// the job ended there, so it is no orphan either. It is not requeued twice and counts
+/// nothing. Catches a second requeue, or a refusal counted, for one refusal.
 #[test]
 fn a_held_refusal_listed_again_after_the_requeue_is_stale_and_requeues_nothing() {
     let (_store, jobs) = tables();
@@ -257,12 +258,11 @@ fn a_held_refusal_listed_again_after_the_requeue_is_stale_and_requeues_nothing()
     );
     let reply = beat(&jobs, &booking, refusal(&booking, "host-held"), &failures).unwrap();
     assert_eq!(reply.job_acks[0].ack, Ack::Stale);
-    assert_eq!(
-        reply.commands,
-        [Command::JobStop {
-            job_id: "again".to_owned()
-        }]
-    );
+    // The store holds no record that bears on the job on this host (the refusal ran no
+    // attempt there), so it is named, not stopped; it ended there, so it is no orphan.
+    assert_eq!(reply.commands, Vec::<Command>::new());
+    assert_eq!(reply.unknown_jobs, ["again"]);
+    assert!(!reply.clean & reply.orphans.is_empty());
     let requeued = job(&jobs, &placed_job.id);
     assert_eq!(
         (requeued.state, requeued.held_refusals),
@@ -545,8 +545,8 @@ fn a_start_refused_for_capacity_sends_the_job_back_to_the_queue_and_counts_no_fa
     }
 }
 
-/// A refusal for capacity listed again after the requeue is answered `Stale` with a stop and
-/// requeues nothing. Catches a second requeue, or a refusal counted, for one refusal.
+/// A refusal for capacity listed again after the requeue is answered `Stale`, with no stop
+/// (the store records no attempt of the job on the host), and requeues nothing. Catches a second requeue, or a refusal counted, for one refusal.
 #[test]
 fn a_capacity_refusal_listed_again_after_the_requeue_is_stale_and_requeues_nothing() {
     let (_store, jobs) = tables();

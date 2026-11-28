@@ -49,7 +49,7 @@ fn ids(body: &Value) -> Vec<&str> {
 /// no registry-only fields; and that a host in both the registry and the rows (each host whose
 /// hello it took) is listed as the registry sees it. Catches a listing that shows only the
 /// hosts a server took the hello of, one that lists a host twice, and one that drops the agent
-/// version of a host only a row knows.
+/// version or the orphans of a host only a row knows.
 #[tokio::test]
 async fn the_listing_shows_a_host_only_a_row_knows_once() {
     let mut first = clocked_rig("hosts_rows_a", false, NEVER);
@@ -57,8 +57,22 @@ async fn the_listing_shows_a_host_only_a_row_knows_once() {
     let mut second = peer_of("hosts_rows_b", &first);
     second.join("host-b", false).await;
     second.join("host-c", false).await;
+    // host-a's row holds two orphans: a host only a row knows shows them as its row does.
+    let host_a = js_types::HostId::new("host-a").unwrap();
+    let row = first.jobs.read_node(&host_a).unwrap().unwrap();
+    let orphan = js_jobs::Orphan {
+        first_seen: row.record.heard_at,
+        end_asked: false,
+    };
+    let state = js_jobs::NodeState {
+        orphans: [("j1".to_owned(), orphan), ("j2".to_owned(), orphan)].into(),
+        ..row.record.state.clone()
+    };
+    first.jobs.settle_node(&row, state).unwrap().unwrap();
     let body = listed(&second).await;
     assert_eq!(ids(&body), ["host-a", "host-b", "host-c"]);
+    assert_eq!(entry(&body, "host-a")["orphans"], 2);
+    assert!(entry(&body, "host-b").get("orphans").is_none());
 
     let shape = json!({"cpu_millis":8000,"memory_bytes":17179869184u64,"gpus":0});
     let by_row = entry(&body, "host-a");

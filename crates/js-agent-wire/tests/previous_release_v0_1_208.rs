@@ -227,7 +227,7 @@ fn a_v0_1_208_reply_decodes_with_every_field_kept() {
     assert!(matches!(&reply.commands[1], Command::Stop { run_id } if run_id == "run-4"));
     assert!(matches!(&reply.commands[2], Command::Cancel { run_id } if run_id == "run-1"));
     assert!(matches!(&reply.commands[3], Command::JobStart(spec) if spec.job_id == "job-3"));
-    assert!(matches!(&reply.commands[4], Command::JobStop { job_id } if job_id == "job-1"));
+    assert!(matches!(&reply.commands[4], Command::JobStop { job_id, .. } if job_id == "job-1"));
     assert_eq!(reply.commands.len(), 5);
     assert_eq!(
         reply.result_acks,

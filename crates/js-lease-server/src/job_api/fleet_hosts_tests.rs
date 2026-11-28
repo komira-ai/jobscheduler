@@ -145,6 +145,7 @@ fn told(entry: &Value) -> wire::Host {
             .map(|taint| text(&taint["reason"]))
             .unwrap_or_default(),
         agent_version: entry.get("agent_version").map(text).unwrap_or_default(),
+        orphans: u32::try_from(entry.get("orphans").and_then(Value::as_u64).unwrap_or(0)).unwrap(),
     }
 }
 

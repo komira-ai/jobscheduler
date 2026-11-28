@@ -222,6 +222,7 @@ Host.mark = 9 : HostMark
 Host.cordon_expires_at_ms = 10 : optional uint64
 Host.taint_reason = 11 : string
 Host.agent_version = 12 : string
+Host.orphans = 13 : uint32
 Availability.AVAILABILITY_UNSPECIFIED = 0
 Availability.AVAILABILITY_CHECKING = 1
 Availability.AVAILABILITY_AVAILABLE = 2

@@ -25,7 +25,6 @@
 //! goes out as it is, saying `beat_now`, so the agent's next heartbeat opens a new connection
 //! at once and reaches whichever server still accepts one.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +42,7 @@ use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
 use crate::metrics::MetricsSink;
+use crate::orphans::Judged;
 use crate::per_job::{self, BeatContext};
 use crate::util::blocking;
 
@@ -188,6 +188,9 @@ pub(super) struct Hold {
     /// The whole-host allocation the registry's own reply named, which a reply built again
     /// keeps first, as the first build did.
     pub(super) registry_exclusive: Option<String>,
+    /// What the beat's listing decided ([`crate::per_job::JobReply::judged`]), which a reply
+    /// built again keeps: the guard of a host whose listing is mostly unknown holds there too.
+    pub(super) judged: Judged,
 }
 
 /// Holds `reply` while it carries nothing (beside the whole-host allocation it names and the
@@ -217,6 +220,8 @@ pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut Heartbeat
     let quiet = HeartbeatReply {
         exclusive: reply.exclusive.clone(),
         host_taint: reply.host_taint.clone(),
+        // The jobs unknown to the store ask the agent for nothing either: it keeps them.
+        unknown_jobs: reply.unknown_jobs.clone(),
         ..HeartbeatReply::default()
     };
     if *reply != quiet {
@@ -288,12 +293,13 @@ async fn held(
         }
         let inputs = Arc::clone(&hold.inputs);
         let metering = Arc::clone(agents);
+        let judged = hold.judged.clone();
         let rebuilt = blocking(move || {
             let context = inputs.context(metering.meter().sink());
             let beat = (inputs.listed.as_slice(), inputs.retired.as_slice());
-            // The reply was empty, so the listing named no job the host holds no live
-            // allocation for: none is stopped as unknown.
-            per_job::commands_now(&inputs.jobs, &context, beat, &BTreeSet::new(), inputs.room)
+            // The reply was empty, so what the listing decided stopped nothing; the guard it
+            // put up still holds the stops of the live allocations.
+            per_job::commands_now(&inputs.jobs, &context, beat, &judged, inputs.room)
         })
         .await;
         match rebuilt {

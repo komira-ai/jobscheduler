@@ -457,7 +457,14 @@ async fn the_log_lengths_are_stored_with_the_result_and_swept_with_it() {
         xcodes: &[],
         limits: crate::job_expiry::JobLimits::DEFAULT,
     };
-    let served = per_job::serve(&jobs, &context, &listing, &[], 16, None).unwrap();
+    let served = per_job::serve(
+        &jobs,
+        &context,
+        (&listing, &[]),
+        16,
+        per_job::RowState::default(),
+    )
+    .unwrap();
     assert_eq!(served.job_acks.len(), 3);
     drop(jobs);
     let jobs = sqlite(&path, &clock);

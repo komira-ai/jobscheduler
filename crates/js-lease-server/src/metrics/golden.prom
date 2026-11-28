@@ -15,6 +15,10 @@ js_queue_oldest_age_seconds 90.064
 # HELP js_callback_pending Completion callbacks of ended jobs not yet delivered, abandoned or expired; one past its deadline counts until a try finds it expired.
 # TYPE js_callback_pending gauge
 js_callback_pending 0
+# HELP js_host_orphans Jobs a host lists that the job store holds no record of (its orphans), by host, written only for a host that holds one. While it does, the host takes no new job: see docs/runbooks/orphan-jobs.md.
+# TYPE js_host_orphans gauge
+# HELP js_host_oldest_orphan_age_seconds How long the oldest orphan of a host has been listed, by the store's clock, by host, written only for a host that holds one.
+# TYPE js_host_oldest_orphan_age_seconds gauge
 # HELP js_job_placements_total Queued jobs placed on a host.
 # TYPE js_job_placements_total counter
 js_job_placements_total 2
@@ -185,6 +189,12 @@ js_agent_start_refusals_total{host="host-b",code="input-not-allowed"} 1
 # TYPE js_agent_bodies_too_large_total counter
 js_agent_bodies_too_large_total{route="hello"} 1
 js_agent_bodies_too_large_total{route="heartbeat"} 2
+# HELP js_unknown_jobs_found_total Jobs a host's heartbeat listed that the store holds no record of, by host, each counted once, at the beat that first listed it. They are kept running as orphans of the host, which takes no job while it lists one.
+# TYPE js_unknown_jobs_found_total counter
+js_unknown_jobs_found_total{host="host-a"} 5
+# HELP js_unknown_listing_guarded_total Heartbeats whose listing was more than half jobs the store holds no record of, by host: the reply told the host to stop nothing but the orphans an operator ended (a stop already in its dispatch queue is still handed out). Any rise means the store may have lost or rolled back its tables.
+# TYPE js_unknown_listing_guarded_total counter
+js_unknown_listing_guarded_total{host="host-b"} 2
 # HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
 # TYPE js_acquires_total counter
 js_acquires_total{pool="gpu"} 3
