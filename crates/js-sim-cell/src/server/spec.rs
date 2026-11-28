@@ -138,6 +138,9 @@ pub struct ServerSpec {
     providers: Vec<ElasticPool>,
     /// Which store the server keeps its state in (`--store`).
     store: Store,
+    /// How long a host may go unheard before the server ends its jobs as lost
+    /// ([`ServerSpec::silence_limit`]); `None`: the server's default.
+    silence_limit: Option<Duration>,
 }
 
 impl ServerSpec {
@@ -162,6 +165,7 @@ impl ServerSpec {
             elastic: None,
             providers: Vec::new(),
             store: Store::default(),
+            silence_limit: None,
         }
     }
 
@@ -249,6 +253,16 @@ impl ServerSpec {
     #[must_use]
     pub fn lost_retention(mut self, retention: Duration) -> Self {
         self.lost_retention = retention;
+        self
+    }
+
+    /// This server, ending the jobs of a host unheard for `limit` as lost, in place of the
+    /// server's default of ten minutes ([`js_lease_server::Config::with_silence_limit`]): for a
+    /// scenario that cuts a host off for longer and is about another limit. A server started
+    /// on flags only; an elastic pool's server is configured by the server node.
+    #[must_use]
+    pub fn silence_limit(mut self, limit: Duration) -> Self {
+        self.silence_limit = Some(limit);
         self
     }
 
@@ -438,6 +452,10 @@ impl ServerSpec {
         let args = self.args_over(dir, at)?;
         let cli = Cli::try_parse_from(args).map_err(StartupError::because("command line"))?;
         let config = Config::from_cli(cli)?;
+        let config = match self.silence_limit {
+            Some(limit) => config.with_silence_limit(limit),
+            None => config,
+        };
         Ok(config.with_monotonic(Arc::new(Virtual(clock.clone()))))
     }
 }

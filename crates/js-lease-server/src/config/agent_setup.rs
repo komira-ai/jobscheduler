@@ -114,6 +114,15 @@ pub(crate) fn check_more(
 }
 
 impl Config {
+    /// The same configuration with the job pass ending the jobs of a host silent for `limit`,
+    /// in place of `server.silence_limit` (or its default for a server started on flags): how a
+    /// server run in a simulation keeps a cut-off host's jobs past the default ten minutes.
+    #[must_use]
+    pub fn with_silence_limit(mut self, limit: std::time::Duration) -> Self {
+        self.agents.job_limits = self.agents.job_limits.with_silence_limit(limit);
+        self
+    }
+
     /// The same configuration with the job store (when the job service is on) stamping its
     /// rows with `clock` and minting its ids from `ids`, in place of the system's clock and
     /// random source: how a simulation makes its job and allocation ids, and the times it

@@ -34,6 +34,19 @@ fn the_silence_limit_is_ten_minutes_unless_the_file_sets_it() {
     assert_eq!(set, pool, "a pool's limits moved with the server's key");
 }
 
+// Catches a server embedded in a simulation that cannot move the limit, or that moves another
+// limit with it: the builder sets the silence limit of a server started on flags and nothing else.
+#[test]
+fn an_embedding_server_sets_its_own_silence_limit() {
+    let rig = ClientsRig::new("silence_limit_builder");
+    let flags = rig.config_of_flags(&[]).unwrap();
+    let before = flags.agents.job_limits;
+    let hour = Duration::from_secs(3600);
+    let set = flags.with_silence_limit(hour).agents.job_limits;
+    assert_eq!(set, before.with_silence_limit(hour));
+    assert_eq!(set.silence_limit, hour);
+}
+
 // Catches a zero limit (every host silent at once), a text that is not a duration, and a number
 // where a duration's text belongs, each accepted rather than refused at start naming the key.
 #[test]
