@@ -81,15 +81,18 @@ impl Receiver {
         let replies: Vec<String> = replies.iter().map(|reply| (*reply).to_owned()).collect();
         let (head_to, heads) = mpsc::channel();
         let (held_to, held) = mpsc::channel();
-        let (_abandoned_to, abandoned) = mpsc::channel();
+        let (abandoned_to, abandoned) = mpsc::channel();
         thread::spawn(move || {
             let mut index = 0;
             loop {
                 let (stream, _) = listener.accept().expect("accepts");
                 let session = ServerConnection::new(config.clone()).expect("a TLS session");
                 let mut tls = StreamOwned::new(session, stream);
-                // A sender that gave up during the handshake sent no request.
+                // A sender that gave up during the handshake sent no request. It is counted
+                // before the next connection is taken, so a test that sends again after it
+                // finds it counted.
                 let Some(head) = read_head(&mut tls) else {
+                    abandoned_to.send(()).ok();
                     continue;
                 };
                 // The head goes out before the reply, so it is there when the sender returns.
