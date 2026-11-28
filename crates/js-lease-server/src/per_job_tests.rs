@@ -19,7 +19,7 @@ use js_types::{CpuSeries, HostId, MemorySeries, Resources};
 
 use js_state::Store;
 
-use super::{BeatContext, Command, NO_EXIT_CODE, end_of, serve};
+use super::{BeatContext, Command, NO_EXIT_CODE, RowState, end_of, serve};
 use crate::agent_api::job_rig::{BOOKED, placed, result, spec, starts, stops, tables};
 use crate::metrics::{MetricsSink, NoMetrics};
 
@@ -58,10 +58,9 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             xcodes: &[],
             limits: crate::job_expiry::JobLimits::DEFAULT,
         },
-        &[],
-        std::slice::from_ref(&long),
+        (&[], std::slice::from_ref(&long)),
         8,
-        None,
+        RowState::default(),
     )
     .unwrap();
     assert_eq!(reply.retired_acks, [long]);
@@ -97,10 +96,9 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
             xcodes: &[],
             limits: crate::job_expiry::JobLimits::DEFAULT,
         },
-        &listing,
-        &[],
+        (&listing, &[]),
         8,
-        None,
+        RowState::default(),
     )
     .unwrap();
     assert_eq!(store.commit_stats().txns, before);
@@ -144,10 +142,9 @@ fn a_failed_end_commit_is_an_error() {
             xcodes: &[],
             limits: crate::job_expiry::JobLimits::DEFAULT,
         },
-        &listing,
-        &[],
+        (&listing, &[]),
         8,
-        None,
+        RowState::default(),
     );
     assert_eq!(
         answer.map(drop),
@@ -192,10 +189,9 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             xcodes: &[],
             limits: crate::job_expiry::JobLimits::DEFAULT,
         },
-        &[],
-        &[],
+        (&[], &[]),
         1,
-        None,
+        RowState::default(),
     )
     .unwrap();
     let ids = |commands: Vec<Command>| {
@@ -222,10 +218,9 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             xcodes: &[],
             limits: crate::job_expiry::JobLimits::DEFAULT,
         },
-        &[],
-        &[],
+        (&[], &[]),
         8,
-        None,
+        RowState::default(),
     )
     .unwrap();
     let both = vec!["job-b".to_owned(), "job-c".to_owned()];
@@ -270,7 +265,8 @@ fn a_whole_host_job_is_started_only_once_ready_and_never_stopped_while_preparing
         xcodes: &[],
         limits: crate::job_expiry::JobLimits::DEFAULT,
     };
-    let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8, None).unwrap();
+    let beat =
+        |listed: &[HeldJob]| serve(&jobs, &context, (listed, &[]), 8, RowState::default()).unwrap();
 
     let reply = beat(&[]);
     assert_eq!((reply.commands.len(), reply.exclusive), (0, Some(leased)));
@@ -520,7 +516,7 @@ fn listed_end(
         limits: crate::job_expiry::JobLimits::DEFAULT,
     };
     let listing = [listed("job-a", HeldState::ExitedUnacked, Some(result))];
-    let reply = serve(jobs, &context, &listing, &[], 8, None).unwrap();
+    let reply = serve(jobs, &context, (&listing, &[]), 8, RowState::default()).unwrap();
     reply.job_acks.first().map(|ack| ack.ack)
 }
 

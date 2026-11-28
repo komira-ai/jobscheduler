@@ -143,8 +143,9 @@ pub mod code {
     /// [`refusal::HOST_PORT_LOST`](js_agent_wire::refusal::HOST_PORT_LOST)).
     pub const HOST_PORT_LOST: &str = "host-port-lost";
     /// A mount provider did not answer the release of a run's sources within a minute after
-    /// the run ended: the sources named are left to the provider's own collection. The host
-    /// is not tainted and the run's slot is free.
+    /// the run ended, or the same run was admitted again before it did (the release of the
+    /// earlier attempt is then no longer asked): the sources named are left to the provider's
+    /// own collection. The host is not tainted and the run's slot is free.
     pub const PROVIDER_RELEASE_FAILED: &str = "provider-release-failed";
     /// A mount provider has not answered the sweep the agent asks of it when it starts; it is
     /// asked again every ten seconds, and a start that names it waits meanwhile. Reported once
@@ -163,4 +164,11 @@ pub mod code {
     /// read, or named a provider this agent was not given (either is removed, its sources left
     /// to the provider's own collection), or the directory of records could not be listed.
     pub const PROVIDER_RECORD_FAILED: &str = "provider-record-failed";
+    /// When the agent started, the runtime left a lease of this agent alone because it cannot
+    /// read the lease's ledger file (a version this agent does not read, as after a rollback
+    /// to an older agent, or a broken file): its job, if it still runs, is neither taken over
+    /// nor stopped, so nothing bounds it, and the sources its providers made for it are kept,
+    /// never released by this process. One for each such lease, naming the lease, its job and
+    /// the file's version.
+    pub const LEASE_UNREADABLE: &str = "lease-unreadable";
 }

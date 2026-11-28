@@ -741,7 +741,7 @@ fn settle_writes_the_flags_at_the_version_the_beat_wrote() {
     assert!(row.record.state.first_listing_pending);
 
     let missing = BTreeMap::from([(job("job-a"), 1)]);
-    settle(&jobs, &row, false, missing.clone());
+    settle(&jobs, &row, false, (missing.clone(), BTreeMap::new()));
     let state = world.row("host-a").record.state;
     assert!(!state.first_listing_pending);
     assert!(!state.last_listing_clean);
@@ -750,12 +750,12 @@ fn settle_writes_the_flags_at_the_version_the_beat_wrote() {
     // A newer beat moved the row: this settle, of the version it wrote before, writes nothing.
     let newer = applied(2);
     assert_ne!(newer.version, row.version);
-    settle(&jobs, &row, true, BTreeMap::new());
+    settle(&jobs, &row, true, (BTreeMap::new(), BTreeMap::new()));
     assert_eq!(world.row("host-a"), newer);
 
     // A failed write leaves the flags as they were.
     world.store.fail_after(0);
-    settle(&jobs, &newer, true, BTreeMap::new());
+    settle(&jobs, &newer, true, (BTreeMap::new(), BTreeMap::new()));
     assert_eq!(world.row("host-a"), newer);
 }
 
@@ -796,10 +796,21 @@ async fn the_listing_flag_is_the_rows_and_an_unread_row_is_unclean() {
         state: js_agent_wire::HeldState::Running,
         result: None,
     };
-    let reply = server.beat(&session, Some(2), vec![ghost]).await.unwrap();
-    assert_eq!(crate::agent_api::job_rig::stops(&reply), ["ghost"]);
+    let reply = server
+        .beat(&session, Some(2), vec![ghost.clone()])
+        .await
+        .unwrap();
+    assert!(crate::agent_api::job_rig::stops(&reply).is_empty());
+    assert_eq!(reply.unknown_jobs, ["ghost"]);
     assert!(!server.agents.listing_clean(&host));
     server.beat(&session, Some(3), Vec::new()).await.unwrap();
+    assert!(server.agents.listing_clean(&host));
+    // A beat the row does not apply (older than the newest applied) changes no flag, and its
+    // answer, built from the rows, still names the job the store does not know and stops
+    // nothing: the agent's list of them does not flap on a late beat.
+    let late = server.beat(&session, Some(2), vec![ghost]).await.unwrap();
+    assert!(crate::agent_api::job_rig::stops(&late).is_empty());
+    assert_eq!(late.unknown_jobs, ["ghost"]);
     assert!(server.agents.listing_clean(&host));
     world.store.fail_read_after(0);
     assert!(

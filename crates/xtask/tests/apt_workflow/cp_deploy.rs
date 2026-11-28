@@ -3,12 +3,17 @@
 //! Swarm service `js-server` through docker-swarm-updater. [`cp_deploy_problems`] reads the
 //! parsed workflow and names every way the jobs differ from what is written here.
 //!
-//! - **When.** Both run under [`CP_IF`] alone: a push to main, the plan's release, and the
-//!   repository variables `CP_DEPLOY_ENDPOINT` and `CP_DEPLOY_TAILSCALE_TAGS` not empty, so a
-//!   repository that sets no endpoint (a fork, or before the deploy front is set up) or no tailnet
-//!   tags skips both, and the call never asks the Tailscale join for a node without tags (which
-//!   it refuses). `cp-deploy-digest` needs `plan`,
-//!   `publish` and `deploy-tool`; `cp-deploy` needs `plan` and `cp-deploy-digest`.
+//! - **When.** `cp-deploy-digest` runs under [`DIGEST_IF`] alone and `cp-deploy` under
+//!   [`DEPLOY_IF`] alone: not cancelled, nothing up the chain failed, a push to main, the plan's
+//!   release, each job it needs succeeded by name, and the repository variables
+//!   `CP_DEPLOY_ENDPOINT` and `CP_DEPLOY_TAILSCALE_TAGS` not empty, so a repository that sets no
+//!   endpoint (a fork, or before the deploy front is set up) or no tailnet tags skips both, and
+//!   the call never asks the Tailscale join for a node without tags (which it refuses).
+//!   `cp-deploy-digest` needs `plan`, `publish`, `deploy-tool` and `blackbox` (the gate before the
+//!   farm: a red or skipped black-box test deploys nothing); `cp-deploy` needs `plan` and
+//!   `cp-deploy-digest`. The results are named because both jobs sit below the apt jobs' retry
+//!   slots, which are skipped on a release with no apt conflict, and GitHub's implied `success()`
+//!   is false below a skipped job (`tests/release_workflow`'s `skip_rule` runs the scenarios).
 //! - **`cp-deploy-digest`** holds no permission (`permissions: {}`), names no environment and
 //!   runs on `ubuntu-24.04`. Its actions are exactly [`DOWNLOADS`] (the `xtask` that
 //!   `deploy-tool` built, and the release's files and bundles as `publish` uploaded them), its
@@ -30,8 +35,11 @@ pub const DIGEST: &str = "cp-deploy-digest";
 /// The job that calls docker-swarm-updater's deploy workflow.
 pub const DEPLOY: &str = "cp-deploy";
 
-/// The `if:` of both jobs.
-pub const CP_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}";
+/// The `if:` of `cp-deploy-digest`.
+pub const DIGEST_IF: &str = "${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' && needs.blackbox.result == 'success' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}";
+
+/// The `if:` of `cp-deploy`.
+pub const DEPLOY_IF: &str = "${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release == 'true' && needs.cp-deploy-digest.result == 'success' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}";
 
 /// The workflow `cp-deploy` calls: docker-swarm-updater's deploy workflow at v0.1.3, the commit
 /// its allow-list pins `job_workflow_ref` to.
@@ -157,19 +165,24 @@ pub fn cp_deploy_problems(doc: &Node) -> Vec<String> {
 }
 
 /// The `needs` and the `if:` of one of the two jobs.
-fn gate_problems(name: &str, job: &Node, needs: &[&str]) -> Vec<String> {
+fn gate_problems(name: &str, job: &Node, needs: &[&str], want_if: &str) -> Vec<String> {
     let mut problems = Vec::new();
     if names(entry(job, "needs")) != needs {
         problems.push(format!("{name}: needs are not {needs:?}"));
     }
-    if entry(job, "if").and_then(Node::as_str) != Some(CP_IF) {
-        problems.push(format!("{name}: `if` is not {CP_IF}"));
+    if entry(job, "if").and_then(Node::as_str) != Some(want_if) {
+        problems.push(format!("{name}: `if` is not {want_if}"));
     }
     problems
 }
 
 fn digest_problems(job: &Node) -> Vec<String> {
-    let mut problems = gate_problems(DIGEST, job, &["deploy-tool", "plan", "publish"]);
+    let mut problems = gate_problems(
+        DIGEST,
+        job,
+        &["blackbox", "deploy-tool", "plan", "publish"],
+        DIGEST_IF,
+    );
     if !entry(job, "permissions").is_some_and(Node::is_empty_map) {
         problems.push(format!("{DIGEST}: permissions are not {{}}"));
     }
@@ -240,7 +253,7 @@ fn digest_problems(job: &Node) -> Vec<String> {
 }
 
 fn deploy_problems(job: &Node) -> Vec<String> {
-    let mut problems = gate_problems(DEPLOY, job, &[DIGEST, "plan"]);
+    let mut problems = gate_problems(DEPLOY, job, &[DIGEST, "plan"], DEPLOY_IF);
     if permissions(Some(job)) != ["id-token: write"] {
         problems.push(format!(
             "{DEPLOY}: permissions are {:?}, not id-token: write alone",

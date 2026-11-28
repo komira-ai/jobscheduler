@@ -717,6 +717,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the agent program's process id, drawn once when the program starts its session; the cell builds its agents' sessions itself and names each process from its host and generation, with no random source",
     },
     Allowed {
+        file: "crates/js-agent/src/agent_process.rs",
+        item: "at_start",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the agent program's start reading how old the process id its last stop left is, against the grace it names, which decides only whether its hello names that process; the cell builds its agents' sessions itself and never runs the program's start",
+    },
+    Allowed {
         file: "crates/js-agent/src/backoff.rs",
         item: "SystemJitter::up_to",
         token: Token::Getrandom,
@@ -806,6 +813,20 @@ pub const ALLOWED: &[Allowed] = &[
         token: Token::InstantNow,
         sites: 1,
         reason: "the agent's usage clock behind UsageClock; the cell's agents record no usage with it",
+    },
+    Allowed {
+        file: "crates/js-client/src/address.rs",
+        item: "Book::learn",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "when the HTTP client's background lookup of the server's name ended, which paces the next one; the cell's agents talk to their servers through its in-memory transports, never the HTTP client",
+    },
+    Allowed {
+        file: "crates/js-client/src/address.rs",
+        item: "Remember::connect",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "when the HTTP client's new connection began, which bounds each address's attempt within the request's limit; the cell's agents talk to their servers through its in-memory transports, never the HTTP client",
     },
     Allowed {
         file: "crates/js-contain/src/oci/crun.rs",

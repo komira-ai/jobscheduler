@@ -641,6 +641,13 @@ impl Agent {
         self.go.send(Wake::Stop).unwrap();
     }
 
+    /// Delivers a replace request, as SIGHUP to the main process would (the update hook's
+    /// hand-over in place), without waiting for the agent to end.
+    #[cfg(target_os = "linux")]
+    pub fn replace(&self) {
+        self.go.send(Wake::Replace).unwrap();
+    }
+
     /// Waits until the agent has done its next exchange and returns the wait it asks for.
     pub fn next_wait(&self) -> Duration {
         self.slept

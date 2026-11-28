@@ -6,6 +6,14 @@
 //! - **A run's sources** are remembered when its start is admitted (`providing`) and taken
 //!   off the map at `Stage::Scratch`, once its file system is taken apart, into the
 //!   releases that are owed.
+//! - **An attempt** is given to each admitted start that names a provider, and named in
+//!   every call of its sources: one agent-wide count, each larger than the last, and at a
+//!   restart larger than every attempt the records name. The same job given to this agent
+//!   again (a retry placed here while the release of its last start is still asked) is
+//!   another attempt, so a provider that reads attempts never lets the late release touch
+//!   the new start's tree. When that start is admitted the releases still owed for the run
+//!   are dropped and reported (`provider-release-failed`): a provider that does not read
+//!   attempts would take them for the new start's.
 //! - **A release** is asked of the provider until it answers, for a minute after the run
 //!   ended, each source paced as a start's calls are (`pace`): after a failure it waits 1 s,
 //!   then 2, 4, 8 and 16 s, with one `provider-backoff` line for the run at each such wait.
@@ -15,14 +23,18 @@
 //! - **The calls that failed** are counted for the whole agent: the `Prepare`s a provider did
 //!   not serve and the calls sent again after a failure, both named in every
 //!   `provider-backoff` line.
-//! - **The sweep** (`Sweep(agent, keep)` with the runs the agent adopted) is asked of each
-//!   provider when the agent has started, and again every ten seconds until answered, with
-//!   one `provider-sweep-failed` finding for each provider that fails it. A start that names
+//! - **The sweep** (`Sweep(agent, keep)` with the runs the agent holds, each from the attempt
+//!   its record names) is asked of each provider when the agent has started, and again every
+//!   ten seconds until answered, with one `provider-sweep-failed` finding for each provider
+//!   that fails it. A start that names
 //!   a provider whose sweep is not answered waits (`providing`): a sweep that came after
 //!   its `Prepare` would release the start's source.
 //! - **A restart** reads the records of the state root (`provider_record`): a run the agent
-//!   adopted keeps its sources, to release them at its own end; every other run's sources
-//!   are released now, and its record removed.
+//!   adopted keeps its sources, to release them at its own end; so does a run whose lease
+//!   the runtime left alone because it cannot read the lease's ledger file
+//!   ([`Runtime::unread_leases`]): its job may still run, and nothing here bounds it, so its
+//!   sources are kept for as long as this process runs and are never released by it. Every
+//!   other run's sources are released now, and its record removed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,6 +42,8 @@ use super::Lifecycle;
 use super::job::Stage;
 use super::pace::{Gate, Pace, Step};
 use super::provider_record::{self, Source};
+#[cfg(doc)]
+use crate::lifecycle::runtime::Runtime;
 use crate::lifecycle::taint::StateRoot;
 use crate::lifecycle::{Event, Finding, ProviderAnswer, ProviderCall, Providers, code};
 
@@ -60,8 +74,8 @@ impl Providers for NoProviders {
 
 /// The sweep of one provider while it is not answered.
 struct Sweep {
-    /// The runs whose sources are kept.
-    keep: Vec<String>,
+    /// The runs whose sources are kept, each from its attempt (0: every attempt).
+    keep: Vec<(String, u64)>,
     /// When it is asked again, after a failed answer; 0 until one failed.
     again_ms: u64,
     /// Whether a finding was made of it.
@@ -77,6 +91,8 @@ struct Owed {
 /// The sources of a run that ended, whose release is owed.
 struct Leaving {
     run_id: String,
+    /// The run's attempt.
+    attempt: u64,
     /// When the run's scratch was removed.
     since_ms: u64,
     /// The sources not yet released.
@@ -103,6 +119,15 @@ pub(super) fn seed(provider: &str, run_id: &str, index: u32) -> String {
     format!("{provider}/{run_id}#{index}")
 }
 
+/// The sources `left` as a finding names them: `tier source 0, tier source 2`.
+fn names_of(left: &[Owed]) -> String {
+    let names: Vec<String> = left
+        .iter()
+        .map(|owed| format!("{} source {}", owed.source.provider, owed.source.index))
+        .collect();
+    names.join(", ")
+}
+
 /// The providers the lifecycle was given and what it holds for them.
 pub(super) struct Attached {
     providers: Box<dyn Providers>,
@@ -110,8 +135,10 @@ pub(super) struct Attached {
     wait_ms: u64,
     /// The sweeps not answered yet, by provider.
     sweeps: BTreeMap<String, Sweep>,
-    /// The sources of the runs that have not ended, by run id.
-    runs: BTreeMap<String, Vec<Source>>,
+    /// The sources of the runs that have not ended, each with the run's attempt, by run id.
+    runs: BTreeMap<String, (u64, Vec<Source>)>,
+    /// The attempt the next start that names a provider is given.
+    next_attempt: u64,
     /// The releases that are owed.
     leaving: Vec<Leaving>,
     /// The pace of the `Prepare`s of each provider that failed one, by name, with its last
@@ -137,6 +164,7 @@ impl Attached {
             wait_ms,
             sweeps: BTreeMap::new(),
             runs: BTreeMap::new(),
+            next_attempt: 1,
             leaving: Vec::new(),
             gates: BTreeMap::new(),
             turned_away: 0,
@@ -248,16 +276,52 @@ impl Attached {
         }))
     }
 
-    /// Remembers `sources` as the ones the run `run_id` holds.
-    pub(super) fn keep(&mut self, run_id: &str, sources: Vec<Source>) {
-        self.runs.insert(run_id.to_owned(), sources);
+    /// Remembers `sources` as the ones the attempt `attempt` of the run `run_id` holds.
+    fn keep(&mut self, (run_id, attempt): (&str, u64), sources: Vec<Source>) {
+        self.runs.insert(run_id.to_owned(), (attempt, sources));
+    }
+
+    /// A start of the run `run_id` that names `sources` is admitted at `now_ms`: gives it the
+    /// next attempt and remembers its sources. Releases still owed for the run, of an earlier
+    /// attempt, are dropped, each run's with one `provider-release-failed` finding: a provider
+    /// that does not read attempts takes the new start's sources for the same, and a late
+    /// release would take its tree. Their record is the new start's now.
+    pub(super) fn begin(
+        &mut self,
+        run_id: &str,
+        sources: Vec<Source>,
+        now_ms: u64,
+        events: &mut Vec<Event>,
+    ) -> u64 {
+        let attempt = self.next_attempt;
+        self.next_attempt = attempt.saturating_add(1);
+        let (dropped, kept) = std::mem::take(&mut self.leaving)
+            .into_iter()
+            .partition(|leave| leave.run_id == run_id);
+        self.leaving = kept;
+        for leave in dropped {
+            let since = now_ms.saturating_sub(leave.since_ms) / 1000;
+            events.push(Event::Finding(Finding {
+                run_id: Some(run_id.to_owned()),
+                code: code::PROVIDER_RELEASE_FAILED,
+                message: format!(
+                    "attempt {} of the run ended {since} s ago and is not released: {}; no \
+                     longer asked, as attempt {attempt} of the run is prepared now, and left to \
+                     the providers' own collection",
+                    leave.attempt,
+                    names_of(&leave.left)
+                ),
+            }));
+        }
+        self.keep((run_id, attempt), sources);
+        attempt
     }
 
     /// The run `run_id` has ended and its file system is taken apart: its sources, when it
     /// holds any, are to be released. A run is taken once, so a cleanup that goes through
     /// the same step again owes nothing twice.
     pub(super) fn leave(&mut self, run_id: &str, now_ms: u64) {
-        if let Some(left) = self.runs.remove(run_id) {
+        if let Some((attempt, left)) = self.runs.remove(run_id) {
             let left = left
                 .into_iter()
                 .map(|source| Owed {
@@ -267,6 +331,7 @@ impl Attached {
                 .collect();
             self.leaving.push(Leaving {
                 run_id: run_id.to_owned(),
+                attempt,
                 since_ms: now_ms,
                 left,
             });
@@ -281,6 +346,7 @@ impl Attached {
         let mut leaving = std::mem::take(&mut self.leaving);
         leaving.retain_mut(|leave| {
             let run_id = leave.run_id.clone();
+            let attempt = leave.attempt;
             let mut backed = Vec::new();
             leave.left.retain_mut(|owed| {
                 if !owed.pace.due(now_ms) {
@@ -289,6 +355,7 @@ impl Attached {
                 let index = owed.source.index;
                 let call = ProviderCall::Release {
                     run_id: run_id.clone(),
+                    attempt,
                     index,
                 };
                 let provider = owed.source.provider.as_str();
@@ -319,20 +386,13 @@ impl Attached {
                     false
                 }
                 (false, true) => {
-                    let left: Vec<String> = leave
-                        .left
-                        .iter()
-                        .map(|owed| {
-                            format!("{} source {}", owed.source.provider, owed.source.index)
-                        })
-                        .collect();
                     events.push(Event::Finding(Finding {
                         run_id: Some(run_id.clone()),
                         code: code::PROVIDER_RELEASE_FAILED,
                         message: format!(
                             "not released within a minute: {}; left to the providers' own \
                              collection",
-                            left.join(", ")
+                            names_of(&leave.left)
                         ),
                     }));
                     provider_record::remove(state, &run_id);
@@ -389,11 +449,16 @@ impl Lifecycle {
     /// `wait_ms` is how long a start may wait on its providers, from its admission.
     ///
     /// The runs held are the adopted jobs and the containers that could not be removed: they
-    /// keep their sources, which are released when their scratch is removed. The record of
-    /// every other run in the state root is read and its sources are released now (a record
-    /// that names a provider this agent was not given is reported and its source left; one
-    /// that cannot be read is removed and reported). The sweeps are asked at once and again
-    /// at every step until answered; a start that names a provider waits for its sweep.
+    /// keep their sources, which are released when their scratch is removed. So are the runs
+    /// whose lease the runtime left alone, its ledger file unreadable
+    /// ([`Runtime::unread_leases`]): their sources are kept and never released by this
+    /// process, as their jobs may still run. The record of every other run in the state root
+    /// is read and its sources are released now (a record that names a provider this agent
+    /// was not given is reported and its source left; one that cannot be read is removed and
+    /// reported). The sweep keeps each held run from the attempt its record names. The first
+    /// attempt given after this is larger than every attempt a record names. The sweeps are
+    /// asked at once and again at every step until answered; a start that names a provider
+    /// waits for its sweep.
     ///
     /// Without this a start that names a provider is refused (`input-not-allowed`): the
     /// agent was not given one.
@@ -407,9 +472,26 @@ impl Lifecycle {
         let now = self.clock.now_ms();
         let stuck = self.stuck.iter().filter_map(|held| held.run_id.clone());
         let jobs = self.jobs.iter().filter(|job| job.stage != Stage::Freed);
-        let kept: BTreeSet<String> = jobs.map(|job| job.run_id.clone()).chain(stuck).collect();
+        let unread = self
+            .runtime
+            .unread_leases()
+            .into_iter()
+            .map(|lease| lease.run_id);
+        let kept: BTreeSet<String> = jobs
+            .map(|job| job.run_id.clone())
+            .chain(stuck)
+            .chain(unread)
+            .collect();
         let mut attached = Attached::of(providers, wait_ms);
-        for (run_id, sources) in provider_record::load(&self.config.state, &mut events) {
+        let mut attempts = BTreeMap::new();
+        for record in provider_record::load(&self.config.state, &mut events) {
+            let provider_record::Recorded {
+                run_id,
+                attempt,
+                sources,
+            } = record;
+            attached.next_attempt = attached.next_attempt.max(attempt.saturating_add(1));
+            attempts.insert(run_id.clone(), attempt);
             let (known, unknown): (Vec<Source>, Vec<Source>) = sources
                 .into_iter()
                 .partition(|source| attached.has(&source.provider));
@@ -425,12 +507,18 @@ impl Lifecycle {
                     ),
                 }));
             }
-            attached.keep(&run_id, known);
+            attached.keep((run_id.as_str(), attempt), known);
             if !kept.contains(&run_id) {
                 attached.leave(&run_id, now);
             }
         }
-        let keep: Vec<String> = kept.into_iter().collect();
+        let keep: Vec<(String, u64)> = kept
+            .into_iter()
+            .map(|run_id| {
+                let attempt = attempts.get(&run_id).copied().unwrap_or(0);
+                (run_id, attempt)
+            })
+            .collect();
         for name in attached.providers.names() {
             let sweep = Sweep {
                 keep: keep.clone(),

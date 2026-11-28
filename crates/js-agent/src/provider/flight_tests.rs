@@ -6,12 +6,12 @@ use super::{Begun, Flights, Key};
 use crate::lifecycle::ProviderAnswer;
 
 fn key() -> Key {
-    ("tier".to_owned(), 1, "js.r1".to_owned(), 0)
+    ("tier".to_owned(), 1, "js.r1".to_owned(), 1, 0)
 }
 
 /// The key of a `Prepare`, whose `Mount` is [`key`].
 fn prepared() -> Key {
-    ("tier".to_owned(), 0, "js.r1".to_owned(), 0)
+    ("tier".to_owned(), 0, "js.r1".to_owned(), 1, 0)
 }
 
 fn directory() -> ProviderAnswer {

@@ -19,7 +19,7 @@ use crate::codec::{DecodeError, LATER_FORMAT, field_of, set_field};
 use crate::interfere::INJECTED;
 use crate::{
     AppliedBeat, Beat, IdSource, JobStore, JobStoreError, LoadReading, NodeHello, NodeRecord,
-    NodeRow, NodeState, SessionDigest, keys,
+    NodeRow, NodeState, Orphan, SessionDigest, keys,
 };
 
 /// What a host's hello announces in these checks: a session digest, a pool, a claimed shape and
@@ -536,6 +536,71 @@ pub fn a_beat_through_one_server_is_read_by_another<B: Backend>(backend: &B) {
         rig.jobs.beat_node(&node, 1, Some(1), counted),
         Ok(Beat::Superseded(beat_row)),
         "{name}: the other server judged a beat on something other than the row"
+    );
+}
+
+/// A host's orphans (the jobs it lists that the store holds no record of) are written by a
+/// settle and read back as written on every server, kept by a beat, and kept by a later hello
+/// of the host, with their first-seen times and an operator's ask to end one: an orphan's age
+/// is the store's lack of a record, which neither a beat nor a hello changes. Catches orphans
+/// a backend drops, an age that starts again at each hello (an orphan would never reach its
+/// bound), and an operator's end a hello forgets.
+pub fn a_hosts_orphans_are_kept_by_its_beats_and_hellos<B: Backend>(backend: &B) {
+    let name = "a_hosts_orphans_are_kept_by_its_beats_and_hellos";
+    let rig = rig(backend);
+    let other = rig.other();
+    let node = host("host-a");
+    let hello_row = rig.jobs.hello_node(&node, &hello()).expect("a hello");
+    assert!(
+        hello_row.record.state.orphans.is_empty(),
+        "{name}: a first hello holds orphans"
+    );
+    let orphans = BTreeMap::from([
+        (
+            "ghost-1".to_owned(),
+            Orphan {
+                first_seen: StoreTime::from_duration(Duration::new(40, 5)),
+                end_asked: false,
+            },
+        ),
+        (
+            "ghost-2".to_owned(),
+            Orphan {
+                first_seen: StoreTime::from_duration(Duration::new(41, 0)),
+                end_asked: true,
+            },
+        ),
+    ]);
+    let state = NodeState {
+        orphans: orphans.clone(),
+        ..hello_row.record.state.clone()
+    };
+    let settled = rig
+        .jobs
+        .settle_node(&hello_row, state)
+        .expect("settles")
+        .expect("at the version");
+    assert_eq!(
+        stored(&other, &node).record.state.orphans,
+        orphans,
+        "{name}: the other server reads other orphans than were written"
+    );
+    let beat_row = applied_row(
+        other
+            .beat_node(&node, settled.record.epoch, Some(1), |record| {
+                record.state.clone()
+            })
+            .expect("answers"),
+    );
+    assert_eq!(
+        beat_row.record.state.orphans, orphans,
+        "{name}: a beat dropped the orphans"
+    );
+    let again = other.hello_node(&node, &hello()).expect("a hello");
+    assert_eq!(
+        (again.record.epoch, again.record.state.orphans),
+        (settled.record.epoch + 1, orphans),
+        "{name}: a hello dropped the orphans or their age"
     );
 }
 

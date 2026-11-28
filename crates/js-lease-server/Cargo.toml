@@ -73,8 +73,9 @@ in-process = []
 
 [dev-dependencies]
 # `mkfifo` for the named-pipe token file test (tests/server/startup.rs): rustix has `mknodat` on
-# Linux only, and the tests run on macOS too.
-nix = { workspace = true, features = ["fs"] }
+# Linux only, and the tests run on macOS too. `getrusage` for the process's voluntary context
+# switches the farm-shaped server test prints (src/server_storm_tests.rs).
+nix = { workspace = true, features = ["fs", "resource"] }
 js-agent = { path = "../js-agent" }
 # `Candidate`, the host a placement test offers the engine (src/sched/jobs_tests.rs).
 js-provider = { path = "../js-provider" }

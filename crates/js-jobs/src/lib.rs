@@ -230,6 +230,10 @@
 //! Every operation that writes also moves the `idx/` entries of the rows it writes, in the
 //! same transaction (the table above names only the rows).
 //!
+//! After a commit that queues a job, frees an allocation or writes a dispatch message, and
+//! after a cancel, the job store tells the other servers of its store what to look at again
+//! ([`Wake`], sent as notices of the store, [`js_state::Store::notify`]): see the `wake` module.
+//!
 //! Times are the store's own clock ([`Store::now`](js_state::Store::now)); nothing here reads
 //! a system clock.
 //!
@@ -255,6 +259,7 @@ pub mod rows;
 mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod suite;
+mod wake;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use ids::ScriptedIds;
@@ -273,8 +278,8 @@ pub use ids::{
     JobIdError, MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use node::{
-    AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Retire,
-    SessionDigest,
+    AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Orphan,
+    Retire, SessionDigest,
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
@@ -292,3 +297,4 @@ pub use store::{
     JobStore, MAX_PAGE, MINT_TRIES, MOST_TABLE_CHANGES, NewJob, Placement, RequeuedFor, Row,
     SCHEMA_VERSION, Step, TableChanges, UncordonWrite, Written, queue_order,
 };
+pub use wake::{CHANNELS, HOST_CHANNEL, QUEUE_CHANNEL, Wake};

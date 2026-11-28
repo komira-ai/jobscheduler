@@ -35,7 +35,7 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 - `Hello`: `protocol` (a `ProtocolRange` of majors), `host_id`, `pool`, `agent_version`, `instance`, `shape` (`WireShape`),
   `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `accepts_host_credential`, `identity` (the cloud's
   signed identity of the machine, `{"document", "signature"}` as its metadata service served them, `js_elastic::SignedIdentity`;
-  sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet), and `agent_process` (the id of the agent process: 32 lowercase hex characters the agent draws once per process and sends in every hello of it, in the id grammar; a server that holds the host live in a session whose hello named the same process takes the hello at once instead of refusing `host-live`; absent from an older agent, ignored by an older server).
+  sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet), and `agent_process` (the id of the agent process: 32 lowercase hex characters the agent draws when a process starts, or takes over from the process before it on the host when that one stopped at a stop request (a hand-over in an update, or a drain, as a restart for a new flags file does: it leaves its id and its session's grace in the state root, the file `handover-process`, which the next one reads once, removes, and uses only within that grace), and sends in every hello of it, in the id grammar; a server that holds the host live in a session whose hello named the same process takes the hello at once instead of refusing `host-live`, so a host is not seen lost while its agent is restarted; absent from an older agent, ignored by an older server).
 - `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`, `dispatch_poll` (the server serves the dispatch poll to this host). Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
@@ -45,9 +45,13 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   (`HeldJob`, each with its `JobResult`) and `retired_jobs`, and `seq` (the beat's sequence in its session: raised for every heartbeat the agent sends, a retry included, starting at 1 after each welcome; a server applies a beat only when its `seq` is newer than the newest it applied; absent from an older agent, ignored by an older server).
 - `HeartbeatReply`: `commands`, `result_acks` (`ResultAck`), `taint_ack`, `taint_cleared_ack`, `host_taint` (the taint the server holds for
   the host once it has taken the beat, informational, absent when it holds none), `exclusive`, and the per-job lists `job_acks`
-  (`JobResultAck`) and `retired_acks`.
+  (`JobResultAck`), `retired_acks` and `unknown_jobs` (the listed jobs the server holds no record of, which it does not stop and the agent
+  keeps running; absent means none, and an older agent ignores it).
 - `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job
-  `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`). A tag this version does not know reads as `Command::Unknown`.
+  `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`, with the optional `reason`, `StopReason`: `cancelled`, `ended`, `replaced`,
+  `orphan_expired` or `operator`, each a record the server holds; absent from an older server and from a stop the dispatch queue carries,
+  ignored by an older agent, and a reason this version does not know reads as `unknown`, so the stop still stops). A tag this version does
+  not know reads as `Command::Unknown`.
 - The live-log fields ([live-logs.md](live-logs.md), section 7), in `js-agent-wire`; the lease server sends `log_sink` and `log_grant` and stores `logs`, and the `crun` and native agents read `log_sink` and `log_grant` and fill `log_grant_state` and `logs`: `JobStartSpec.log_sink` (where to upload one job's logs;
   no secret), `HeartbeatReply.log_grant` (the host's upload credential), the heartbeat's `log_grant_state` (`stale`, `until_ms`) and
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
@@ -87,6 +91,15 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   the field is decoded as `logs` is; an agent from before it ignores it, and an agent from before the 512-byte class leaves out a
   class outside the grammar of an id. The result's journal line writes the class as one word, or in double quotes (`"` and `\`
   escaped by a `\`) when it holds a space, a `"` or a `\` or is `-`.
+
+**A job the server holds no record of is not stopped.** The server sends `job_stop` only for a record it holds of the job on the host:
+its end (`ended`), its client's cancel (`cancelled`), or an attempt of it on this host that ended, after which the job was queued or
+placed again (`replaced`); and, for a job it holds no record of, after the bound or an operator's end (`orphan_expired`, `operator`). A
+listed job it holds no record of (a server on an empty, restored or older table, a wrong database, a replica behind) is named in
+`unknown_jobs` and kept by the agent; the server keeps it as an orphan of the host and places nothing more there while it is listed
+(`crates/js-lease-server/src/orphans.rs`). The agent reports a stop's reason and a change of `unknown_jobs` as lines of its own, and acts
+on a stop the same whatever its reason. Both fields are additive: an agent from before them stops every job it is told to stop and
+ignores the list, and a server from before them sends neither (`crates/js-agent-wire/tests/stop_reason.rs`).
 
 The per-job messages ride in major 1 beside the lease and run messages. An agent announces them with the hello capability
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that

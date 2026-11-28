@@ -155,6 +155,7 @@ pub(super) fn answer(heartbeat: &Heartbeat, held: Option<Taint>) -> HeartbeatRep
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        unknown_jobs: Vec::new(),
         log_grant: None,
         beat_now: false,
     }

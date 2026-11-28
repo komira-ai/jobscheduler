@@ -338,13 +338,15 @@ pub struct Hello {
         with = "signed_identity"
     )]
     pub identity: Option<SignedIdentity>,
-    /// The agent process that sends the hello: an id the agent draws once when it starts and
-    /// sends in every hello of that process, an id of [`limits::MAX_ID_LEN`] bytes of
-    /// `[A-Za-z0-9._-]`, leading alphanumeric. A server that holds the host live in a session
-    /// whose hello named the same process takes the hello at once instead of refusing it
-    /// `host-live`: the process says hello again only because it lost its session, so no other
-    /// process holds the host. Absent from an agent that predates the field, and a server from
-    /// before the field ignores it.
+    /// The agent process that sends the hello: an id the agent draws when it starts, unless it
+    /// takes over the one the process before it on the host left as it stopped, within that
+    /// session's grace (a left id it cannot use is not taken, and it draws); it sends the id in
+    /// every hello of that process. An id of [`limits::MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`,
+    /// leading alphanumeric. A server that holds the host live in a session whose hello named the
+    /// same process takes the hello at once instead of refusing it `host-live`: the process says
+    /// hello again only because it lost its session, or because the process that held it stopped
+    /// and left it the id, so no other process holds the host. Absent from an agent that predates
+    /// the field, and a server from before the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_process: Option<String>,
 }

@@ -35,7 +35,7 @@
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
-//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, the agents' hellos and heartbeats refused for a body over the cap, and each host's CPU and memory booked and free and its whole-host mark, and under `--placement-curves shadow` and `on` the memory shadow's placements by verdict and each host's projected memory against its readings), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
+//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, the agents' hellos and heartbeats refused for a body over the cap, each host's CPU and memory booked and free and its whole-host mark, and the placement by load: admission and the score's decisions, how each host is charged, each host's CPU pressure and OOM events, the ratios of the runs freed while serving against their bookings, the checks of those runs against their classes' profiles, and under `--placement-curves shadow` and `on` the memory shadow's placements by verdict and each host's projected memory against its readings), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
 //! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` and `GET /readyz/sizes` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; a SQLite store's file lock is taken before anything else (see "The store" below). Its content is never printed |
@@ -843,10 +843,13 @@ mod join_api;
 mod join_tokens;
 mod kinds;
 mod listener;
+mod listening;
 mod logs;
 mod metrics;
 pub mod network;
 mod node_rows;
+mod orphan_api;
+mod orphans;
 mod per_job;
 mod platform;
 mod poller;

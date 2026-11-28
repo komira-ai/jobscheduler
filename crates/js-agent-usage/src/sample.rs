@@ -31,6 +31,12 @@ pub struct Sample {
     /// read (a kernel without pressure accounting) and on a Mac, which has none; the rest of
     /// the sample stands.
     pub host_cpu_pressure_some_usec: Option<u64>,
+    /// How many times the kernel's OOM killer ran for the actions cgroup's own limit since the
+    /// group was made: the `oom` count of its `memory.events.local`, which does not count a kill
+    /// at a lease's own limit. A counter that only grows. `None` when that file cannot be read
+    /// or has no `oom` line, and on a Mac, which has no control groups; the rest of the sample
+    /// stands.
+    pub actions_oom_events: Option<u64>,
     /// The actions cgroup's `memory.current` less its `inactive_file`; on a host with no
     /// control groups (a Mac) its whole non-file memory, as `host_nonfile_bytes`.
     pub working_set_bytes: u64,

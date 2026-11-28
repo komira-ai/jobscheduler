@@ -177,15 +177,16 @@ impl ProviderClient {
 
 /// What tells `call` to `provider` apart from every other.
 fn flight_key(provider: &str, call: &ProviderCall) -> Key {
-    let (kind, run, index) = call.key();
-    (provider.to_owned(), kind, run.to_owned(), index)
+    let (kind, run, attempt, index) = call.key();
+    (provider.to_owned(), kind, run.to_owned(), attempt, index)
 }
 
-/// The key of the `Prepare` of the source `index` of `run_id` to `provider`, whatever its ref
-/// and mode (which [`ProviderCall::key`] leaves out).
-fn prepare_key(provider: &str, run_id: &str, index: u32) -> Key {
+/// The key of the `Prepare` of the source `index` of the attempt `attempt` of `run_id` to
+/// `provider`, whatever its ref and mode (which [`ProviderCall::key`] leaves out).
+fn prepare_key(provider: &str, (run_id, attempt): (&str, u64), index: u32) -> Key {
     let call = ProviderCall::Prepare {
         run_id: run_id.to_owned(),
+        attempt,
         index,
         reference: String::new(),
         mode: js_agent_wire::MountMode::ReadOnly,
@@ -193,10 +194,11 @@ fn prepare_key(provider: &str, run_id: &str, index: u32) -> Key {
     flight_key(provider, &call)
 }
 
-/// The `Mount` of the source `index` of `run_id`.
-fn mount_of(run_id: &str, index: u32) -> ProviderCall {
+/// The `Mount` of the source `index` of the attempt `attempt` of `run_id`.
+fn mount_of((run_id, attempt): (&str, u64), index: u32) -> ProviderCall {
     ProviderCall::Mount {
         run_id: run_id.to_owned(),
+        attempt,
         index,
     }
 }
@@ -206,7 +208,12 @@ fn mount_of(run_id: &str, index: u32) -> ProviderCall {
 /// the `Prepare`'s answer is in, so the provider sees the two in that order.
 fn then(call: &ProviderCall) -> Option<ProviderCall> {
     match call {
-        ProviderCall::Prepare { run_id, index, .. } => Some(mount_of(run_id, *index)),
+        ProviderCall::Prepare {
+            run_id,
+            attempt,
+            index,
+            ..
+        } => Some(mount_of((run_id.as_str(), *attempt), *index)),
         ProviderCall::Mount { .. } | ProviderCall::Release { .. } | ProviderCall::Sweep { .. } => {
             None
         }
@@ -278,18 +285,25 @@ impl Providers for ProviderClient {
         self.clients.keys().cloned().collect()
     }
 
-    /// A `Release` first forgets the source's `Prepare` and `Mount`, so a `Prepare` still out
-    /// is not followed by a `Mount` once the source is given up.
+    /// A `Release` first forgets the source's `Prepare` and `Mount` of the same attempt, so a
+    /// `Prepare` still out is not followed by a `Mount` once the source is given up; another
+    /// attempt's calls are left alone.
     fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer {
         let Some(client) = self.clients.get(provider) else {
             return ProviderAnswer::Unavailable(format!(
                 "this agent was given no mount provider named {provider}"
             ));
         };
-        if let ProviderCall::Release { run_id, index } = call {
+        if let ProviderCall::Release {
+            run_id,
+            attempt,
+            index,
+        } = call
+        {
+            let run = (run_id.as_str(), *attempt);
             let source = [
-                prepare_key(provider, run_id, *index),
-                flight_key(provider, &mount_of(run_id, *index)),
+                prepare_key(provider, run, *index),
+                flight_key(provider, &mount_of(run, *index)),
             ];
             self.flights.forget(&source);
         }

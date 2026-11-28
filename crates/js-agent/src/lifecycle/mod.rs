@@ -36,7 +36,9 @@
 //!   `JobStop` for a held job ends it as a `Stop` does (`killed`, once however often it
 //!   comes); for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
-//!   `retired_acks` names it, the answer that the job is stopped and gone. A container a
+//!   `retired_acks` names it, the answer that the job is stopped and gone. A stop's optional
+//!   `reason` is reported once ([`Event::StopReasoned`]) and a reply's `unknown_jobs` when it
+//!   changes ([`Event::UnknownToServer`]); neither changes what is stopped. A container a
 //!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it
 //!   lists it as a job again.
 //! - **A job start whose fence is retired runs never.** The fence is the job id with the
@@ -363,7 +365,7 @@ pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, OutputsReport,
     Prepared, Removal, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
-    Whereabouts, check_run_env, label,
+    UnreadLease, Whereabouts, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use settle::{DEFAULT_SETTLE, MAX_SETTLE_MS, settle};

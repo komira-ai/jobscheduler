@@ -7,14 +7,22 @@
 //! the server again and again (the agent's heartbeats) pays one TCP and TLS handshake a
 //! connection, not one a request.
 //!
+//! Every client of a process that talks to one server shares what it knows of the server's
+//! address: the address the last new connection completed its TLS handshake on, under the
+//! server's name, is where the next requests go with no lookup of the name, while the name
+//! is looked up again in the background; a new address is taken only once a handshake with
+//! it completes. So a host whose resolver cannot answer for a while keeps reaching a server
+//! it reached before. [`give_server_address`] (`--server-address`) gives the first address,
+//! so that a first start needs no lookup. The certificate is always checked against the name.
+//!
 //! A client can authenticate by the host's identity instead: a client certificate and key in
 //! two files (`HostIdentity`, given by `--host-cert` and `--host-key`), presented in the TLS
 //! handshake with no `Authorization` header and read again before each request, so a
 //! renewed pair is used without a restart. The key must pass `host_key_problem`: owned by
 //! root or by the user running the program, no access for others, not writable by its group.
 //!
-//! Failures name the flags `--server`, `--token-file`, `--ca-cert` and (for the identity
-//! files) `--host-cert` and `--host-key`, so a program that uses this crate takes its
+//! Failures name the flags `--server`, `--server-address`, `--token-file`, `--ca-cert` and
+//! (for the identity files) `--host-cert` and `--host-key`, so a program that uses this crate takes its
 //! settings from flags of those names.
 //!
 //! With the `jobs` feature (off by default; js-cli turns it on), `jobs` is the client of
@@ -24,6 +32,7 @@
 //! server knows it as one of its clients' (`--token-file` or a `--client-token` entry there)
 //! and records that client's name on each job it submits.
 
+mod address;
 mod client;
 mod error;
 mod identity;
@@ -32,6 +41,7 @@ pub mod jobs;
 mod server_url;
 mod token;
 
+pub use address::give_server_address;
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
 pub use identity::{HostIdentity, host_key_problem};

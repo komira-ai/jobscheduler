@@ -22,12 +22,13 @@ pub(crate) fn run_name(run_id: &str) -> String {
     format!("js.{run_id}")
 }
 
-/// The source a call names.
-fn source(agent: &str, run_id: &str, index: u32) -> Option<wire::Source> {
+/// The source a call names: the source `index` of the attempt `attempt` of `run_id`.
+fn source(agent: &str, (run_id, attempt): (&str, u64), index: u32) -> Option<wire::Source> {
     Some(wire::Source {
         agent: agent.to_owned(),
         run: run_name(run_id),
         index,
+        attempt,
     })
 }
 
@@ -77,12 +78,13 @@ async fn transact(channel: Channel, agent: &str, call: ProviderCall) -> Provider
     let result: Result<Option<String>, Status> = match call {
         ProviderCall::Prepare {
             run_id,
+            attempt,
             index,
             reference,
             mode: how,
         } => {
             let request = wire::PrepareRequest {
-                source: source(agent, &run_id, index),
+                source: source(agent, (run_id.as_str(), attempt), index),
                 r#ref: reference,
                 mode: mode(how),
             };
@@ -90,26 +92,44 @@ async fn transact(channel: Channel, agent: &str, call: ProviderCall) -> Provider
                 .await
                 .map(|_| None)
         }
-        ProviderCall::Mount { run_id, index } => {
+        ProviderCall::Mount {
+            run_id,
+            attempt,
+            index,
+        } => {
             let request = wire::MountRequest {
-                source: source(agent, &run_id, index),
+                source: source(agent, (run_id.as_str(), attempt), index),
             };
             unary::<_, wire::MountResponse>(channel, wire::MOUNT, request)
                 .await
                 .map(|response| Some(response.path))
         }
-        ProviderCall::Release { run_id, index } => {
+        ProviderCall::Release {
+            run_id,
+            attempt,
+            index,
+        } => {
             let request = wire::ReleaseRequest {
-                source: source(agent, &run_id, index),
+                source: source(agent, (run_id.as_str(), attempt), index),
             };
             unary::<_, wire::ReleaseResponse>(channel, wire::RELEASE, request)
                 .await
                 .map(|_| None)
         }
         ProviderCall::Sweep { keep } => {
+            // Every kept run is in `keep`, for a provider that does not read the attempts; a
+            // run whose attempt is known is in `keep_attempts` too.
             let request = wire::SweepRequest {
                 agent: agent.to_owned(),
-                keep: keep.iter().map(|run_id| run_name(run_id)).collect(),
+                keep: keep.iter().map(|(run_id, _)| run_name(run_id)).collect(),
+                keep_attempts: keep
+                    .iter()
+                    .filter(|(_, attempt)| *attempt > 0)
+                    .map(|(run_id, attempt)| wire::KeptAttempt {
+                        run: run_name(run_id),
+                        attempt: *attempt,
+                    })
+                    .collect(),
             };
             unary::<_, wire::SweepResponse>(channel, wire::SWEEP, request)
                 .await

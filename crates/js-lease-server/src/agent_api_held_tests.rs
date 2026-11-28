@@ -564,3 +564,57 @@ async fn a_paced_beat_held_at_a_drain_says_beat_now() {
     let (reply, ()) = tokio::join!(rig.beat(&agent), drain);
     assert_eq!(reply.unwrap(), quiet_held());
 }
+
+/// Asserts that a reply that carries only the jobs the store holds no record of
+/// (`unknown_jobs`) is held as a quiet reply is: it waits, and at the bound it is answered with
+/// the jobs named and `beat_now`, no command. It catches a reply that the list alone makes
+/// answer at once with `beat_now`, which would have the agent of a host with an orphan beat
+/// again with no pause, every beat, for as long as the orphan runs.
+#[tokio::test]
+async fn a_reply_with_only_unknown_jobs_is_held_as_a_quiet_one() {
+    let (rig, mut agent) = held_rig("held_unknown", Duration::ZERO);
+    agent.hold("ghost", "00", HeldState::Running);
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(waits(&rig), 1, "the reply was not held");
+    assert_eq!(
+        reply,
+        HeartbeatReply {
+            unknown_jobs: vec!["ghost".to_owned()],
+            ..quiet_held()
+        }
+    );
+}
+
+/// Asserts that the guard of a host whose listing is mostly orphans holds in the reply built
+/// again when a wake ends its hold: a job the store records a cancel of is not told to stop by
+/// the first build, which is held, nor by the build a placement's wake makes, which carries the
+/// placed job's start alone. It catches a rebuilt reply that forgets what the listing decided
+/// and lets the stops of the live allocations out on a host the guard holds.
+#[tokio::test]
+async fn a_reply_built_again_on_a_wake_keeps_the_guard() {
+    let (rig, mut agent) = held_rig("held_guard", LONG);
+    let cancelled = rig.place("job-c", "host-a");
+    agent.take(&rig.beat(&agent).await.unwrap());
+    agent.run("job-c");
+    rig.jobs.request_cancel(&cancelled).unwrap();
+    agent.hold("ghost-1", "00", HeldState::Running);
+    agent.hold("ghost-2", "00", HeldState::Running);
+    let host = HostId::new("host-a").unwrap();
+    let wake = async {
+        waited(&rig, 1).await;
+        rig.place("job-n", "host-a");
+        rig.agents.wakes.wake(&host);
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), wake);
+    let reply = reply.unwrap();
+    assert!(
+        reply
+            .commands
+            .iter()
+            .all(|command| !matches!(command, js_agent_wire::Command::JobStop { .. })),
+        "{reply:?}"
+    );
+    let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
+    assert_eq!(started, ["job-n"]);
+    assert_eq!(reply.unknown_jobs, ["ghost-1", "ghost-2"]);
+}

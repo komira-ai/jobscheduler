@@ -522,6 +522,12 @@ pub enum Command {
     JobStop {
         /// The job to stop.
         job_id: String,
+        /// Why the server stops it ([`crate::StopReason`]), a record it holds of the job.
+        /// Absent from a server from before the field, and from a stop the dispatch queue
+        /// carries; an agent from before the field ignores it. It changes nothing of what
+        /// the agent stops.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::StopReason>,
     },
     /// A command this version cannot decode. The agent ignores it, so the commands
     /// beside it still take effect.
@@ -540,7 +546,7 @@ impl Command {
             Self::Stop { run_id } | Self::Cancel { run_id } => {
                 check::ident(At::new("run_id", refusal::INVALID_REPLY), run_id)
             }
-            Self::JobStop { job_id } => {
+            Self::JobStop { job_id, .. } => {
                 check::ident(At::new("job_id", refusal::INVALID_REPLY), job_id)
             }
             Self::Unknown => Ok(()),

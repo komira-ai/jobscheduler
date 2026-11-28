@@ -10,6 +10,13 @@ The lane is additive and advisory. `.github/workflows/farm.yml` runs it on every
 on every pull request from a branch of this repository (not a fork's, not Dependabot's). No check
 of it is required, and a build farm outage turns it red and holds nothing.
 
+One use of it holds the release back. `release.yml` calls `farm.yml` as its job `blackbox`, the
+gate before the fleet, with the target of the release's black-box tests (`target: //:blackbox`):
+the last step builds that target in place of `//:ci`, with the same setup and `local: 0`, and the
+release tells the fleet about itself only when it passed ([release.md](release.md), step 8a). So
+while the build farm cannot be reached, a release is published but not deployed; re-run its failed
+jobs once the farm answers.
+
 The same farm also builds the macOS files of a release on its Macs, from a Linux runner, when the
 repository variable `MACOS_ON_FARM` is `true`: that is `macos-farm.yml`, with Cargo and not Buck2
 ([mac-farm.md](mac-farm.md)).
@@ -27,10 +34,20 @@ repository variable `MACOS_ON_FARM` is `true`: that is `macos-farm.yml`, with Ca
 The members listed below leave out some of these steps. The summary line must read
 `Commands: N (cached: N, remote: N, local: 0)`: no action ran on the runner.
 
-`farm.yml` runs the build as one command, `cargo xtask farm-build` (`crates/xtask/src/farm.rs`). It
-refuses to start without the build farm's worker property set, refuses a stale generated table
-and hands over its fix (below), fails a build that does not say `local: 0`, and stops buck2's
-daemon however the build ended.
+`farm.yml` runs it in four steps after it joins the build farm's network:
+
+1. `cargo xtask farm-workers` refuses to go on without the build farm's worker property set
+   (`crates/xtask/src/farm.rs`).
+2. komira's buck2-farm action builds the `buildrules` command line on the build farm
+   (`buck2 build buildrules//cli:buildrules --out <file>`).
+3. `cargo xtask farm-table` checks the generated table with it, and refuses a stale one and hands
+   over its fix (below).
+4. komira's buck2-farm action builds `//:ci`.
+
+Both buck2 commands that reach the build farm run through the buck2-farm action, under its watchdog
+(below, "A dead connection to the build farm"). Its second step fails a run that does not say
+`local: 0`. A step of its own after the builds, under `if: always()`, stops buck2's daemon however
+the steps before it ended.
 
 The files of the build, all generated or written once by `buildrules`:
 
@@ -51,7 +68,7 @@ do not need `buildrules` to fix it: the job makes the fix and hands it to you
 (`crates/xtask/src/farm/table.rs`).
 
 1. Before the build, the job builds the `buildrules` command line from the pinned buildrules cell
-   on the build farm (`buildrules//cli:buildrules`) and runs `buildrules check`.
+   on the build farm (`buildrules//cli:buildrules`) and runs `buildrules check` with it.
 2. When check finds the table stale or a generated file missing, the job runs that
    `buildrules sync` on the runner, checks the table again, and writes what sync changed as a patch
    (`git diff --binary` of the paths sync writes, new files included). It
@@ -183,9 +200,98 @@ That join is why the job holds `id-token: write` on a pull request. The workflow
 - the exact `if:` that skips a fork's pull request (which gets no OIDC token) and Dependabot's;
 - farm-connect's inputs exactly the variables above, farm-connect pinned by a full commit, and
   exactly one step that uses it;
-- a step after farm-connect's that runs `cargo xtask farm-build` of `//:ci`;
 - the triggers, the one job and its runner;
 - across every workflow, no other job a pull request starts that holds `id-token: write`.
+
+`crates/xtask/tests/apt_workflow/farm_steps.rs` holds the steps that reach the build farm and the
+time limits to:
+
+- the job's `KOMIRA_COMMIT`, which names the one komira commit of farm-connect, buck2-farm and
+  the source of buck2-farm's tool (the commit of komira main that has the watchdog,
+  komira-ai/komira#2439), and every komira action of the job pinned to it;
+- the tool fetched from GitHub's archive of that commit and built before the first buck2-farm step;
+- the worker check, the build of the `buildrules` command line, the table's check and the build of
+  `//:ci`, in that order after farm-connect, the two builds the only buck2-farm steps, each with
+  exactly its inputs; then the stop of buck2's daemon under `if: ${{ always() }}`;
+- across every workflow, no `run:` that runs buck2 but that stop, which reaches no farm: a buck2
+  command anywhere else would have no watchdog;
+- every step of the job with a `timeout-minutes` of its own, a whole number from 1, under the
+  job's 150.
+
+## A dead connection to the build farm
+
+When the network path to the build farm drops without closing the connection, buck2 waits for an
+answer the farm will never send, and before this a step waited until its job's time limit. buck2
+gives an action that waits on the farm no limit of its own, and its log prints the same `Waiting
+on ...` line every few seconds whether the action runs or is lost.
+
+So both buck2 commands of the lane run through komira's buck2-farm action
+(`komira-ai/komira/.github/actions/buck2-farm`, at `KOMIRA_COMMIT`). It runs buck2 under
+`assert_remote run`, built in the job from komira's source at the same commit (GitHub's archive of
+it, pinned by SHA-256; zig 0.15.2, the pin `ci.yml` uses). While buck2 runs, the tool reads the
+runner's TCP connections to the farm's address from the kernel once a second. A live farm sends
+something on each connection at least every 30 s. When one connection has heard nothing for longer
+than 5 minutes, the tool:
+
+1. ends buck2 (SIGINT, then SIGKILL if it does not end) and stops its daemon (`buck2 kill`), which
+   holds the dead connection;
+2. writes one line to the job log, and one to the job summary;
+3. waits for the farm's port to answer (at most farm-connect's 20 minutes) and runs the same
+   command again.
+
+A run that fails because its connection was cut is run again the same way. A step runs at most
+three times in all, a hung run included; when the third run hangs or is cut too, or the farm does
+not answer within the wait, the step fails. A slow build whose connection is alive is never ended:
+the watchdog reads the connection, never the log, and never limits how long one action runs.
+
+What you see in the job log when it ends a run (from komira's own runs of the action, the port
+differs):
+
+    buck2-farm: watchdog: the connection to the farm from local port 41022 has heard nothing from the farm for 5 min 1 s, past the bound of 5 min 0 s: the farm has closed it and buck2 would wait on it for ever; ending buck2 (SIGINT)
+    buck2-farm: stopping buck2's daemon, which holds the dead connection (`./buck2 kill`)
+
+and in the job summary, one line that names the step, the silence, the wait for the farm and the
+run it is on (`ran again (run 2 of at most 3)`). The failed run's log is kept beside the step's as
+`buck2-farm.first.log` (the second's as `buck2-farm.second.log`) in the runner's temporary
+directory. A green step after a hang or a cut is a real green: the run that passed had every action
+on the build farm or from its cache. In this job the line names buck2 by its pinned path, not
+`./buck2`.
+
+What the watchdog does not cover: every step that is not one of the two buck2 commands. The
+installs, farm-connect (which has its own bounded wait for the farm), `cargo xtask farm-workers`,
+`cargo xtask farm-table` and the daemon's stop run without it. Among them only `farm-table` can
+reach the farm: on a stale table, `buildrules sync` builds the pinned toolchain with buck2 itself.
+Each of them is bounded by its step's own time limit (below), so none can hang to the job's.
+`macos-farm.yml`, which reaches the farm's Macs with `xtask mac-farm` and no buck2, is not under
+the watchdog either; its build steps have time limits of their own of 60 minutes.
+
+## Time limits
+
+Every step of the job has a `timeout-minutes` of its own, under the job's 150. The sizes come from
+the longest successful run of each step in the 200 most recent green runs of the job (query:
+`gh run list -R komira-ai/jobscheduler -w farm.yml -s success -L 200`, then `gh run view --json
+jobs` of each; the runs from 2026-11-26 20:02 to 2026-11-27 13:44 UTC; measured). The steps new
+here have no runs yet: their sizes are from the same steps of `ci.yml`'s `lint` job (40 green
+runs, the same query on `ci.yml`), or inferred.
+
+| step | longest green run | limit |
+|---|---|---|
+| checkout, `rustup toolchain install`, each cache restore and save | 18 s | 10 |
+| Install buck2 (the job's first `cargo xtask`, so it builds xtask) | 105 s | 30 |
+| Install zig | 88 s in `ci.yml`, where it builds xtask; here xtask is built already | 10 |
+| Install assert_remote's source, Build assert_remote | none yet (a 34 MB archive; a build of a few thousand lines of zig, inferred under a minute) | 10 |
+| Connect to the build farm (farm-connect, whose own wait for the farm is at most 20) | 85 s | 30 |
+| `buildrules has the farm's worker property set` | none yet (one `buck2 audit config`) | 10 |
+| the build of the `buildrules` command line (buck2-farm) | none yet; it is cached on the farm but after a buildrules move | 30 |
+| `the generated build table is fresh` (a sync on a stale table builds a toolchain) | none yet | 30 |
+| `buck2 build //:ci` (buck2-farm) | 1891 s (31.5 min) as part of the former one build step, which also built the command line | 120 |
+| Stop buck2's daemon | none yet | 5 |
+| Upload the regenerated build table as a patch | none (runs only on a failure) | 10 |
+
+30 for a buck2-farm step leaves room for one hang ended (5 minutes), the wait for the farm and a run
+again. 120 for `//:ci` is three runs of the longest green one (95 minutes) and two hangs ended (10
+minutes), with 15 minutes of the waits for the farm; a step that needs more than that has met a farm
+that is down, and fails.
 
 A pull request's build and a build of `main` share the build farm's action cache, as every build of
 every repository on the build farm does: a result one writes, the other reads. The cache is keyed

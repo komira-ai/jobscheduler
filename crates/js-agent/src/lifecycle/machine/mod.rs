@@ -130,6 +130,9 @@ pub struct Lifecycle {
     /// The job ids retired on a `JobStop` for a job the agent did not hold, oldest first,
     /// listed in `retired_jobs` until a reply's `retired_acks` names them (see `per_job`).
     answered: Vec<String>,
+    /// The jobs the last heartbeat reply named unknown to the server (`unknown_jobs`), as
+    /// last reported ([`Event::UnknownToServer`]).
+    unknown_here: Vec<String>,
     /// The slots the runs hold, and the ones taken out of use.
     slots: Slots,
     taint: TaintState,
@@ -244,7 +247,9 @@ impl Lifecycle {
                 Command::Stop { run_id } => self.stop(run_id, false),
                 Command::Cancel { run_id } => self.stop(run_id, true),
                 Command::JobStart(spec) => self.start_job(spec, received, &mut events),
-                Command::JobStop { job_id } => self.stop_job(job_id),
+                Command::JobStop { job_id, reason } => {
+                    self.stop_job(job_id, *reason, &mut events);
+                }
                 Command::Unknown => {}
             }
         }
@@ -262,6 +267,9 @@ impl Lifecycle {
         }
         if checked.retired_acks.is_ok() {
             self.acknowledge_retired(&reply.retired_acks);
+        }
+        if whole && checked.unknown_jobs.is_ok() {
+            self.note_unknown(&reply.unknown_jobs, &mut events);
         }
         self.taint.ack(reply.taint_ack);
         self.finish_taint_clear(reply.taint_cleared_ack, &mut events);

@@ -480,12 +480,14 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
 }
 
 /// Asserts what a server that forgot a job does to the agent's work: after the server
-/// restarts without its job store, the agent says hello again at once with the job in its
-/// held list, the server (which has no record of it) answers with a stop, the agent stops the
-/// container and sends no result, and the server lists no job. It catches a stop the agent
-/// does not obey and a result sent for work the server cancelled.
+/// restarts without its job store, the agent says hello again at once and lists the job, the
+/// server (which has no record of it) stops nothing and names the job as unknown to it, and
+/// the container runs on; when the job ends by itself its result goes up, the server answers
+/// it stale, and the server lists no job. It catches a server that stops the work a lost
+/// table forgot (a restart on an empty store would stop every job of the farm) and an agent
+/// that drops a job its server does not know.
 #[test]
-fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
+fn a_job_the_restarted_server_forgot_runs_on_and_is_not_stopped() {
     let rig = rig("jobs_e2e_forgot", &[]);
     let job = rig.queued(2000);
     rig.until_running(&job);
@@ -515,13 +517,20 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
     agent.elapse();
     agent.next_wait();
     assert!(worker.settle());
-    assert!(machine.world.log().contains(&format!("stop {job}")));
-    assert_eq!(machine.world.alive(), 0);
-    assert!(
-        worker.snapshot().results.is_empty(),
-        "a stopped job the server forgot sends no result"
+    assert!(!machine.world.log().contains(&format!("stop {job}")));
+    assert_eq!(machine.world.alive(), 1);
+    assert!(worker.snapshot().retired_jobs.is_empty());
+    agent.elapse();
+    agent.next_wait();
+    assert!(worker.settle());
+    assert_eq!(
+        machine.world.alive(),
+        1,
+        "a job the server forgot is not stopped"
     );
 
+    machine.world.exit(&job, 0);
+    assert!(worker.settle());
     agent.elapse();
     agent.next_wait();
     assert_eq!(server.job_get(&format!("/v1/jobs/{job}")).status, 404);
@@ -852,3 +861,5 @@ fn an_agent_removes_a_handover_file_left_by_an_earlier_stop() {
         assert!(ran.err.contains(said), "{name}: {}", ran.err);
     }
 }
+
+mod live_update;

@@ -10,8 +10,8 @@ pub use js_agent_usage::{LeaseSample, Sample};
 use std::path::Path;
 
 use super::cgroup::{
-    cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
-    parse_usage_usec, working_set,
+    cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_oom_events,
+    parse_single_u64, parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
 use super::host::{HostCpu, host_cpu, host_nonfile};
@@ -117,8 +117,9 @@ impl<F: FileReader> Sampler<F> {
     /// pressure).
     ///
     /// A node file that cannot be read is an error, so that no zero is invented. The host's
-    /// `/proc/meminfo` and `/proc/pressure/cpu` are the exceptions: when one cannot be read
-    /// the sample carries no host memory, or no CPU pressure, and the rest still counts. A
+    /// `/proc/meminfo`, `/proc/pressure/cpu` and the actions group's `memory.events.local` are
+    /// the exceptions: when one cannot be read the sample carries no host memory, no CPU
+    /// pressure, or no OOM count, and the rest still counts. A
     /// lease that cannot be read is left out and counted in `unreadable_leases`.
     pub fn sample(
         &self,
@@ -153,6 +154,7 @@ impl<F: FileReader> Sampler<F> {
             cpu_usage_usec: cpu,
             host_cpu_usec: host.busy_usec,
             host_cpu_pressure_some_usec: host.pressure_some_usec,
+            actions_oom_events: self.value(dir, "memory.events.local", parse_oom_events),
             working_set_bytes: working_set(current, inactive),
             host_nonfile_bytes: host_nonfile(&self.files),
             active_file_bytes: active,
