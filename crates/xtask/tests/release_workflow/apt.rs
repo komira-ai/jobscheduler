@@ -95,7 +95,9 @@ fn only_attest_pkg_upload_gamma_cp_deploy_and_the_apt_read_and_write_jobs_hold_i
             .into_iter()
             .filter(|name| name.contains("-apt-read") || name.contains("-apt-write")),
     );
-    assert_eq!(want.len(), 17, "{want:?}");
+    // The call of farm.yml, whose job joins the build farm's network with the token.
+    want.push("blackbox".to_owned());
+    assert_eq!(want.len(), 18, "{want:?}");
     assert_eq!(holders(&release, "id-token: write"), want);
     assert_eq!(holders(&release, "attestations: write"), ["artifacts"]);
     let artifacts = artifacts_workflow();

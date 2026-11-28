@@ -148,3 +148,18 @@ fn beats_with_a_start_are_answered_at_most_once_per_spacing_per_host() {
     starts.answered(&a, 0, Duration::MAX);
     assert_eq!(starts.paced_hosts(), 2);
 }
+
+/// Asserts that waking every watch wakes each watched host once, and a watch taken after it
+/// is not woken: the wake is of the waits under way. It catches a wake of all that reaches only
+/// one host, or that leaves a wake behind for a later watch.
+#[tokio::test]
+async fn waking_all_wakes_every_watch_once() {
+    let wakes = Wakes::default();
+    let (a, b) = (wakes.watch(&host("host-a")), wakes.watch(&host("host-b")));
+    wakes.wake_all();
+    assert!(woken_now(&a).await);
+    assert!(woken_now(&b).await);
+    assert!(!woken_now(&a).await, "woken once");
+    let later = wakes.watch(&host("host-c"));
+    assert!(!woken_now(&later).await);
+}

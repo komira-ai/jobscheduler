@@ -20,7 +20,7 @@ fn backoff_counts_sleeps_not_time() {
     let (ran, sent, waits) = run_scripted(&flags(), &linux_host(), vec![], 8);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(waits.len(), 8);
-    let expected = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0];
+    let expected = [0.5, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0];
     let expected: Vec<Duration> = expected
         .iter()
         .map(|&s| Duration::from_secs_f64(s))
@@ -37,10 +37,9 @@ fn backoff_counts_sleeps_not_time() {
 }
 
 /// Asserts that a welcome ends the run of failures that came before it: after five failed
-/// hellos (waits of 0.5 s doubling to 8 s) and a welcome, the first heartbeat that fails
-/// waits the shortest time again, 0.5 s, and not the 16 s the sixth failure would. A wait
-/// that long would be past the grace the server just granted, and the server would have
-/// dropped the session before the retry. The waits are counted, no time passes.
+/// hellos (waits of 0.5 s doubling to the cap, 2 s with the lowest jitter) and a welcome, the
+/// first heartbeat that fails waits the shortest time again, 0.5 s, and not the 2 s the sixth
+/// failure would. The waits are counted, no time passes.
 #[test]
 fn a_welcome_after_a_long_hello_outage_starts_the_backoff_over() {
     let down = || Err("connection refused".to_owned());
@@ -48,7 +47,7 @@ fn a_welcome_after_a_long_hello_outage_starts_the_backoff_over() {
     replies.extend([welcome(1), down(), beat_ok()]);
     let (ran, sent, waits) = run_scripted(&flags(), &linux_host(), replies, 8);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
-    let expected = [0.5, 1.0, 2.0, 4.0, 8.0, 5.0, 0.5, 5.0].map(Duration::from_secs_f64);
+    let expected = [0.5, 1.0, 2.0, 2.0, 2.0, 5.0, 0.5, 5.0].map(Duration::from_secs_f64);
     assert_eq!(waits, expected);
     let paths: Vec<String> = sent.borrow().iter().map(|(p, _)| p.clone()).collect();
     let hellos = paths.iter().filter(|p| *p == "/v1/agent/hello").count();

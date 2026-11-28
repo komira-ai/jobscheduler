@@ -272,3 +272,42 @@ fn the_first_meter_of_the_agent_side_stays() {
         (1, 0)
     );
 }
+
+/// Asserts that the server's recorder counts each queue status a pass writes, and none for a
+/// pass that writes none, and that a scrape serves that count: a job no host can run (64
+/// cores) gets its first status from the first pass (1), the next pass changes nothing (still
+/// 1), and a second such job's first pass writes its status alone (2). It catches a server
+/// that drops the placer's count, forwards it to nothing, or counts a pass that wrote nothing.
+#[test]
+fn a_pass_counts_each_queue_status_it_writes_and_none_when_it_writes_none() {
+    let mut rig = clocked_rig("metrics_status_writes", true, JobLimits::default());
+    rig.register("host-a", true);
+    let recorder = metered(&rig);
+    let written = |recorder: &Recorder| recorder.queue_status_writes.load(Ordering::Relaxed);
+    let huge = |id: &str| {
+        let mut spec = spec();
+        spec.needs =
+            js_jobs::Needs::Shape(js_types::Resources::new(64_000, 1 << 30, 0, None).unwrap());
+        NewJob {
+            id: Some(JobId::parse(id).unwrap()),
+            spec,
+            priority: 0,
+            client: None,
+        }
+    };
+    rig.jobs.insert_queued(huge("huge-1")).unwrap();
+    rig.agents.place_jobs();
+    assert_eq!(written(&recorder), 1);
+    rig.agents.place_jobs();
+    assert_eq!(written(&recorder), 1);
+    rig.jobs.insert_queued(huge("huge-2")).unwrap();
+    rig.agents.place_jobs();
+    assert_eq!(written(&recorder), 2);
+    let shared = super::tests::shared_over(&rig);
+    let mut text = String::new();
+    super::work::write(&mut text, &super::work::Work::now(&shared, &recorder));
+    assert!(
+        text.contains("\njs_queue_status_writes_total 2\n"),
+        "{text}"
+    );
+}

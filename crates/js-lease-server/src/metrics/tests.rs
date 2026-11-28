@@ -200,6 +200,18 @@ async fn fixture(name: &str) -> Fixture {
 /// crosses pages.
 async fn scraped(fixture: &Fixture) -> String {
     let page = NonZeroUsize::new(2).unwrap();
+    let mut seen = snapshot(&fixture.shared, page).await.unwrap();
+    // The placer's own figures are asserted in `telemetry_tests`; here they are fixed, so the
+    // text of the placement families is known whatever the rig's scheduler has heard.
+    assert!(seen.telemetry.is_some());
+    seen.telemetry = Some(super::telemetry_tests::known());
+    render(&seen, &fixture.recorder)
+}
+
+/// The text a scrape of `fixture` renders with every figure as read, the placer's included:
+/// what the route serves.
+async fn scraped_as_served(fixture: &Fixture) -> String {
+    let page = NonZeroUsize::new(2).unwrap();
     let seen = snapshot(&fixture.shared, page).await.unwrap();
     render(&seen, &fixture.recorder)
 }
@@ -210,7 +222,9 @@ async fn scraped(fixture: &Fixture) -> String {
 /// CPU and memory booked and free (`host-a` with its six allocations, booked past its shape for
 /// CPU, so none free; `host-c` booked whole by a job; `host-b` and `host-d` free), `host-d`'s `draining`
 /// mark, and
-/// every event the recorder was told, histograms cumulative. It catches a family that is
+/// every event the recorder was told, histograms cumulative, and the placement families of a
+/// fixed telemetry (the hosts told no load, so no pressure and no OOM series, and `host-b`
+/// the one host kept empty). It catches a family that is
 /// missing, renamed or out of order, a count read from the wrong place, a booking left out,
 /// and a free figure that is not the shape less what is booked.
 #[tokio::test]
@@ -278,6 +292,7 @@ async fn without_the_job_tables_no_job_family_is_written() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let text = render(&seen, &Recorder::default());
@@ -303,11 +318,15 @@ async fn a_scrape_without_the_job_tables_reads_the_hosts_alone() {
         cpu: free(8000),
         memory: free(17_179_869_184),
         mark: None,
+        live: true,
+        cpu_pressure_some_usec: None,
+        actions_oom_events: None,
     };
     let expected = super::render::Snapshot {
         jobs: None,
         hosts: vec![host],
         curves: None,
+        telemetry: None,
         memory: None,
     };
     assert_eq!(seen, expected);
@@ -398,6 +417,7 @@ fn a_refusal_is_written_with_its_host_and_reason_labels() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let text = render(&seen, &recorder);
@@ -417,6 +437,7 @@ fn the_pass_sink_counts_each_curve_wait_expiry_and_zero_is_written() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let zero = "# TYPE js_curve_wait_expiries_total counter\njs_curve_wait_expiries_total 0\n";
@@ -446,6 +467,7 @@ fn a_curve_view_is_written_as_its_classes_and_each_hosts_peak() {
         jobs: None,
         hosts: Vec::new(),
         curves: Some(view),
+        telemetry: None,
         memory: None,
     };
     let text = render(&seen, &Recorder::default());
@@ -463,15 +485,16 @@ fn a_curve_view_is_written_as_its_classes_and_each_hosts_peak() {
     );
 }
 
-/// Asserts that a scrape with no curve view (the placer is not at `on`) writes neither curve
-/// family, and one with an empty view writes both families with their zero lines and no host
-/// line. Catches a family written when the mode is not `on`, and one dropped for an empty view.
+/// Asserts that a scrape with no curve view (no placer, or a placer at `off`) writes neither
+/// curve family, and one with an empty view writes both families with their zero lines and no
+/// host line. Catches a family written with no view, and one dropped for an empty view.
 #[test]
 fn the_curve_families_are_written_only_when_there_is_a_view() {
     let none = super::render::Snapshot {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let text = render(&none, &Recorder::default());
@@ -527,6 +550,7 @@ fn a_memory_shadow_view_is_written_as_its_verdicts_and_each_hosts_projection() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let text = render(&none, &Recorder::default());
@@ -565,7 +589,8 @@ fn a_memory_shadow_view_is_written_as_its_verdicts_and_each_hosts_projection() {
 }
 
 /// Asserts that a scrape reads the placer's memory shadow view: over a server whose placer is at
-/// `shadow` the snapshot carries the view the placer gives (empty: nothing was walked), and over
+/// `shadow` the snapshot carries the view the placer gives (empty: nothing was walked), with a
+/// curve view of no class and no host peak, and over
 /// the fixture's placer, at `off`, none. Catches a scrape that never asks the placer for it.
 #[tokio::test]
 async fn a_scrape_reads_the_memory_shadow_view_of_a_placer_in_shadow() {
@@ -588,13 +613,14 @@ async fn a_scrape_reads_the_memory_shadow_view_of_a_placer_in_shadow() {
     let shared = Arc::new(Shared::new(parse_token(&TOKEN).unwrap(), agents));
     let seen = snapshot(&shared, NonZeroUsize::MIN).await.unwrap();
     assert_eq!(seen.memory, Some(MemoryShadowView::default()));
-    assert_eq!(seen.curves, None);
+    // Under shadow the curve view carries the class counts (none learned yet) and no host peak.
+    assert_eq!(seen.curves, Some(CurveView::default()));
 }
 
 /// Asserts that a scrape reads the placer's curve view: over a server whose placer is at `on`
-/// the snapshot carries the view the placer gives, and over one whose placer is `off` (as the
-/// fixture's) it carries none, so a server not at `on` writes no curve family. Catches a scrape
-/// that never reads the placer and one that shows a view for a placer that gives none.
+/// the snapshot carries the view the placer gives, and over a rig with no placer it carries
+/// none, so such a server writes no curve family. Catches a scrape that never reads the placer
+/// and one that shows a view where there is none.
 #[tokio::test]
 async fn a_scrape_reads_the_curve_view_of_a_placer_at_on_and_none_otherwise() {
     use js_sched_placer::engine::Settings;
@@ -691,6 +717,7 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let recorder = Recorder::default();
@@ -734,6 +761,7 @@ fn a_pool_name_is_written_escaped() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     let text = render(&seen, &recorder);
@@ -781,6 +809,13 @@ fn from(peer: Option<&str>, path: &str) -> HttpRequest<Body> {
     request
 }
 
+/// The families of the server's own work a server with no Postgres store serves, up to the
+/// count of its blocking tasks.
+const WORK: &str = "# HELP js_blocking_tasks_total Tasks the server ran on the runtime's pool for blocking calls: its store calls, file writes and syncs, each a hand-off to a thread of that pool and back.\n# TYPE js_blocking_tasks_total counter\njs_blocking_tasks_total ";
+
+/// The family of the queue status writes, up to its count, which follows [`WORK`]'s line.
+const WRITES: &str = "# HELP js_queue_status_writes_total Queue statuses of jobs a pass did not place that the pass wrote, each a read and a transaction of its own: a job's status changed (it waits for another reason, or the detail of its wait changed). A rate near the rate of passes times the queued jobs means every pass rewrites every queued job.\n# TYPE js_queue_status_writes_total counter\njs_queue_status_writes_total ";
+
 /// The status, the content type and the body of the metrics router's answer to `request`.
 async fn answer(fixture: &Fixture, request: HttpRequest<Body>) -> (StatusCode, String, String) {
     let app = router(Arc::clone(&fixture.shared), Arc::clone(&fixture.recorder));
@@ -795,9 +830,11 @@ async fn answer(fixture: &Fixture, request: HttpRequest<Body>) -> (StatusCode, S
 }
 
 /// Asserts who the route answers: a private peer (v4 or v6) gets 200 with the text format's
-/// content type and the scrape; a public peer, a request whose peer is unknown and another
-/// path get the answer of an unknown route. It catches metrics served to the internet from a
-/// wildcard listener.
+/// content type and the scrape, followed by the server's own work (the blocking tasks and the
+/// queue status writes, and no store families, as this server has no Postgres store); a
+/// public peer, a request whose peer is unknown and another path get the answer of an
+/// unknown route. It catches metrics served to the internet
+/// from a wildcard listener, and a route that leaves out the server's work.
 #[tokio::test]
 async fn only_a_private_peer_is_answered_and_only_on_metrics() {
     let fixture = fixture("route").await;
@@ -808,7 +845,14 @@ async fn only_a_private_peer_is_answered_and_only_on_metrics() {
             (StatusCode::OK, TEXT_FORMAT),
             "{peer}"
         );
-        assert_eq!(body, scraped(&fixture).await);
+        // The count of blocking tasks is the process's, which the other tests move, so the
+        // work is held to its form, with any count.
+        let (scrape, work) = body.split_at(body.find(WORK).unwrap());
+        assert_eq!(scrape, scraped_as_served(&fixture).await);
+        let (tasks, writes) = work.strip_prefix(WORK).unwrap().split_once('\n').unwrap();
+        assert!(tasks.parse::<u64>().is_ok(), "{work}");
+        let written = fixture.recorder.queue_status_writes.load(Ordering::Relaxed);
+        assert_eq!(writes, format!("{WRITES}{written}\n"));
     }
     let unknown = crate::api::not_found();
     let unknown = to_bytes(unknown.into_body(), 1 << 20).await.unwrap();

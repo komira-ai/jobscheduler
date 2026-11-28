@@ -8,8 +8,9 @@
 //! of one step cannot sign and publish.
 //! - The jobs that read and write (environment `apt-publish`) hold `id-token: write` and the
 //!   role of the environment, assumed by one step; they name no signing key. No other job but
-//!   `artifacts` (the call of artifacts.yml), `gamma` and `cp-deploy` (the call of
-//!   docker-swarm-updater's deploy workflow) holds `id-token: write`.
+//!   `artifacts` (the call of artifacts.yml), `gamma`, `cp-deploy` (the call of
+//!   docker-swarm-updater's deploy workflow) and `blackbox` (the call of farm.yml) holds
+//!   `id-token: write`, besides the two of the macOS package ([`TOKEN_HOLDERS`]).
 //! - The index job (environment `apt-signing`) holds `contents: read` alone, assumes no role and
 //!   names no variable of the role; the key is read by its gate and its signing step alone, and
 //!   the signing step comes after the merge.
@@ -333,13 +334,15 @@ pub fn is_role_job(name: &str) -> bool {
 /// artifacts.yml, whose jobs sign, the call of js-agent-macos-pkg.yml (`beta-macos-pkg`), whose call
 /// of macos-farm.yml holds the token for the farm's network, `pkg-upload` (the macOS package's upload, which assumes the
 /// role of the apt jobs: `pkg_upload.rs` holds its shape), the gamma step, and the call of docker-swarm-updater's deploy
-/// workflow, which asks for a token for each request to the deploy front.
-const TOKEN_HOLDERS: [&str; 5] = [
+/// workflow, which asks for a token for each request to the deploy front, and the call of farm.yml
+/// (`blackbox`, the gate before the farm), whose job joins the build farm's network with it.
+const TOKEN_HOLDERS: [&str; 6] = [
     "artifacts",
     "beta-macos-pkg",
     "pkg-upload",
     "gamma",
     "cp-deploy",
+    "blackbox",
 ];
 
 /// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges
@@ -413,7 +416,7 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
         }
         if !holds_role && !TOKEN_HOLDERS.contains(&name) && holds_token(found) {
             problems.push(format!(
-                "{name}: holds `id-token: write`; only artifacts, beta-macos-pkg, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may"
+                "{name}: holds `id-token: write`; only artifacts, beta-macos-pkg, pkg-upload, gamma, cp-deploy, blackbox and the apt jobs that read and write may"
             ));
         }
         for verb in [PKG_VERB, DESCRIPTOR_VERB] {

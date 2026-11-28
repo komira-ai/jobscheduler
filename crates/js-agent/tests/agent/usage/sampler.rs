@@ -86,6 +86,7 @@ fn a_sample_reads_every_field() {
             cpu_usage_usec: 1000,
             host_cpu_usec: 1_500_000,
             host_cpu_pressure_some_usec: None,
+            actions_oom_events: None,
             working_set_bytes: 4300,
             host_nonfile_bytes: None,
             active_file_bytes: 300,
@@ -363,4 +364,30 @@ fn a_sample_carries_the_hosts_cpu_pressure_when_it_can_be_read() {
     );
     let files = node(1000, 5000, 700, 300, "max 100000\n").with("/proc/pressure/cpu", "junk\n");
     assert_eq!(sample(files, &[]).unwrap(), without);
+}
+
+/// Asserts that a sample carries the `oom` count of the actions group's `memory.events.local`
+/// (the group's own limit, not a lease's), and that a missing file, a file with no `oom` line
+/// and an `oom` line that is not a number each give a sample without it and with every other
+/// field as before. It catches the `oom_kill` or `oom_group_kill` line read for `oom`, a
+/// count invented as 0, and a missing file failing the sample.
+#[test]
+fn a_sample_carries_the_actions_groups_oom_count_when_it_can_be_read() {
+    let events = "low 0\nhigh 0\nmax 12\noom 5\noom_kill 4\noom_group_kill 1\n";
+    let without = sample(node(1000, 5000, 700, 300, "max 100000\n"), &[]).unwrap();
+    assert_eq!(without.actions_oom_events, None);
+    let files = node(1000, 5000, 700, 300, "max 100000\n")
+        .with(&format!("{ACTIONS}/memory.events.local"), events);
+    assert_eq!(
+        sample(files, &[]).unwrap(),
+        Sample {
+            actions_oom_events: Some(5),
+            ..without.clone()
+        }
+    );
+    for text in ["low 0\noom_kill 4\n", "oom many\n", ""] {
+        let files = node(1000, 5000, 700, 300, "max 100000\n")
+            .with(&format!("{ACTIONS}/memory.events.local"), text);
+        assert_eq!(sample(files, &[]).unwrap(), without, "{text:?}");
+    }
 }

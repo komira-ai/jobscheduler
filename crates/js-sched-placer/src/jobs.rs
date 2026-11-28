@@ -159,6 +159,10 @@ pub trait PassMetrics {
     /// A queued job of a curve class waited past the wait bound with no host fitting its curve,
     /// and is tested with its flat number from now on; by default, nothing is told.
     fn curve_wait_expired(&self) {}
+    /// The queue status of a job the pass did not place was written, its own commit, because
+    /// the pass's notes changed it ([`js_jobs::JobStore::note_queue`]); by default, nothing is
+    /// told.
+    fn queue_status_written(&self) {}
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -813,11 +817,17 @@ impl SchedPlacer {
             if !job.queue.changed_by(&notes) {
                 continue;
             }
-            if let Err(error) = jobs.note_queue(&job.id, &notes) {
-                warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
-                noted.unwritten(&job.id);
-                self.restore_outcomes(noted.outcomes.remove_entry(&job.id).into_iter().collect());
-                failed_write(metrics);
+            match jobs.note_queue(&job.id, &notes) {
+                // `None`: the job was no longer queued, or the row read changed nothing.
+                Ok(written) => written.iter().for_each(|_| metrics.queue_status_written()),
+                Err(error) => {
+                    warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
+                    noted.unwritten(&job.id);
+                    self.restore_outcomes(
+                        noted.outcomes.remove_entry(&job.id).into_iter().collect(),
+                    );
+                    failed_write(metrics);
+                }
             }
         }
         placed

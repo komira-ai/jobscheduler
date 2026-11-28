@@ -1,5 +1,6 @@
 //! A scrape: the snapshot read from the state `GET /v1/hosts` reads and from the job tables,
-//! rendered with the recorder's counts, and the router of the metrics listener.
+//! rendered with the recorder's counts and followed by the server's own work
+//! ([`super::work`]), and the router of the metrics listener.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -11,11 +12,14 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
+use js_registry::HostState;
 use js_sched_placer::curves::{CurveView, MemoryShadowView};
+use js_sched_placer::telemetry::Telemetry;
 use tracing::warn;
 
 use super::Recorder;
 use super::render::{HostSeen, JobsSeen, Snapshot, Split, render};
+use super::work::{self, Work};
 use crate::api::{Peer, Shared, not_found, peer_may_read_status};
 use crate::hosts::{HostEntry, HostList, listing};
 use crate::job_store::ServerJobs;
@@ -45,11 +49,11 @@ async fn metrics(State(scrape): State<Arc<Scrape>>, peer: Peer) -> Response {
         return not_found();
     }
     match snapshot(&scrape.shared, MAX_PAGE).await {
-        Ok(seen) => (
-            [(CONTENT_TYPE, TEXT_FORMAT)],
-            render(&seen, &scrape.recorder),
-        )
-            .into_response(),
+        Ok(seen) => {
+            let mut text = render(&seen, &scrape.recorder);
+            work::write(&mut text, &Work::now(&scrape.shared, &scrape.recorder));
+            ([(CONTENT_TYPE, TEXT_FORMAT)], text).into_response()
+        }
         Err(error) => {
             warn!(%error, "a scrape could not read the job tables");
             let text = "the job tables could not be read\n";
@@ -73,8 +77,14 @@ pub(crate) async fn snapshot(
         None => None,
     };
     let views = match agents.placer.clone() {
-        Some(placer) => blocking(move || (placer.curve_view(), placer.memory_shadow_view())).await,
-        None => (None, None),
+        Some(placer) => {
+            let read = move || {
+                let telemetry = Some(placer.telemetry());
+                (placer.curve_view(), placer.memory_shadow_view(), telemetry)
+            };
+            blocking(read).await
+        }
+        None => (None, None, None),
     };
     Ok(combine(list, jobs, views))
 }
@@ -104,11 +114,15 @@ fn read_jobs(
 }
 
 /// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, of
-/// the jobs, and of the placer's curve view and memory shadow view, `views`.
+/// the jobs, and of the placer's curve view, memory shadow view and telemetry, `views`.
 fn combine(
     list: HostList,
     jobs: Option<(JobsSeen, Vec<AllocationRecord>)>,
-    (curves, memory): (Option<CurveView>, Option<MemoryShadowView>),
+    (curves, memory, telemetry): (
+        Option<CurveView>,
+        Option<MemoryShadowView>,
+        Option<Telemetry>,
+    ),
 ) -> Snapshot {
     let (jobs, live) = jobs.map_or((None, Vec::new()), |(seen, live)| (Some(seen), live));
     let hosts = list.hosts.into_iter();
@@ -117,6 +131,7 @@ fn combine(
         jobs,
         hosts,
         curves,
+        telemetry,
         memory,
     }
 }
@@ -146,5 +161,8 @@ fn host_seen(entry: HostEntry, live: &[AllocationRecord]) -> HostSeen {
         cpu: Split::of(whole.0, cpu),
         memory: Split::of(whole.1, memory),
         mark: entry.mark,
+        live: entry.state == Some(HostState::Live),
+        cpu_pressure_some_usec: entry.cpu_pressure_some_usec,
+        actions_oom_events: entry.actions_oom_events,
     }
 }

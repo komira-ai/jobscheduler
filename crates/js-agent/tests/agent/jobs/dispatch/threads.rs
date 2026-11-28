@@ -200,7 +200,53 @@ fn the_poller_follows_each_welcome_and_stops_when_the_flag_is_withdrawn() {
     });
 
     assert!(arrived.try_recv().is_err(), "the flag was withdrawn");
-    assert_eq!(connector.0.connects.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        connector.0.connects.load(Ordering::SeqCst),
+        1,
+        "both routes name one credential: one transport"
+    );
+}
+
+/// Asserts that the polls share one transport, as the session's heartbeats do: three polls of
+/// one route, and a later route of the same credential, make one transport; a route that
+/// names another credential makes a new one, which authenticates with it. It catches a poller
+/// that makes a transport for each poll, whose every poll then opens a connection and looks
+/// the server's name up again (and fails while the name cannot be looked up, though the
+/// heartbeats, on their kept transport, go on).
+#[test]
+fn the_polls_share_one_transport_until_the_credential_changes() {
+    let dir = Scratch::new("jobs-dispatch-one-transport");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let cell = Cell::new(None);
+    let (connector, driver) = rig();
+    let connects = || connector.0.connects.load(Ordering::SeqCst);
+
+    serving(&cell, &worker, &connector, || {
+        let welcome = welcomed(1, "one", true, Some("credential-one"));
+        cell.publish("h1", &welcome, CredentialState::Saved);
+        for _ in 0..3 {
+            let (_, credential) = driver.next();
+            assert_eq!(credential.as_deref(), Some("credential-one"));
+            driver.answer(quiet());
+        }
+        let _in_flight = driver.next();
+        let again = welcomed(2, "two", true, Some("credential-one"));
+        cell.publish("h1", &again, CredentialState::Saved);
+        driver.answer(quiet());
+        let (second, credential) = driver.next();
+        assert_eq!(second["epoch"], 2);
+        assert_eq!(credential.as_deref(), Some("credential-one"));
+        assert_eq!(connects(), 1);
+        let renewed = welcomed(3, "three", true, Some("credential-two"));
+        cell.publish("h1", &renewed, CredentialState::Saved);
+        driver.answer(quiet());
+        let (third, credential) = driver.next();
+        assert_eq!(third["epoch"], 3);
+        assert_eq!(credential.as_deref(), Some("credential-two"));
+        assert_eq!(connects(), 2);
+        driver.finish();
+    });
 }
 
 /// Asserts that a 409 from one instance does not end the polls of the session: the poller
@@ -322,12 +368,12 @@ fn a_transport_that_cannot_be_made_is_a_failed_poll() {
     });
 }
 
-/// Asserts that the poller's thread holds an answer its worker has no room for, makes no
-/// transport and posts nothing while the queue stays full, and once the worker makes room
-/// hands the start over and posts the next poll at once with its acknowledgement; and that
-/// the poller's lines reach the cell. Catches a thread that polls on while it holds messages
-/// (it would make a transport for every try), and one that waits out a bound after the room
-/// appeared instead of the room itself.
+/// Asserts that the poller's thread holds an answer its worker has no room for and posts
+/// nothing while the queue stays full, and once the worker makes room hands the start over
+/// and posts the next poll at once with its acknowledgement, on the transport it kept; and
+/// that the poller's lines reach the cell. Catches a thread that polls on while it holds
+/// messages, and one that waits out a bound after the room appeared instead of the room
+/// itself.
 #[test]
 fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room() {
     let dir = Scratch::new("jobs-dispatch-serve-held");
@@ -349,7 +395,11 @@ fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room()
         machine.world.release();
         let (carrying, _) = driver.next();
         assert_eq!(acked(&carrying), ["start:alloc-j1"]);
-        assert_eq!(connector.0.connects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            connector.0.connects.load(Ordering::SeqCst),
+            1,
+            "the poll after the hold rides the kept transport"
+        );
         driver.answer(quiet());
         assert_eq!(
             cell.wait_lines(GUARD),

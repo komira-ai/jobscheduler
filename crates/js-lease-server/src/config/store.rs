@@ -75,6 +75,10 @@ pub(crate) struct StoreSetting {
     pub(crate) target: WriterTarget,
     /// `--store` or `server.store`.
     pub(crate) names: StoreNames,
+    /// Whether the server listens to the notices of the other servers of a shared store
+    /// ([`crate::listening`]): a server always, but in a test that turns it off
+    /// ([`crate::Config::without_notices`]); never the job-store cutover, which serves nothing.
+    pub(crate) notices: bool,
 }
 
 impl StoreSetting {
@@ -153,6 +157,7 @@ fn parse(
         clock: StoreClock::default(),
         target,
         names,
+        notices: true,
     })
 }
 

@@ -7,8 +7,8 @@ use std::ops::Bound;
 
 use crate::clock::StoreTime;
 use crate::types::{
-    Changes, Commit, CommitStats, Cond, Conflict, ResumeToken, Revision, ScanPage, ScanRange,
-    StoreError, Txn, Versioned,
+    Changes, Commit, CommitStats, Cond, Conflict, Notice, ResumeToken, Revision, ScanPage,
+    ScanRange, StoreError, Txn, Versioned,
 };
 
 /// A durable, ordered key-value store with transactions, counters, time-to-live keys and
@@ -224,6 +224,19 @@ pub trait Store: Send + Sync {
             Err(conflict) => Claim::Conflict(conflict),
         })
     }
+
+    /// Tells the processes that listen to this store of `notices`, best effort: a caller sends
+    /// them after the commit of the writes they tell of, and a notice that is lost costs a
+    /// listener the wait for its next poll, since the rows, not the notices, decide. Nothing
+    /// is returned and nothing fails: a notice that cannot be sent is logged by the backend.
+    ///
+    /// The provided implementation tells no one: a store one process writes (SQLite, the
+    /// fake) has no other process to tell, and that process wakes its own waiters. The
+    /// Postgres backend sends each notice with `pg_notify` after the call's own commit, to the
+    /// listeners of [`crate::postgres::Listener`].
+    fn notify(&self, notices: &[Notice]) {
+        let _ = notices;
+    }
 }
 
 /// What a decision of [`Store::claim_decide`] reads: the store as the claiming transaction
@@ -335,6 +348,10 @@ impl Store for std::sync::Arc<dyn Store> {
     ) -> Result<Claim, StoreError> {
         (**self).claim_decide(claim, decide)
     }
+
+    fn notify(&self, notices: &[Notice]) {
+        (**self).notify(notices);
+    }
 }
 
 /// The keys a C8 request may return: its bounds clipped to its prefix. The lower edge is
@@ -443,7 +460,8 @@ mod tests {
     use super::{Span, Store, successor};
     use crate::clock::{Clock, ManualClock};
     use crate::fake::{Fake, Flaw};
-    use crate::types::{Cond, Revision, ScanRange, Txn};
+    use crate::recording::RecordingStore;
+    use crate::types::{Cond, Notice, Revision, ScanRange, Txn};
 
     /// A shared handle answers every call as the store it holds: a write through the handle
     /// is read back through the store and through the handle alike, the scans, the feed,
@@ -515,6 +533,24 @@ mod tests {
         );
         let left = inner.changes(Revision(2), 10).expect("store");
         assert_eq!(left.rows.len(), 3);
+    }
+
+    /// A shared handle sends its notices through the store it holds, and a store that has no
+    /// one to tell (the fake) takes them and changes nothing. It catches a handle that drops
+    /// the notices (the provided implementation) instead of passing them on.
+    #[test]
+    fn a_shared_handle_sends_its_notices_through_the_store_it_holds() {
+        let clock = Arc::new(ManualClock::default());
+        let fake: Arc<dyn Store> = Arc::new(Fake::with_flaw(clock, Flaw::None));
+        let recording = Arc::new(RecordingStore::new(Arc::clone(&fake)));
+        let handle: Arc<dyn Store> = recording.clone();
+        let sent = [Notice {
+            channel: "queue".to_owned(),
+            payload: String::new(),
+        }];
+        <Arc<dyn Store> as Store>::notify(&handle, &sent);
+        assert_eq!(recording.notices(), sent);
+        assert_eq!(fake.changes(Revision(0), 10).expect("store").rows, []);
     }
 
     // Catches a successor that steps into the surrogate gap (no char there, so the

@@ -69,7 +69,7 @@ pub use binner::{
     WindowPart, window_parts,
 };
 pub use cgroup::{
-    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file,
+    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_oom_events,
     parse_pressure_some_total, parse_single_u64, parse_stat_key, parse_usage_usec, working_set,
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};

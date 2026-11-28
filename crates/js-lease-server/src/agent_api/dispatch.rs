@@ -47,10 +47,11 @@
 //!    rest stay claimed until their lease ends. A failed claim is a 500 `state-write-failed`.
 //! 4. **The hold.** With nothing to answer the poll is held for 5 s at most (the hold of a
 //!    held beat, `crate::held_beat::MAX_HOLD`) and claims again when a placement on this
-//!    server wakes it and every `server.dispatch_recheck_ms` whatever woke it (a message
-//!    another server wrote, a stop a cancel wrote and a whole-host job's start wake nothing
-//!    here), and answers what it claimed; at the bound, or when the drain begins, it answers
-//!    empty. The watch for the wakes is taken before the first claim, so a placement between
+//!    server wakes it, when a notice of any server over the store tells of a message for the
+//!    host (a start or a stop it wrote; [`crate::listening`]), and every
+//!    `server.dispatch_recheck_ms` whatever woke it (what a lost notice leaves, and what a store
+//!    one process writes sends no notice of), and answers what it claimed; at the bound, or
+//!    when the drain begins, it answers empty. The watch for the wakes is taken before the first claim, so a placement between
 //!    the claim and the hold ends the hold at once. A claim that fails inside the hold is
 //!    logged and answered empty: the agent polls again at once, and its next first claim says
 //!    500 if the store is still failing.

@@ -64,6 +64,10 @@ impl Registry {
                     HostState::Lost => Default::default(),
                     _ => record.load.seconds.clone(),
                 },
+                actions_oom_events: match state {
+                    HostState::Lost => None,
+                    _ => record.load.actions_oom_events,
+                },
                 phase: record.phase,
                 lease: None,
                 leases: Vec::new(),
