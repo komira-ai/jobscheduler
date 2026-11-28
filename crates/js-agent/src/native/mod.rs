@@ -97,8 +97,8 @@
 //! stop moves nothing. The first poll after the grace that finds the job running sweeps the
 //! run's processes by the job's audit session and the account's uid (`native/end.rs`), and
 //! every later poll sweeps again until a sweep leaves none; only then is the job's end read
-//! (`native/remove.rs`). The lifecycle holds the wall limit and the silence bound
-//! (`--silence-stop`) and calls the stop.
+//! (`native/remove.rs`). The lifecycle holds the wall limit and calls the stop; a silence of
+//! the server (`--silence-stop`) stops no native run that has begun.
 //!
 //! The environment of a run is the agent's (the body's own `env`, or the bundle's rules
 //! applied to it, then `TMPDIR` and `JS_FILES_DIR`) with a job start's environment

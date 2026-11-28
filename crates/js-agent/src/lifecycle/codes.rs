@@ -24,8 +24,10 @@ pub mod detail {
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
     pub const TAINT_FAILED: &str = "taint-failed";
-    /// The detail of a `killed` result when the agent stopped the job because it had not
-    /// heard from the server for its silence bound (`--silence-stop`).
+    /// The detail of a `failed_to_start` result when the agent did not start the job because
+    /// it had not heard from the server for its silence bound (`--silence-stop`): the job
+    /// waited to start when the bound was reached, or its start came while the silence
+    /// lasted. Nothing of the job ran. A running job is never ended for a silence.
     pub const SILENCE_STOP: &str = "silence-stop";
 }
 
@@ -127,8 +129,9 @@ pub mod code {
     pub const HELD_FAILED: &str = "held-record-failed";
     /// A held result or the retired list in the state root could not be read at start.
     pub const HELD_UNREADABLE: &str = "held-record-unreadable";
-    /// The agent had not heard from the server for its silence bound and stopped the job
-    /// (its result says [`detail::SILENCE_STOP`](super::detail::SILENCE_STOP)).
+    /// The agent had not heard from the server for its silence bound and did not start the
+    /// job, which waited to start (its result says
+    /// [`detail::SILENCE_STOP`](super::detail::SILENCE_STOP)).
     pub const SILENCE_STOP: &str = "silence-stop";
     /// A run the agent adopted after a restart could not be offered its host ports again,
     /// and the agent stopped it (its result's `input_failure` says

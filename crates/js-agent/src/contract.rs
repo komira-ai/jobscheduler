@@ -52,7 +52,7 @@
 //!   outside `/work` and a remapped host port at admission.
 //! - `start-fence` is `true` wherever `per-job` is: the agent judges a job start by its
 //!   fence (the job id with the allocation id), keeps the fences it retired in its state root,
-//!   and stops every job after a silence of the server
+//!   and starts nothing after a silence of the server, keeping its running jobs
 //!   ([`js_agent_wire::START_FENCE_CAPABILITY`]). An operator cannot set it.
 //! - `held-beat` is `true` wherever `per-job` is: the session sends its next heartbeat at
 //!   once after a reply the server held open ([`js_agent_wire::HELD_BEAT_CAPABILITY`]).
@@ -97,7 +97,7 @@ mod container;
 pub(crate) use container::{ToolkitHook, report, report_fuse, report_host_jobs};
 
 /// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
-/// start whose fence it retired and stops its jobs after a silence), and that it beats again
+/// start whose fence it retired and starts nothing after a silence), and that it beats again
 /// at once after a held reply (`held-beat`, the session's), and that it polls the dispatch
 /// route when its welcome says the server serves it (`dispatch-poll`, [`crate::dispatch`]), and
 /// that it admits a job start by the job service's placement, never refusing one for the

@@ -608,9 +608,10 @@ on every update now, whatever section 9 has built.
 
 An agent whose connection was closed or refused retries with its backoff. Today the instance it reaches holds no session for it, so a
 beat is answered `409 unknown-host` or `403 session-mismatch` and the agent says hello there (`js-agent/src/session.rs:32-45`); after G15 it serves the beat from the `node/` row and no hello is repeated.
-Its jobs run on throughout: an agent keeps its jobs without a server for up to `--silence-stop` with no accepted reply (300 s by
-default, `js-agent/src/cli.rs:311-316`), far more than the drain hold and drain timeout (25 s), and on the server's side silence
-ends nothing before grace plus retention ([absence.md](absence.md)).
+Its jobs run on throughout: an agent keeps its running jobs through any silence of the server, and stops only starting work once it
+has heard no answer for `--silence-stop` (300 s by default, `js-agent/src/cli.rs`), far more than the drain hold and drain timeout
+(25 s); any answer an instance writes, a refusal included, is hearing it. On the server's side silence ends nothing before grace plus
+retention ([absence.md](absence.md)).
 
 **The update, by the two rules of section 0.1.** Heartbeats, the job API and dispatch go through the edge to any instance, old or
 new, all the time; nothing is routed by version, and no state lives in an instance.

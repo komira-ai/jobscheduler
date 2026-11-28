@@ -479,14 +479,20 @@ impl Job {
         }
     }
 
-    /// Ends a job that was stopped before its container was made: killed, and silent (no
-    /// result) when it was cancelled. No container was made: the cleanup that follows
-    /// discards what the runtime prepared of its file system, removes the directories made
+    /// Ends a job that was stopped before its container was made: killed (`failed_to_start`
+    /// when a silence of the server ended it), and silent (no result) when it was cancelled.
+    /// No container was made: the cleanup that follows discards what the runtime prepared of its file system, removes the directories made
     /// for its assembly, if any, and gives the slot back.
     pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
         if !self.silent {
             let detail = cause_detail(self.cause);
-            self.result = Some(self.report(Outcome::Killed, None, detail));
+            // A start the agent gave up on for a silence of the server never ran: it failed
+            // to start, for a cause of the host's, which the server may retry elsewhere.
+            let how = match self.cause {
+                Some(Cause::Silenced) => Outcome::FailedToStart,
+                _ => Outcome::Killed,
+            };
+            self.result = Some(self.report(how, None, detail));
             events.push(Event::ResultReady {
                 run_id: self.run_id.clone(),
                 booked: self.booked(),

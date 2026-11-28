@@ -218,7 +218,7 @@ mod tests {
 
     /// Asserts that `start-fence`, `held-beat`, `dispatch-poll` and `load-admission` are reported as `true`, beside `per-job`, by
     /// the hello of an agent that runs containers (its lifecycle judges a job start by its fence
-    /// and stops its jobs after a silence; its session beats again at once after a held reply),
+    /// and starts nothing after a silence; its session beats again at once after a held reply),
     /// and that the hello still validates. It catches a server never told that a container
     /// agent enforces fences, and one never told it may hold the agent's heartbeat.
     #[test]

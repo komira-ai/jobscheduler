@@ -334,13 +334,16 @@ pub struct Cli {
     /// `--no-jobs`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
-    /// How many seconds the agent goes on running its jobs when it hears nothing from the
-    /// server (no welcome and no accepted heartbeat reply): then it stops every job it
-    /// holds, as a stop from the server would (the stop grace, then the kill), and reports
-    /// each `killed` with the detail `silence-stop`. By default 300; from 1 to 7200; it must
-    /// be above the stop grace plus the server's default grace of 15 seconds, and a welcome
-    /// whose grace plus the stop grace is not below it ends the agent. There is no value
-    /// that turns the stop off. Not with `--no-jobs`.
+    /// How many seconds the agent goes on starting work when it hears nothing from the
+    /// server (any answer the server wrote, whatever its status, is hearing it; a transport
+    /// error or a proxy's empty answer is not): then it starts nothing until it hears the
+    /// server again. Each job that waits to start is not started and is reported
+    /// `failed_to_start` with the detail `silence-stop`, and so is every start that comes
+    /// meanwhile. Running jobs run on to their own limits and their results are reported once
+    /// the server answers. By default 300; from 1 to 7200; it must be above the stop grace
+    /// plus the server's default grace of 15 seconds, and a welcome whose grace plus the stop
+    /// grace is not below it ends the agent. There is no value that turns it off. Not with
+    /// `--no-jobs`.
     #[arg(long, value_name = "SECONDS")]
     pub silence_stop: Option<u64>,
     /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`

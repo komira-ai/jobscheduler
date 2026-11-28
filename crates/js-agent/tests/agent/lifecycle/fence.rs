@@ -1,16 +1,19 @@
 //! The fence of a job start, the job id with the allocation id: a start whose fence is
 //! retired runs nothing and books nothing, the same job under a new allocation runs, a run
-//! start is judged by its run id as before, and the fences retired by a stop or a silence
-//! are in the state root before the stop is reported and survive a restart.
+//! start is judged by its run id as before, and the fences retired by a stop, or by a
+//! silence that ends a waiting start, are in the state root before the end is reported and
+//! survive a restart.
 
 use std::fs;
 use std::path::PathBuf;
 
-use js_agent::lifecycle::{Clock, detail};
+use js_agent::lifecycle::Clock;
 use js_agent_wire::{Command, Outcome};
 use serde_json::{Value, json};
 
-use super::silence::{BOUND_MS, fenced, job_start, long_run, result_of};
+use super::silence::{
+    BOUND_MS, fenced, hold_pull, job_start, long_run, not_started, result_of, waiting_job_start,
+};
 use super::{Harness, names, reply_json};
 
 /// The retired list's file.
@@ -110,11 +113,11 @@ fn a_start_without_a_fence_behaves_as_before() {
 /// Asserts that a stop retires the fence so that a late start never runs: a stop of a job
 /// the agent does not hold, then its start, runs nothing (`FenceRetired`); a stop of a job
 /// it holds puts the job with its allocation in the retired list on disk in the same call,
-/// before the step that reports the stop; and a job stopped for a silence, once contact
-/// is back and its result acknowledged, is not run again by its start. It catches a stop
-/// that is forgotten when its start comes later, a fence written only once the job leaves
-/// the listing (a restart before that would run it again), and a silence stop that does
-/// not retire.
+/// before the step that reports the stop; and a waiting job a silence ended, once contact
+/// is back and its result acknowledged, is not run by its start sent again. It catches a
+/// stop that is forgotten when its start comes later, a fence written only once the job
+/// leaves the listing (a restart before that would run it again), and a silence's end of a
+/// start that does not retire.
 #[test]
 fn a_stopped_job_retires_its_fence_so_a_late_start_never_runs() {
     let (mut h, contact) = fenced("fence-stopped");
@@ -141,11 +144,11 @@ fn a_stopped_job_retires_its_fence_so_a_late_start_never_runs() {
     assert_eq!(result_of(&h, "j2"), (Outcome::Killed, None));
 
     contact.heard(h.clock.now_ms());
-    h.apply(vec![job_start("j3", "a3")]);
+    hold_pull(&h);
+    h.apply(vec![waiting_job_start("j3", "a3")]);
     h.clock.advance(BOUND_MS);
     h.life.step();
-    let silenced = (Outcome::Killed, Some(detail::SILENCE_STOP.to_owned()));
-    assert_eq!(result_of(&h, "j3"), silenced);
+    assert_eq!(result_of(&h, "j3"), not_started());
     contact.heard(h.clock.now_ms());
     ack_job(&mut h, "j2");
     ack_job(&mut h, "j3");
@@ -154,12 +157,12 @@ fn a_stopped_job_retires_its_fence_so_a_late_start_never_runs() {
         events,
         ["skipped j2 FenceRetired", "skipped j3 FenceRetired"]
     );
-    assert_eq!(created(&h), ["j2", "j3"]);
+    assert_eq!(created(&h), ["j2"]);
 }
 
 /// Asserts that the fences survive a restart: a second lifecycle over the same state root
 /// refuses the fence of a job that ended, of one the server stopped while it ran, and of
-/// one stopped for a silence (its fence on disk in the step that made its result, before
+/// a waiting one a silence ended (its fence on disk in the step that made its result, before
 /// any heartbeat could carry it), once each result is acknowledged; and takes the last
 /// job under a new allocation. It catches a fence kept in memory only, and one written
 /// after its stop was reported.
@@ -170,7 +173,8 @@ fn retired_fences_survive_an_agent_restart() {
     h.fake.exit("j1", 0);
     h.life.step();
     ack_job(&mut h, "j1");
-    h.apply(vec![job_start("j2", "a2"), job_start("j3", "a3")]);
+    hold_pull(&h);
+    h.apply(vec![job_start("j2", "a2"), waiting_job_start("j3", "a3")]);
     h.apply(vec![Command::JobStop {
         job_id: "j2".to_owned(),
     }]);
@@ -205,19 +209,20 @@ fn retired_fences_survive_an_agent_restart() {
             "skipped j3 FenceRetired",
         ]
     );
-    assert_eq!(created(&h), ["j1", "j2", "j3"]);
+    assert_eq!(created(&h), ["j1", "j2"]);
     assert_eq!(names(&h.apply(vec![job_start("j3", "a4")])), ["started j3"]);
 }
 
-/// Asserts the end of a job the server gave up while the host could not hear it: job A
-/// runs and can make its one write (the fake lets a write through only while the
-/// container runs); the server is silent past the bound (it cancelled A and gave the host
-/// to B meanwhile), so A's container is stopped and its write now fails; when contact is
-/// back the server takes A's result, B's start runs and can write, and A's old start, sent
-/// again, runs nothing. It catches a job that can still write when the host's next job
-/// starts, and a fence of A that blocks B.
+/// Asserts what a job cancelled while the host could not hear the server does: job A runs
+/// and can make its one write (the fake lets a write through only while the container
+/// runs); the server is silent past the bound (it cancelled A meanwhile, which it records
+/// and does not act on until the host reports), and A still runs and can write; when
+/// contact is back the server's stop of A ends it and retires its fence, A's old start, sent
+/// again once its result is acknowledged, runs nothing, and B's start runs and can write.
+/// It catches a silence that kills a running job the server never gave away, a stop after
+/// the silence that does not retire the fence, and a fence of A that blocks B.
 #[test]
-fn a_cancelled_job_cannot_write_after_the_host_is_reassigned() {
+fn a_job_cancelled_during_a_silence_ends_when_the_server_is_heard() {
     let (mut h, contact) = fenced("fence-reassigned");
     contact.heard(h.clock.now_ms());
     h.apply(vec![job_start("ja", "alloc-a")]);
@@ -225,9 +230,15 @@ fn a_cancelled_job_cannot_write_after_the_host_is_reassigned() {
 
     h.clock.advance(BOUND_MS);
     h.life.step();
-    assert!(!h.fake.running("ja"), "A's write fails once it is stopped");
+    assert!(h.fake.running("ja"), "A runs on through the silence");
 
     contact.heard(h.clock.now_ms());
+    h.apply(vec![Command::JobStop {
+        job_id: "ja".to_owned(),
+    }]);
+    h.life.step();
+    assert!(!h.fake.running("ja"), "A's write fails once it is stopped");
+    assert_eq!(result_of(&h, "ja"), (Outcome::Killed, None));
     ack_job(&mut h, "ja");
     let events = names(&h.apply(vec![job_start("ja", "alloc-a"), job_start("jb", "alloc-b")]));
     assert_eq!(events, ["skipped ja FenceRetired", "started jb"]);

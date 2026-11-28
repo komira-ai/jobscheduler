@@ -631,12 +631,12 @@ impl AgentHarness for JsAgent {
 }
 
 /// Asserts that the real agent's lifecycle passes every scenario of the suite, among them
-/// `SelfFencesAfterSilence` with the agent's default silence bound as its window (the
-/// lease runs one tick short of the bound counted from the last contact, and is stopped and
-/// reported `silence-stop` at the bound) and `RetiredFenceIsRefused` (a job start whose
-/// fence is retired launches nothing, the same job under a new allocation runs). It catches
-/// an agent that does not stop its jobs after a silence, counts the silence from the wrong
-/// moment, or keys its retired fences on anything but the job with its allocation.
+/// `SilenceKeepsRunningLeases` with the agent's default silence bound as its window (the
+/// lease runs on through twice the bound and its own end is reported once the connection
+/// is back) and `RetiredFenceIsRefused` (a job start whose fence is retired launches
+/// nothing, the same job under a new allocation runs). It catches an agent that stops a
+/// running job after a silence, or keys its retired fences on anything but the job with
+/// its allocation.
 #[test]
 fn the_js_agent_passes_every_scenario() {
     let report = agent::run(JsAgent::new);

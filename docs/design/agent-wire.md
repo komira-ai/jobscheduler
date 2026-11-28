@@ -106,10 +106,15 @@ acknowledgement, and the job half is added as above. The registry still records 
 The fence of a job start is the pair it already carries, `job_id` with `allocation_id`; no field is added for it, and no existing
 body encodes differently (`crates/js-agent-wire/tests/start_fence.rs`). An agent that enforces it reports the hello capability
 `start-fence` (`START_FENCE_CAPABILITY`), beside `per-job`: it skips a job start whose fence it retired (a job that ended, was
-stopped or cancelled, or that it stopped after a silence of the server; a `job_stop` for a job it does not hold names no
+stopped or cancelled, or that it did not start for a silence of the server; a `job_stop` for a job it does not hold names no
 allocation and retires every fence of the job), keeps the retired fences in its state root across a restart, takes the same job
-under a new allocation, and stops every job it holds once it has not heard the server for its silence bound (`--silence-stop`,
-300 s by default, reported `killed` with the detail `silence-stop`). A server that does not see the capability can expect neither.
+under a new allocation, and starts nothing once it has not heard the server for its silence bound (`--silence-stop`, 300 s by
+default): each job that waits to start is not started, its fence is retired and it is reported `failed_to_start` with the detail
+`silence-stop`, and so is every start that comes while the silence lasts. Its running jobs run on to their own limits: no rule of
+the server ends or re-places a running job for its host's silence, while the start timeout of a placed or starting job may end
+its attempt. Any answer the server wrote to a hello or a heartbeat (a JSON body, whatever its status, a 503 with its `error` code
+included) is hearing it; a transport error or a proxy's empty answer is not. A server that does not see the capability can expect
+none of this.
 A run start is fenced by its run id alone, as before.
 
 A job start carries the optional `placed_at_ms` (`JobStartSpec.placed_at_ms`): the server's Unix time in milliseconds at which it placed the

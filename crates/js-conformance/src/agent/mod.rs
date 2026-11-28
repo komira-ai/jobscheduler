@@ -43,10 +43,10 @@
 //!   wire from the send time of the heartbeat the Start names (so the adapter backdates
 //!   that heartbeat).
 //! - **The fence window comes from the transport.** `fence_window` is the transport's own
-//!   value, or `None` when the agent has none. An agent with no self-fence fails
-//!   `SelfFencesAfterSilence` with that reason rather than having it skipped. The js-agent
-//!   adapter (`tests/js_agent_suite.rs`) reports the agent's default silence bound
-//!   (`--silence-stop`).
+//!   value, or `None` when the agent has none. `SilenceKeepsRunningLeases` waits twice the
+//!   window (a day when there is none) and asks that a running lease still runs. The
+//!   js-agent adapter (`tests/js_agent_suite.rs`) reports the agent's default silence bound
+//!   (`--silence-stop`), past which the agent starts nothing new.
 //! - **A fenced start names the job and its allocation.** `start_fenced(job, allocation)`
 //!   is a start whose fence is the pair; the agent must refuse one whose fence it retired
 //!   and take the same job under another allocation. The js-agent adapter sends it as a job
@@ -192,7 +192,8 @@ pub enum Cleanup {
 pub struct Observed {
     /// Leases the agent lists as running.
     pub running: BTreeSet<String>,
-    /// Leases the agent stopped because it heard nothing for the fence window.
+    /// Leases the agent stopped because it heard nothing for the fence window (a correct
+    /// agent stops none that runs).
     pub fenced: BTreeSet<String>,
     /// Leases whose Start had waited past its validity and was dropped.
     pub never_started: BTreeSet<String>,
@@ -220,8 +221,8 @@ pub struct Observed {
 /// Times are milliseconds on the injected clock, which starts at 0. An operation that
 /// needs the connection answers [`Delivery::Lost`] while it is down and changes nothing.
 pub trait AgentHarness {
-    /// The silence after which the agent stops its leases by itself, at least 2, or
-    /// `None` for an agent that has no self-fence.
+    /// The silence after which the agent stops starting work by itself, at least 2, or
+    /// `None` for an agent that has no such bound.
     fn fence_window(&self) -> Option<u64>;
 
     /// The injected clock now.

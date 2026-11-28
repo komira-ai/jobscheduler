@@ -17,8 +17,9 @@ pub enum Defect {
     ForgetsRetiredIds,
     /// A Start that waited longer than its validity is run.
     RunsLateStart,
-    /// The agent never stops its leases for want of the scheduler.
-    NeverFences,
+    /// The agent stops its running leases once it has not heard the scheduler for its fence
+    /// window.
+    StopsRunningOnSilence,
     /// A result not yet acknowledged is forgotten when the connection drops.
     ForgetsUnackedResult,
     /// A start whose fence was retired runs the job again.
@@ -293,7 +294,7 @@ impl AgentHarness for FakeAgent {
         self.now += millis;
         let silence = self.now - self.last_contact;
         let silent = self.window.is_some_and(|window| silence >= window);
-        if !self.running.is_empty() && silent && !self.lacks(Defect::NeverFences) {
+        if !self.running.is_empty() && silent && self.lacks(Defect::StopsRunningOnSilence) {
             self.fenced.append(&mut self.running);
         }
     }

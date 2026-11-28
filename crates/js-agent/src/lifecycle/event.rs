@@ -25,7 +25,7 @@ pub enum Skip {
     /// The run was finished, or stopped, earlier: a run start whose run id is retired.
     Retired,
     /// The fence of this job start (its job id with its allocation id) is retired: the job
-    /// ended, was stopped or cancelled, was stopped for a silence of the server, or a stop
+    /// ended, was stopped or cancelled, was not started for a silence of the server, or a stop
     /// that named no allocation retired every fence of the job. Nothing is made or booked.
     /// The same job under another allocation is another fence.
     FenceRetired,
