@@ -77,7 +77,7 @@ fn unfit_job(i: usize) -> Command {
 /// far as they fit and the rest not at all, and stays within the body the server reads; and
 /// that once the carried results are acknowledged, the waiting ones go out and a start is
 /// taken again. It catches a beat whose held list and results pass the body limit (the
-/// server answers 413 and the agent exits), a result skipped out of order, and a bound that
+/// server answers 413 and the agent retries it for ever), a result skipped out of order, and a bound that
 /// never lets go.
 #[test]
 fn run_starts_past_what_a_beat_lists_are_skipped_and_results_wait() {

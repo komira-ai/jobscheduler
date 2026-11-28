@@ -1,7 +1,8 @@
 //! The ends of the agent that are not a stop request, with jobs running: a refusal for good
-//! and the worker's end. In both the agent stops the containers it holds before it exits
-//! (through the worker after a refusal, through a runtime of its own after the worker's
-//! end), and its exit status is the one the end always had. The runtime is in memory; the
+//! and the worker's end. After a refusal the agent leaves its containers running for its next
+//! process, which adopts them; a session given no state root to hand over in stops them
+//! through the worker instead. After the worker's end the agent stops them through a runtime
+//! of its own. The exit status is the one the end always had. The runtime is in memory; the
 //! worker is a real thread that the sleeper of these tests settles; every wait is for an
 //! event with a hang guard, and the bound of a rescue is a test's own and short.
 
@@ -58,12 +59,23 @@ fn agent(
     act: impl Fn(usize) + 'static,
 ) -> Ran {
     let dir = Scratch::new(name);
-    let owned = container_flags(&dir);
-    let extra: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let args = flags(&extra);
     let mut replies = vec![welcome(1), reply(200, start_answer(&["r1", "r2"]))];
     replies.extend(then);
-    let (script, _) = Script::new(replies);
+    agent_in(&dir, machine, replies, act).0
+}
+
+/// Runs the whole agent with containers over `machine`, its roots in `dir`, against a server
+/// that says `replies`; `act` runs at the waits. Returns how it ran and what it sent.
+fn agent_in(
+    dir: &Scratch,
+    machine: &Arc<FakeMachine>,
+    replies: Vec<crate::support::Reply>,
+    act: impl Fn(usize) + 'static,
+) -> (Ran, crate::support::Sent) {
+    let owned = container_flags(dir);
+    let extra: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let args = flags(&extra);
+    let (script, sent) = Script::new(replies);
     let connector = ScriptConnector::of(script);
     let seen: RefCell<Option<Handle>> = RefCell::new(None);
     let hook = |handle: Handle| *seen.borrow_mut() = Some(handle);
@@ -74,32 +86,71 @@ fn agent(
         budget: WakeBudget::new(),
     };
     let jobs: crate::support::Jobs<'_> = (machine.clone(), Some(&hook));
-    crate::support::run_on(
+    let ran = crate::support::run_on(
         &args,
         &linux_host(),
         &connector,
         &mut sleeper,
         &mut Lowest,
         jobs,
-    )
+    );
+    (ran, sent)
 }
 
 /// Asserts that a server that refuses the agent for good while two runs are running ends
-/// it with the refusal's status (2) and the refusal on stderr, and that both containers
-/// were stopped before the agent exited. It catches an agent that leaves a container
-/// running, with no wall limit enforced, when its token is revoked.
+/// it with the refusal's status (2) and the refusal on stderr, and that both containers are
+/// left running, unstopped, for the next process: the agent says so on stderr, and the next
+/// process of the agent over the same state root adopts both and lists them running in its
+/// first hello, though that hello is refused too (403 `unknown-pool`), after which both still
+/// run. Catches an agent that stops every job of the host when its token is revoked, and a
+/// hand-over whose runs the restarted agent does not adopt.
 #[test]
-fn a_refusal_for_good_stops_both_runs_and_keeps_its_status() {
+fn a_refusal_for_good_leaves_both_runs_to_the_next_process_and_keeps_its_status() {
     let machine = Arc::new(FakeMachine::new());
     let world = machine.world.clone();
-    let then = vec![refused(401, "unauthorised")];
-    let ran = agent("jobs-ends-fatal", &machine, then, |_| {});
+    let dir = Scratch::new("jobs-ends-fatal");
+    let replies = vec![
+        welcome(1),
+        reply(200, start_answer(&["r1", "r2"])),
+        refused(401, "unauthorised"),
+    ];
+    let (ran, _) = agent_in(&dir, &machine, replies, |_| {});
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(ran.err.contains("401"), "{}", ran.err);
-    let log = world.log();
+    assert!(
+        ran.err
+            .contains("js-agent: handed over: every run is left as it is to the next process"),
+        "{}",
+        ran.err
+    );
     assert_eq!(world.created(), ["r1", "r2"]);
-    assert!(log.contains(&"stop r1".to_owned()), "{log:?}");
-    assert!(log.contains(&"stop r2".to_owned()), "{log:?}");
+    assert_eq!(world.alive(), 2);
+    let log = world.log();
+    assert!(!log.iter().any(|call| call.starts_with("stop ")), "{log:?}");
+
+    let (again, sent) = agent_in(&dir, &machine, vec![refused(403, "unknown-pool")], |_| {});
+    assert_eq!(again.status(), code(2), "{}", again.err);
+    let sent = sent.borrow();
+    let held = sent[0].1["held"].as_array().cloned().unwrap_or_default();
+    let listed: Vec<(&str, &str)> = held
+        .iter()
+        .map(|run| {
+            (
+                run["run_id"].as_str().unwrap(),
+                run["state"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [("r1", "running"), ("r2", "running")],
+        "{}",
+        again.err
+    );
+    assert_eq!(world.created(), ["r1", "r2"], "nothing is started twice");
+    assert_eq!(world.alive(), 2);
+    let log = world.log();
+    assert!(!log.iter().any(|call| call.starts_with("stop ")), "{log:?}");
 }
 
 /// Asserts that a worker that dies with two runs running ends the agent with status 1 and

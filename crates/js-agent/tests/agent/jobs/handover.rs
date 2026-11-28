@@ -579,21 +579,32 @@ fn a_stop_the_server_asked_for_is_finished_before_the_handover() {
 }
 
 /// Asserts the ends a handover shares with a drain: a server that refuses the agent for good
-/// during the handover ends it with that refusal (the runs are then stopped, as at any refusal
-/// for good: no heartbeat can carry them any more), and a park asked of a worker whose thread
-/// has ended answers so. Catches a handover that goes on against a server that will not have
-/// the agent, and a park that waits for ever on a dead worker.
+/// during the handover ends it with that refusal, the run still left running and unstopped
+/// for the next process (as at any refusal for good of an agent with a state root), and a park
+/// asked of a worker whose thread has ended answers so. Catches a handover that goes on
+/// against a server that will not have the agent, one that stops the runs it was handing
+/// over, and a park that waits for ever on a dead worker.
 #[test]
 fn a_refusal_during_the_handover_ends_it_and_a_dead_worker_parks_as_ended() {
     let dir = Scratch::new("jobs-handover-refused");
     let machine = FakeMachine::new();
     let worker = running(&dir, &machine, &["r1"]);
     let replies = vec![welcome(1), refused(401, "unauthorised")];
-    let (exit, _, _) = handed(&dir, &worker, replies, LONG, |_| Wake::Stop);
+    let (exit, log, _) = handed(&dir, &worker, replies, LONG, |_| Wake::Stop);
     let Exit::Fatal(fatal) = exit else {
         panic!("the server refused the agent: {exit:?}");
     };
     assert_eq!(fatal.status, 401);
+    assert_eq!(machine.world.alive(), 1);
+    let stopped = machine.world.log();
+    assert!(
+        !stopped.iter().any(|call| call.starts_with("stop ")),
+        "{stopped:?}"
+    );
+    assert!(
+        log.contains("js-agent: handed over: every run is left as it is to the next process"),
+        "{log}"
+    );
 
     let dir = Scratch::new("jobs-handover-dead");
     let machine = FakeMachine::new();

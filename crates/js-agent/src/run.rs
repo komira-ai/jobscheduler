@@ -60,13 +60,26 @@
 //! The agent never leaves a container without somebody to enforce its wall limit if it can
 //! help it:
 //!
-//! - **The server refuses the host for good** ([`Exit::Fatal`], for example a revoked
-//!   token): no heartbeat can be sent, so there is no drain. The worker is closed, asked to
+//! - **The server refuses the host for good** ([`Exit::Fatal`]: a refusal only the operator
+//!   can resolve, such as a revoked token; see [`Session`] for the list): no heartbeat can be
+//!   sent, so there is no drain. The runs are handed over as at a stop that found the
+//!   handover file (above), but with no heartbeat: the worker is closed, so it takes no new
+//!   job, and asked to park, once and then again after each wait of `PARK_WAIT`, until it parks,
+//!   [`Drain::wait`] has passed (counted as those waits) or a stop request comes. Nothing is
+//!   stopped: the loop ends, the exit status is the refusal's (2), and every run is left as
+//!   it is with every result not yet acknowledged kept in the state root. The supervisor
+//!   starts the agent again (`Restart=always`); the next process adopts the runs as after an
+//!   update, lists them in its first hello and sends their results once the server takes
+//!   it again. The worker takes a step before it answers each park, so a run past its wall
+//!   limit is stopped first: a refusal that lasts, which restarts the agent again and again
+//!   and has each process park at once, still ends every run at its wall limit, give or take
+//!   the supervisor's restart delay. This is the end of every agent that runs jobs, since
+//!   jobs need a state root.
+//!   A session given no state root to hand over in ([`Session::with_handover`] with `None`)
+//!   cannot leave its runs to anybody, so it stops them instead: the worker is closed, asked to
 //!   stop every run, and waited for until none runs or the worker has ended, for the stop
 //!   grace and a minute; what it did not stop is stopped through the runtime directly, as
-//!   below. The exit status is the
-//!   refusal's. The results of the stopped runs are not sent and the server would not take
-//!   them, so they may be lost.
+//!   below. The results of those stopped runs are not sent and may be lost.
 //! - **The job worker is gone or stalled** ([`Exit::Failed`]): the worker cannot be asked,
 //!   so the agent makes a runtime of its own, lists its containers by their label and stops
 //!   them, each call bounded by the runner's limit and the stop grace, the whole bounded to
@@ -165,7 +178,7 @@ pub fn drive_holding(
         let step = session.tick();
         print(session, log);
         match step {
-            Step::Fatal(fatal) => return refused(session, fatal, log),
+            Step::Fatal(fatal) => return refused(session, fatal, sleeper, log),
             Step::Failed(why) => return failed(session, why, log),
             Step::Wait { after, note } => {
                 note.iter().for_each(|note| {
@@ -196,14 +209,60 @@ pub fn drive_holding(
     }
 }
 
-/// The end after a refusal for good: the jobs are stopped first, see the module
-/// documentation.
-fn refused(session: &Session<'_>, fatal: Fatal, log: &mut dyn Write) -> Exit {
-    session.wind_down_jobs().iter().for_each(|line| {
-        let _ = writeln!(log, "js-agent: {line}");
-    });
+/// The end after a refusal for good: the runs are left to the next process when it can adopt
+/// them, and stopped first when it cannot, see the module documentation.
+fn refused(
+    session: &mut Session<'_>,
+    fatal: Fatal,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+) -> Exit {
+    match session.drain_plan().filter(|_| session.adoptable()) {
+        Some(plan) => leave_to_next(session, plan, sleeper, log),
+        None => session.wind_down_jobs().iter().for_each(|line| {
+            let _ = writeln!(log, "js-agent: {line}");
+        }),
+    }
     print(session, log);
     Exit::Fatal(fatal)
+}
+
+/// The runs after a refusal for good, when the next process can adopt them: the worker takes
+/// no new job and is asked to park, as in a handover but with no heartbeat (the server would
+/// refuse it), until it parks or [`Drain::wait`] has passed, counted as the waits between the
+/// asks, or a stop request comes. Nothing is stopped.
+fn leave_to_next(
+    session: &mut Session<'_>,
+    plan: Drain,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+) {
+    session.begin_drain();
+    let _ = writeln!(
+        log,
+        "js-agent: the server refused the agent for good: no new job is taken, and the runs \
+         are left running to the next process once no start, stop or check is under way"
+    );
+    let mut waited = Duration::ZERO;
+    loop {
+        if session.park_jobs(PARK_WAIT) != Some(Parked::Busy) {
+            let _ = writeln!(
+                log,
+                "js-agent: handed over: every run is left as it is to the next process"
+            );
+            return;
+        }
+        waited = waited.saturating_add(PARK_WAIT);
+        let stopped = waited < plan.wait && sleeper.sleep(PARK_WAIT) == Wake::Stop;
+        if waited >= plan.wait || stopped {
+            let _ = writeln!(
+                log,
+                "js-agent: handing over: a start, a stop or a check is still under way and is \
+                 left to the next process"
+            );
+            return;
+        }
+    }
 }
 
 /// The end after the worker's end: the containers are stopped without the worker, see the
@@ -315,7 +374,7 @@ fn drain_jobs(
         // What this heartbeat lists is what the server then believes: the drain is done
         // when a heartbeat that listed nothing has been sent.
         let idle = !session.drain_left();
-        let after = match beat(session, log) {
+        let after = match beat(session, sleeper, log) {
             Ok(after) => after,
             Err(exit) => return exit,
         };
@@ -380,7 +439,7 @@ fn hand_runs_over(
     );
     let mut waited = Duration::ZERO;
     loop {
-        let after = match beat(session, log) {
+        let after = match beat(session, sleeper, log) {
             Ok(after) => after,
             Err(exit) => return exit,
         };
@@ -408,11 +467,15 @@ fn hand_runs_over(
 
 /// One heartbeat of a drain or a handover, and the lines it makes: the wait it asks for, or the
 /// end a refusal for good or the end of the worker makes (see the module documentation).
-fn beat(session: &mut Session<'_>, log: &mut dyn Write) -> Result<Duration, Exit> {
+fn beat(
+    session: &mut Session<'_>,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+) -> Result<Duration, Exit> {
     let step = session.tick();
     print(session, log);
     match step {
-        Step::Fatal(fatal) => Err(refused(session, fatal, log)),
+        Step::Fatal(fatal) => Err(refused(session, fatal, sleeper, log)),
         Step::Failed(why) => Err(failed(session, why, log)),
         Step::Wait { after, note } => {
             note.iter().for_each(|note| {

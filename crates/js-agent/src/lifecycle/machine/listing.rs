@@ -1,7 +1,7 @@
 //! Keeps everything a heartbeat lists within the body the server reads.
 //!
 //! The server reads at most [`limits::HEARTBEAT_BODY_BUDGET`] bytes of a heartbeat and
-//! answers a longer one 413 `body-too-large`, which ends the agent. The body holds an
+//! answers a longer one 413 `body-too-large`, which the agent can only retry. The body holds an
 //! envelope (ids, session, phase, taint, exclusive fields), a load, an entry for each
 //! run or job the agent holds, the results it has not had acknowledged, and the job ids
 //! retired on a stop for a job it did not hold. Each part is bounded here:

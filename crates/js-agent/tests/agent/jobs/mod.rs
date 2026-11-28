@@ -66,6 +66,8 @@ mod quiesce;
 #[cfg(target_os = "linux")]
 mod quota_start;
 #[cfg(target_os = "linux")]
+mod refused;
+#[cfg(target_os = "linux")]
 mod session;
 #[cfg(target_os = "linux")]
 mod silence;

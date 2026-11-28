@@ -132,36 +132,37 @@ fn an_invalid_hello_is_not_sent() {
     assert!(sent.borrow().is_empty());
 }
 
-/// Asserts that a refusal asking again cannot change ends the agent at once with the
+/// Asserts that each refusal only an operator can resolve ends the agent at once with the
 /// status and the server's code, after exactly one request, for a hello and for a
-/// heartbeat: 401 with no body, 403 for each admission refusal, and the 4xx for a hello
-/// the server cannot read or serve. It catches an agent that retries a refusal in a loop.
+/// heartbeat: 401 with no body, 403 for each admission refusal and each refusal of a one-time
+/// join token, and 400 `unsupported-protocol`. It catches an agent that retries a refusal in
+/// a loop, and one that drops a code from the operator's list.
 #[test]
 fn refused_hello_is_fatal_per_code() {
-    let cases: Vec<(Reply, u16, &str)> = vec![
+    let mut cases: Vec<(Reply, u16, &str)> = vec![
         (reply(401, Value::Null), 401, "unreadable"),
-        (refused(403, "host-bound"), 403, "host-bound"),
-        (refused(403, "unknown-pool"), 403, "unknown-pool"),
-        (
-            refused(403, "shape-not-accepted"),
-            403,
-            "shape-not-accepted",
-        ),
-        (refused(403, "host-listed"), 403, "host-listed"),
-        (refused(403, "host-contract"), 403, "host-contract"),
-        (
-            refused(403, "execution-mismatch"),
-            403,
-            "execution-mismatch",
-        ),
-        (refused(400, "invalid-hello"), 400, "invalid-hello"),
+        (refused(401, "unauthorised"), 401, "unauthorised"),
         (
             refused(400, "unsupported-protocol"),
             400,
             "unsupported-protocol",
         ),
-        (refused(413, "body-too-large"), 413, "body-too-large"),
     ];
+    for code in [
+        "host-bound",
+        "unknown-pool",
+        "shape-not-accepted",
+        "host-listed",
+        "host-contract",
+        "execution-mismatch",
+        "join-token-expired",
+        "join-token-used",
+        "join-token-instance",
+        "join-token-not-admitted",
+        "join-token-credential-required",
+    ] {
+        cases.push((refused(403, code), 403, code));
+    }
     for (answer, status, code) in cases {
         let (mut transport, sent) = script(vec![answer]);
         let mut session = Session::new(hello("h1"), &mut transport, lowest());
@@ -179,7 +180,11 @@ fn refused_hello_is_fatal_per_code() {
     for (answer, status, code) in [
         (reply(401, Value::Null), 401, "unreadable"),
         (refused(403, "host-bound"), 403, "host-bound"),
-        (refused(400, "invalid-heartbeat"), 400, "invalid-heartbeat"),
+        (
+            refused(403, "join-token-not-admitted"),
+            403,
+            "join-token-not-admitted",
+        ),
     ] {
         let (mut transport, sent) = script(vec![welcome(1), answer]);
         let mut session = Session::new(hello("h1"), &mut transport, lowest());
@@ -194,6 +199,102 @@ fn refused_hello_is_fatal_per_code() {
         };
         assert_eq!(session.tick(), Step::Fatal(fatal));
         assert_eq!(sent.borrow().len(), 2);
+    }
+}
+
+/// The 4xx answers no operator of the host has to act on: what a server rolled back,
+/// misrouted or half deployed answers for a while.
+fn passing_refusals() -> Vec<(Reply, u16, &'static str)> {
+    vec![
+        (refused(404, "not-found"), 404, "not-found"),
+        (reply(404, Value::Null), 404, "unreadable"),
+        (refused(400, "invalid-hello"), 400, "invalid-hello"),
+        (refused(400, "invalid-heartbeat"), 400, "invalid-heartbeat"),
+        (refused(400, "unreadable-thing"), 400, "unreadable-thing"),
+        (refused(413, "body-too-large"), 413, "body-too-large"),
+        (refused(422, "unprocessable"), 422, "unprocessable"),
+        (refused(403, "forbidden"), 403, "forbidden"),
+        (reply(403, Value::Null), 403, "unreadable"),
+        (refused(410, "gone"), 410, "gone"),
+        (refused(405, "not-allowed"), 405, "not-allowed"),
+        (
+            refused(404, "unsupported-protocol"),
+            404,
+            "unsupported-protocol",
+        ),
+        (refused(404, "host-bound"), 404, "host-bound"),
+    ]
+}
+
+/// Asserts that every 4xx that names nothing an operator must change is retried with the
+/// session's backoff and keeps the session: a hello answered so is sent again after the
+/// backoff, and a heartbeat answered so is followed, after the backoff, by a heartbeat of the
+/// same epoch and secret (no new hello), whose acceptance ends the run of failures. The cases
+/// are 404 (with a code and with no body), 400 `invalid-hello`, `invalid-heartbeat` and an
+/// unknown code, 413 `body-too-large`, 422, 410, 405, a 403 with an unknown code or no body,
+/// and a fatal code under a status the server never sends it with. It catches an agent that
+/// ends, and stops every job on every host, because a server answered 404 for a minute.
+#[test]
+fn answers_no_operator_must_act_on_are_retried_and_keep_the_session() {
+    for (answer, status, code) in passing_refusals() {
+        let (mut transport, sent) = script(vec![answer, welcome(1)]);
+        let mut session = Session::new(hello("h1"), &mut transport, lowest());
+        let step = session.tick();
+        let reason = Reason::Status {
+            status,
+            code: code.to_owned(),
+        };
+        let retrying = Note::Retrying {
+            what: "hello",
+            reason,
+        };
+        assert_eq!(note(&step), Some(retrying), "hello {status} {code}");
+        assert_eq!(wait(&step), ms(500), "hello {status} {code}");
+        let welcomed = note(&session.tick());
+        assert!(
+            matches!(welcomed, Some(Note::Registered { epoch: 1, .. })),
+            "hello {status} {code}: {welcomed:?}"
+        );
+        assert_eq!(paths(&sent), [HELLO_PATH, HELLO_PATH], "{status} {code}");
+    }
+    for (answer, status, code) in passing_refusals() {
+        let replies = vec![
+            welcome(1),
+            answer.clone(),
+            answer,
+            beat_ok(),
+            refused(500, "x"),
+        ];
+        let (mut transport, sent) = script(replies);
+        let mut session = Session::new(hello("h1"), &mut transport, lowest());
+        let steps = ticks(&mut session, 5);
+        let reason = Reason::Status {
+            status,
+            code: code.to_owned(),
+        };
+        let retrying = Note::Retrying {
+            what: "heartbeat",
+            reason,
+        };
+        assert_eq!(note(&steps[1]), Some(retrying), "heartbeat {status} {code}");
+        let backoff = (wait(&steps[1]), wait(&steps[2]), wait(&steps[4]));
+        assert_eq!(backoff, (ms(500), ms(1000), ms(500)), "{status} {code}");
+        assert_eq!(
+            paths(&sent),
+            [
+                HELLO_PATH,
+                HEARTBEAT_PATH,
+                HEARTBEAT_PATH,
+                HEARTBEAT_PATH,
+                HEARTBEAT_PATH
+            ],
+            "{status} {code}"
+        );
+        let sent = sent.borrow();
+        for (_, beat) in &sent[1..] {
+            assert_eq!(beat["epoch"], 1, "{status} {code}");
+            assert_eq!(beat["session"], SECRET, "{status} {code}");
+        }
     }
 }
 
@@ -324,7 +425,9 @@ fn an_unsupported_protocol_refusal_carries_the_servers_majors() {
 
 /// Asserts that the code of a refusal is shown only when it is a plain code: text with a
 /// space, a code over the wire's length and an empty one read as `unreadable`, so a server
-/// cannot put its own text in the agent's log.
+/// cannot put its own text in the agent's log; both in a refusal that ends the agent (a 401)
+/// and in one the agent retries (a 403 whose code it cannot read, which names nothing an
+/// operator must change).
 #[test]
 fn a_refusal_code_that_is_not_a_code_is_not_repeated() {
     let long = "a".repeat(65);
@@ -335,17 +438,19 @@ fn a_refusal_code_that_is_not_a_code_is_not_repeated() {
         json!({ "error": 7 }),
         json!({}),
     ] {
-        let (mut transport, _) = script(vec![reply(403, body)]);
+        let (mut transport, _) = script(vec![reply(401, body.clone()), reply(403, body)]);
         let mut session = Session::new(hello("h1"), &mut transport, lowest());
         let Step::Fatal(fatal) = session.tick() else {
-            panic!("a 403 ends the agent");
+            panic!("a 401 ends the agent");
         };
         assert_eq!(fatal.code, "unreadable");
         let shown = fatal.to_string();
         assert_eq!(
             shown,
-            "the server refused the hello with status 403 (unreadable); not retrying"
+            "the server refused the hello with status 401 (unreadable); not retrying"
         );
+        let retried = note(&session.tick()).expect("a retry is noted");
+        assert_eq!(retried.to_string(), "hello failed: status 403 (unreadable)");
     }
 }
 

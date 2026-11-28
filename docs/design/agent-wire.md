@@ -139,10 +139,14 @@ most 5 s; at most 200 ms when the beat lists a job `starting` that a hold first 
 heartbeat at once ([held-beat.md](held-beat.md)). For a host that polls dispatch, a placement ends the hold and a beat with such a
 start (one listed `starting`, however long) is answered at once (or, after another such answer less than 200 ms before, at the end
 of those 200 ms), both without `beat_now`, so the agent's next heartbeat leaves when its worker has news. On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
-says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session.rs`). Every other 4xx except
-403 `pool-full`, 408 and 429 is fatal: 401, 413 `body-too-large`, 400 `invalid-hello` or `invalid-heartbeat`, `unsupported-protocol`
-and the other 403s end the session and the agent exits with status 2, because the same message would be refused again (the test
-`refused_hello_is_fatal_per_code` holds each code to its outcome). The retryable answers (403 `pool-full`, 408, 429, every 5xx) and a
+says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session/verdict.rs`). Only the refusals
+an operator must resolve are fatal: 401, the 403s `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `host-contract`,
+`execution-mismatch` and those of a one-time join token (`join-token-expired`, `-used`, `-instance`, `-not-admitted`,
+`-credential-required`), and 400 `unsupported-protocol`. They end the session and the agent exits with status 2, leaving its running
+jobs to its next process to adopt as at an update's stop (`crates/js-agent/src/run.rs`); the tests `refused_hello_is_fatal_per_code`
+and `answers_no_operator_must_act_on_are_retried_and_keep_the_session` hold each code to its outcome. Every other answer is retried
+and keeps the session: 404, 413 `body-too-large`, 422, 400 `invalid-hello` or `invalid-heartbeat`, any other 403, 403 `pool-full`,
+408, 429 and every 5xx, since a server rolled back, misrouted or half deployed answers them for a while. The retried answers and a
 server that cannot be reached wait a jittered time between half and all of a ceiling that doubles from 1 s (`BASE`) to 60 s (`CAP`),
 raised to a server's `Retry-After` but never past `RETRY_AFTER_CAP` 120 s (`Backoff::next`, `crates/js-agent/src/backoff.rs`; the
 constant is in `crates/js-agent-wire/src/lib.rs`).
@@ -179,7 +183,7 @@ that has no result as it is, so neither loses nor restarts it, and the first lis
 (`Lifecycle::fit`). With no retired id waiting for the server's record, the oldest result always fits. Before any result waits, the agent cuts log tails to fit all of them, by halving and then dropping them (`Lifecycle::fit_log_tails` in
 `crates/js-agent/src/lifecycle/machine/tails.rs`), and notes a `log-tail-cut` and a `log-tail-shed` finding, once each for a run,
 in its log. So a beat the agent builds stays within the body. The lease server counts each hello and heartbeat it refuses 413 `body-too-large` under `js_agent_bodies_too_large_total`, by
-route (`crates/js-lease-server/src/metrics.rs`), since the agent ends at that answer and cannot report it.
+route (`crates/js-lease-server/src/metrics.rs`), since the agent only retries such a beat and cannot report it.
 
 **The rule for change** (`crates/js-agent-wire/src/protocol.rs` and the crate's "Compatibility rule"): servers upgrade before
 agents. Within a major, fields are only added; a receiver ignores fields it does not know; a field a sender may leave out has a
@@ -426,7 +430,7 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
   `optional`, and a negative `exit_code` costs 10 bytes as `int32` unless it is `sint32`. Either the domain code moves onto the
   generated types or a hand-written mapping layer joins them to today's types; both are new code to get wrong.
 - *Compatibility.* The server reads every body as JSON today, so a new agent that sends protobuf to an older server is answered
-  400 `invalid-hello` or `invalid-heartbeat`, which the agent treats as fatal and exits 2 (`session.rs`). An agent must therefore
+  400 `invalid-hello` or `invalid-heartbeat`, which the agent retries for ever (`session.rs`). An agent must therefore
   not switch until it knows the server reads protobuf: a hello capability and a new optional welcome field, or a second route.
   JSON stays served for as long as any agent of an earlier release runs. Dropping JSON later removes a shipped encoding, which the
   rule of section 1 allows only as a new major, and `negotiate` then drops every major-1 agent from that server.
@@ -444,9 +448,9 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
 - *Live update.* Server learns protobuf first and answers each request in the encoding it was sent in; agents switch only after the
   server says it reads protobuf; both encodings are served across every rolling update until the last JSON agent is gone. A server
   rolled back to a release without protobuf is the hard case: an agent that already switched sends its next heartbeat in protobuf,
-  the older server reads it as JSON and answers 400 `invalid-heartbeat`, and the agent exits 2 before any welcome could renegotiate.
+  the older server reads it as JSON and answers 400 `invalid-heartbeat`, and the agent retries the same body before any welcome could renegotiate.
   So the choice of encoding would have to be per session (reset to JSON at every hello, chosen again from each welcome), and the
-  agent would have to answer a 400 to a protobuf heartbeat by saying hello again in JSON instead of ending; or a server rollback
+  agent would have to answer a 400 to a protobuf heartbeat by saying hello again in JSON instead of retrying it; or a server rollback
   across that release would be declared unsupported. The design does not decide this (open point 8).
 
 **(C) A gRPC stream per agent (push instead of poll).**

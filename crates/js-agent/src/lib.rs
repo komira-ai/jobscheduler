@@ -118,7 +118,7 @@
 //! | `--gpu-env <name>=<value>` | (Linux build only) a variable set in a `crun` GPU job's environment, over the image's of that name, such as the library path; repeatable; the name `[A-Z_][A-Z0-9_]*`, not starting with `JS_`, given once; needs `--gpu-device` |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci, for a job's image and its image layers; the container engine pulls as `--container-pull` says and do not read it. `--image-allow-loopback <127.0.0.1:port/prefix>` (or `[::1]:port/prefix`) is an entry for a registry on the host's own loopback, pulled over plain http; repeatable, the crun runtime only, and a host that is not a loopback address or an entry without a port is refused at start. A Mac agent with `--bundle-store` also reads it: a start named by its image must be on an entry or it is refused `image-not-allowed`, and `--bundle-pull missing` fetches by it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; not with `--no-jobs` |
-//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; also the longest a stop asked to hand the runs over waits for the starts, stops and post-job checks under way (see [`lifecycle::handover`]); not with `--no-jobs` |
+//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; also the longest a stop asked to hand the runs over, or a refusal for good, waits for the starts, stops and post-job checks under way (see [`lifecycle::handover`]); not with `--no-jobs` |
 //! | `--settle-ms <milliseconds>` | (Linux build only) how long the agent lets the host settle before it counts what it sees against a job: a process of a job's user is a job's leftover (`process-as-job-user`) only when it is still there this long after the check first saw it (the processes and mounts the host adds of its own are logged, not judged), and a running run whose control group the runtime cannot name taints the host as unchecked (`cgroup-not-found`, which clears itself) only when it is still so this long after the first step that saw it and its container's first process then runs in another group; a host's own short-lived processes and mounts at the moment a job ends, a container not made yet, and a container read as running after it exited and its group was removed, are neither. By default 1000, from 1 to 60000; not with `--no-jobs` |
 //! | `--taint-recheck-ms <milliseconds>` | (Linux build only) how long the agent waits between the re-checks of a taint it may clear itself: a taint that a check judged (`residue` of a process of a job's user, `process-as-job-user`, or `unchecked` for the process table the check could not read, or for a run whose container group was not found, `cgroup-not-found`) is re-checked while no run is held, and so is a marker an older agent wrote for a check that no longer taints (`daemonised-child`, `new-mount`, `user-changed`, `group-changed`, `kernel-module-changed`, `watch-dir-changed`: a re-check of it passes unless a job's process is left), and ends after two clean re-checks this far apart and the server's acknowledgement of the clear; the marker is then kept as `taint.json.cleared-<unix seconds>` and the clear is logged (`taint-cleared`). A process still there keeps the host tainted. A residue of a post-job check read from the marker when the agent starts is re-checked too, with one rule that needs no baseline (a process of the job users' range is a finding even if the restart baseline holds it; one whose parent is `init` in a control group a job can be in is only noted); any other taint read from the marker stays. `cleanup-failed`, `check-owed`, `host-job` and an unreadable marker are never cleared by the agent. What a re-check notes (a change of mounts, users, groups, modules or a watched directory) is logged and does not fail it. By default 60000, from 1 to 3600000; not with `--no-jobs` |
 //! | `--silence-stop <seconds>` | how long the agent runs its jobs while it hears nothing from the server (contact is a welcome or a heartbeat reply it accepted, one its worker had no room for included, counted on the agent's monotonic clock from the last of them, or from the agent's start before the first): then it stops every job it holds as a stop from the server would (SIGTERM, the stop grace, the kill; a native run's job group signalled and its processes ended after the grace), retires each job's fence (job id and allocation id, in the state root before the stop is reported, so a start of it never runs again here, after a restart too) and reports each `killed` with the detail `silence-stop`; once for each silence. By default 300 (twenty times the server's default grace of 15 s, and more than the 140 s a server restart costs a well agent beside the restart's own time: one heartbeat interval, the 120 s cap on `Retry-After` and the old session's grace), from 1 to 7200; no value turns the stop off. It must be above the stop grace plus the server's default grace (status 2 at start otherwise: a `--stop-grace` of 285 or more needs a longer `--silence-stop`), and a welcome whose grace plus the stop grace is not below it ends the agent (status 1, naming the flag). It runs only while the agent runs; a native run does not outlive the agent's process. Not with `--no-jobs` |
@@ -212,22 +212,21 @@
 //! and sends the session secret the server issued in every heartbeat. A server that lost
 //! the session (it restarted) gets one hello at once.
 //!
-//! A refusal that asking again cannot change ends the agent with exit status 2 and the
-//! server's code on stderr (an agent that runs jobs first stops the runs it holds, bounded,
-//! and the results it could not send are lost; the same when the job worker stops, which
-//! ends it with status 1, except that the stop does not go through the worker; a run that
-//! could not be stopped is named on stderr, and the agent relies on its supervisor and on the
-//! next process adopting it, so the supervisor must restart
-//! the agent after every exit, status 0 and 2 included: with systemd that is
-//! `Restart=always` and no `RestartPreventExitStatus=2`, because a refusal exits with 2
-//! and a SIGTERM with 0, and `Restart=on-failure` would leave the leftovers of either
-//! unsupervised; see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
-//! `host-contract`, `execution-mismatch`, `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
-//! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
-//! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
-//! has room again when a host leaves, so the agent waits and asks again. Everything else
-//! (409 `host-live`, 408, 429, 5xx, a server that cannot be reached) waits with a capped,
-//! jittered backoff ([`Backoff`](crate::Backoff)), longer when the server sent
+//! A refusal that only the operator can resolve ends the agent with exit status 2 and the
+//! server's code on stderr: 401 (the token), the 403 refusals of the pool and of the host's
+//! admission (`unknown-pool`, `shape-not-accepted`, `host-contract`, `execution-mismatch`,
+//! `host-bound`, `host-listed`) and of a one-time join token (`join-token-*`), and 400
+//! `unsupported-protocol` (see [`Session`]). An agent that runs jobs stops none then: it takes
+//! no new job, waits until no start, stop or post-job check is under way (at most
+//! `--drain-wait`) and exits leaving every run to its next process, as at an update's stop.
+//! So the supervisor must restart the agent after every exit, 0 and 2 included: with systemd
+//! `Restart=always` and no `RestartPreventExitStatus=2` (`Restart=on-failure` would leave the
+//! runs of either unsupervised; a job worker that stops ends the agent with status 1, see
+//! [`drive`]). Every other answer is retried and the session kept (404, 413, 422, a 400
+//! `invalid-hello` or `invalid-heartbeat`, any other 403, `pool-full`, 409 `host-live`, 408,
+//! 429, 5xx, no answer): a server rolled back, misrouted or half deployed answers such codes
+//! for a while, and ending on them would end every host's agent at once. The agent waits with
+//! a capped, jittered backoff ([`Backoff`](crate::Backoff)), longer when the server sent
 //! `Retry-After`, up to a bound.
 //!
 //! SIGTERM and SIGINT make the agent send a heartbeat with the phase `draining` and exit

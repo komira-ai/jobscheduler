@@ -215,7 +215,7 @@ pub(super) fn full_load() -> NodeLoad {
 /// 96 held runs with 128-byte ids, a load at every cap, and the 8 finished runs whose
 /// tails are full of control characters (six times as large once serialised), after the
 /// agent has shed what does not fit. A server answers a beat over the body limit with 413,
-/// which ends the agent, so this is the line between a noisy job and a dead agent. It
+/// which the agent can only retry, so this is the line between a noisy job and a silent agent. It
 /// catches a results budget that leaves too little room for the load and the held list
 /// (the first one, 40 KiB for the results alone, fails it).
 #[test]

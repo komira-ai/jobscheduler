@@ -75,11 +75,16 @@
 //!
 //! The thread is never joined, so a worker that is stuck cannot keep the process from
 //! ending. An agent that ends for a reason other than a stop request must still not leave a
-//! container with nobody to enforce its wall limit:
+//! container with nobody to enforce its wall limit. After a refusal for good the agent parks
+//! the worker ([`Worker::park`]) and leaves the runs to its next process, which the
+//! supervisor starts and which adopts them and enforces their limits (see `crate::run`).
+//! Only a session with no state root to hand over in, which no next process can take the
+//! runs from, stops them, and so does every agent after the worker's end:
 //!
-//! - After a refusal for good the worker is alive: [`Worker::wind_down`] closes it, asks it
-//!   to stop every run and waits until none is running or the worker has ended, for at
-//!   most the stop grace plus [`WIND_DOWN_MARGIN`] (and never past the [`Rescue`] bound).
+//! - After a refusal for good in such a session the worker is alive: [`Worker::wind_down`]
+//!   closes it, asks it to stop every run and waits until none is running or the worker has
+//!   ended, for at most the stop grace plus [`WIND_DOWN_MARGIN`] (and never past the
+//!   [`Rescue`] bound).
 //!   What is still running then is stopped by the [`Rescue`] below. The results of the
 //!   stopped runs are not sent: the server no longer takes them, and they may be lost.
 //! - After the worker's end the worker cannot be asked. [`Worker::rescue`] closes the
@@ -729,11 +734,11 @@ impl Worker {
         let _ = self.handle.orders.try_send(Order::Nudge);
     }
 
-    /// The end after a refusal for good: closes the worker, asks it to stop every run and
-    /// waits until none is running or the worker has ended, for at most the stop grace and
-    /// [`WIND_DOWN_MARGIN`] (and the [`Rescue`] bound, when that is shorter); a worker that
-    /// ended, or runs that still run then, are stopped by [`Worker::rescue`]. The lines say
-    /// what could not be stopped.
+    /// The end after a refusal for good with no state root to hand over in: closes the
+    /// worker, asks it to stop every run and waits until none is running or the worker has
+    /// ended, for at most the stop grace and [`WIND_DOWN_MARGIN`] (and the [`Rescue`] bound,
+    /// when that is shorter); a worker that ended, or runs that still run then, are stopped
+    /// by [`Worker::rescue`]. The lines say what could not be stopped.
     pub fn wind_down(&self) -> Vec<String> {
         self.close();
         self.stop_all();
@@ -919,6 +924,10 @@ fn work(
             }
             Ok(Order::Settle(done)) => settle = Some(done),
             Ok(Order::Park(done)) => {
+                // A park follows a step: a process that adopted runs and is refused at its
+                // first hello parks within the first wait, and its step stops a run past its
+                // wall limit, which then holds the park until it is stopped.
+                lines.extend(describe(&life.step()));
                 if park::park(&life, shared, &done, inbox) {
                     return;
                 }

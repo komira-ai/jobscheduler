@@ -121,6 +121,11 @@ process, on a stop and after a crash, so the supervisors and the containers outl
 - **An update** hands the jobs over instead (see "Agent updates while jobs run" below): the agent
   hands over in place, or exits within seconds, leaving every job running, and the new agent takes
   them over as after a crash.
+- **A refusal for good** (401, a renamed pool, a token past its time: only the answers an
+  operator must resolve) hands the jobs over too: the agent takes no new job, waits up to
+  `--drain-wait` for a start, stop or check under way, and exits 2 leaving every job running;
+  `Restart=always` starts it again and the new process takes them over as after a crash. Any
+  other answer of the server (a 404, a 400, a 5xx) is retried, and the jobs run on.
 - **A crash** leaves the jobs running. When `Restart=always` starts the agent again, it reads its
   ledger and takes over (adopts) each container its record holds, then lists those jobs in its
   first heartbeat. A job that ended while no agent ran is reported with the code and output tail

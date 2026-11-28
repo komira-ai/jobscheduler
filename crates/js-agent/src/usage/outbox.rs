@@ -10,13 +10,13 @@
 //! # What becomes of a taken load
 //!
 //! - [`Outbox::delivered`]: the server answered 2xx. The minutes are its now.
-//! - [`Outbox::failed`]: the beat did not reach the server, or the server asked to be tried
-//!   again later (a transport error, a conflict, 408, 429, 5xx). The minutes are kept and
-//!   ride on a later beat, once.
-//! - [`Outbox::refused`]: the server answered a 4xx that no retry changes (the message
-//!   itself is refused, `invalid-heartbeat` among them). The minutes are dropped and
-//!   counted: resending the same bytes would be refused again for ever, and the session
-//!   ends on such an answer anyway.
+//! - [`Outbox::failed`]: the beat did not reach the server, or the session retries the answer
+//!   (a transport error, a conflict, 408, 429, 5xx, and every 4xx that does not end the
+//!   agent, `invalid-heartbeat` among them). The minutes are kept and ride on a later beat,
+//!   once.
+//! - [`Outbox::refused`]: the server answered a refusal that ends the agent (a 401, say). The
+//!   minutes are dropped and counted: the session ends on such an answer, and no later beat
+//!   of this process carries them.
 //!
 //! # At least once
 //!
