@@ -828,6 +828,8 @@ mod logs;
 mod metrics;
 pub mod network;
 mod node_rows;
+mod orphan_api;
+mod orphans;
 mod per_job;
 mod platform;
 mod poller;

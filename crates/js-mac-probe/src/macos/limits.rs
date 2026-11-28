@@ -104,10 +104,12 @@ fn fsize(exe: &Path, path: &Path) -> Probe {
     signal(exec::describe(probe, "", &outcome), "", &outcome)
 }
 
-/// Asserted: macOS does not enforce `RLIMIT_AS` or `RLIMIT_DATA` (and `RLIMIT_RSS` is
-/// `RLIMIT_AS` there). `setrlimit` accepts both at 64 MiB, and the child then allocates and
-/// writes 512 MiB. Fails when `setrlimit` refuses or a release starts enforcing them, either
-/// of which changes what `mac-runtime.md` says a memory cap can be built from.
+/// Asserted: `RLIMIT_AS` and `RLIMIT_DATA` give no memory cap on macOS (and `RLIMIT_RSS` is
+/// `RLIMIT_AS` there). The child sets both to 64 MiB and then allocates and writes 512 MiB.
+/// The claim holds either way macOS answers: it refuses the limit itself (`EINVAL`, as the
+/// hosted macOS 15 runner does), or it takes the limit and the whole allocation succeeds.
+/// It fails when the allocation is refused under the limit, the one answer that would change
+/// what `mac-runtime.md` says a memory cap can be built from, and on any other failure.
 fn as_not_enforced(exe: &Path) -> Probe {
     let outcome = child(
         exe,
@@ -119,10 +121,15 @@ fn as_not_enforced(exe: &Path) -> Probe {
             &MEMORY_ALLOCATE.to_string(),
         ],
     );
-    let held = outcome.ok && field(&outcome.stdout, "allocated") == Some(MEMORY_ALLOCATE);
-    let probe = Probe::asserted("limits/as-not-enforced", held)
+    let limit_refused = outcome.refused()
+        && outcome
+            .stderr
+            .starts_with(&format!("errno={} ", libc::EINVAL));
+    let allocated = outcome.ok && field(&outcome.stdout, "allocated") == Some(MEMORY_ALLOCATE);
+    let probe = Probe::asserted("limits/as-not-enforced", limit_refused || allocated)
         .fact("limit_bytes", MEMORY_LIMIT)
-        .fact("allocate_bytes", MEMORY_ALLOCATE);
+        .fact("allocate_bytes", MEMORY_ALLOCATE)
+        .fact("limit_refused", limit_refused);
     signal(exec::describe(probe, "", &outcome), "", &outcome)
 }
 

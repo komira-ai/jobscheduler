@@ -605,7 +605,10 @@ fn busy_reply() -> HeartbeatReply {
         }))
     });
     let stops = (0..96).map(|i| stop(&wide(i)));
-    let job_stops = (100..196).map(|i| Command::JobStop { job_id: wide(i) });
+    let job_stops = (100..196).map(|i| Command::JobStop {
+        job_id: wide(i),
+        reason: None,
+    });
     HeartbeatReply {
         commands: starts.chain(stops).chain(job_stops).collect(),
         result_acks: (0..96)
@@ -625,6 +628,7 @@ fn busy_reply() -> HeartbeatReply {
             })
             .collect(),
         retired_acks: (300..396).map(wide).collect(),
+        unknown_jobs: (400..496).map(wide).collect(),
         log_grant: None,
         beat_now: true,
     }

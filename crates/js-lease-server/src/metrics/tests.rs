@@ -164,6 +164,9 @@ async fn fixture(name: &str) -> Fixture {
     (0..2).for_each(|_| recorder.curve_wait_expired());
     recorder.agent_body_too_large(AgentRoute::Hello);
     (0..2).for_each(|_| recorder.agent_body_too_large(AgentRoute::Heartbeat));
+    recorder.unknown_jobs_found(&host_a, 3);
+    recorder.unknown_jobs_found(&host_a, 2);
+    (0..2).for_each(|_| recorder.unknown_listing_guarded(&host_b));
     let answers = [
         CallbackAnswer::Delivered,
         CallbackAnswer::Abandoned,
@@ -902,8 +905,14 @@ async fn a_failed_read_of_the_job_tables_answers_503() {
         .with_ansi(false)
         .finish();
     let _scope = tracing::subscriber::set_default(subscriber);
-    // The jobs fit in one page of the server's size, so the second read is the allocations'.
-    for reads in [0, 1] {
+    // Each read the scrape makes (the jobs, the callbacks, the hosts' rows and their orphans,
+    // the allocations), failed in turn, answers the same.
+    fixture.rig.store.take_reads();
+    let (status, _, _) = answer(&fixture, from(Some("127.0.0.1:1"), "/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    let total = fixture.rig.store.take_reads().len();
+    assert!(total >= 3, "the scrape read {total} times");
+    for reads in 0..total {
         fixture.rig.store.fail_read_after(reads);
         let (status, _, body) = answer(&fixture, from(Some("127.0.0.1:1"), "/metrics")).await;
         let expected = (
@@ -914,7 +923,7 @@ async fn a_failed_read_of_the_job_tables_answers_503() {
     }
     let text = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 2, "{text}");
+    assert_eq!(lines.len(), total, "{text}");
     for line in lines {
         assert!(
             line.contains("a scrape could not read the job tables"),

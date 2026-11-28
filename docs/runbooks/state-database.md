@@ -137,10 +137,19 @@ What the server does by itself, and what to check:
 - **`/healthz`** answers 200 while the tick loop runs and the store answers. Two servers on one store both answer 200; which one placed
   a job is in the job's own record.
 - **Agents come back.** Their first heartbeat is answered 409 `unknown-host`; they say hello again and list the jobs they hold.
-- **Jobs the restored store does not know are stopped.** A host that lists a job the restored job store has no live allocation for on
-  that host (one accepted after the backup) is told to stop it, on every heartbeat while it lists the job; the job's result is
-  acknowledged `STALE`, no row is made for it, and it is never revived. Such a host takes no new start until a listing of it is clean.
-  A job the restored store holds, on the host its allocation names, keeps its state and its allocation.
+- **Jobs the restored store does not know are kept running, not stopped.** A host that lists a job the restored job store holds no
+  record of (one accepted after the backup) is told to stop nothing for it: each heartbeat reply names it in `unknown_jobs`, the host's row
+  keeps it as an orphan with the time it was first listed, and the job runs on until it ends on the host (its result is acknowledged
+  `STALE`, no row is made for it, and it is never revived), until it has been listed for longer than `--max-job-wall`, or until an
+  operator ends it (`docs/runbooks/orphan-jobs.md`). Such a host takes no new start until a listing of it is clean, and the host listing
+  shows its `orphans`. A host whose listing is mostly such jobs is told by its heartbeat replies to stop nothing at all, a cancel the
+  restored store holds included (a stop already in the host's dispatch queue is still handed out), no orphan of it is ended at
+  `--max-job-wall`, and the server logs an error and counts it (`js_unknown_listing_guarded_total`): look at the restore before
+  anything else. A job the restored store holds, on the host its allocation names, keeps its state and its allocation.
+- **The agents' own limit while the server is down.** The jobs survive the outage of the restore only as long as each agent's
+  `--silence-stop` (300 s by default): an agent that has not heard the server for that long stops every job it holds, before any of
+  the above applies. Keep the server's outage shorter than that, or raise `--silence-stop` on the agents first, until the agent keeps
+  its running jobs through a silence (komira-ai/jobscheduler#1278).
 - **Nothing is booked twice.** Placement rebuilds every host's bookings from the restored allocation table before it places, so a
   host whose restored allocation is live is not placed on beyond it, and a host still running a forgotten job is not counted until it
   stops listing it.
@@ -150,8 +159,8 @@ What the server does by itself, and what to check:
   the backup read 404 until resubmitted.
 - **Runs.** A run an older agent's host lists is answered `Cancel`: the server holds none.
 
-The test that restores an older job store under live agents and asserts the stop, the bookings and the ids is
-`restart::a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id` in `crates/js-lease-server/tests/server/restart.rs`.
+The test that restores an older job store under live agents and asserts that nothing is stopped, the bookings and the ids is
+`restart::a_restored_older_job_store_keeps_unknown_jobs_running_and_reissues_no_id` in `crates/js-lease-server/tests/server/restart.rs`.
 
 ## 6. Moving the job store between its file and the store
 

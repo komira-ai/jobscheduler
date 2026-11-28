@@ -122,8 +122,15 @@ next push that ships code. Nothing runs on a timer.
    on a hosted Mac through hostkeeper's installer and the update hook, then updated). A test that
    failed, or was skipped, holds it back: a release whose apt jobs are off (no settings, so
    `check-apt` is skipped) deploys nothing. So does a build farm that cannot be reached: nothing is
-   deployed until it answers and the failed jobs are re-run. `cargo test -p xtask --test
-   release_workflow` holds the job, the jobs around it and the suite to this.
+   deployed until it answers and the failed jobs are re-run. `blackbox`, `cp-deploy-digest` and
+   `cp-deploy` each start their `if:` with `!cancelled() && !failure()` and name every job they
+   wait for by `needs.<job>.result == 'success'`: GitHub's implied `success()` is false when any
+   job up the chain was skipped, and the apt jobs' retry slots under `check-apt` are skipped on
+   every release whose first write meets no conflict, so a job that left it to the implied
+   `success()` would never run. `cargo test -p xtask --test release_workflow` holds the job, the
+   jobs around it and the suite to this, and runs release scenarios (a normal release, an apt
+   conflict resolved by a retry slot, a failed or skipped black-box test, a failed gate) through
+   a model of that rule (`skip_rule`).
 9. `cp-deploy-digest` and `cp-deploy` (off until their variables are set, below), once `blackbox`
    passed, deploy the release's
    linux-x86_64 image of `js-lease-server` to the control plane's Docker Swarm service `js-server`
@@ -962,7 +969,7 @@ whose upload did not finish is deleted before it is uploaded again.
 |---|---|---|
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
 | An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
-| `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted, and `blackbox` fails, so neither `desired` nor the control-plane deploy runs: hosts and the control plane keep their version. Fix forward: the next release supersedes it in `testing`. |
+| `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted, and `blackbox` is skipped, so neither `desired` nor the control-plane deploy runs: hosts and the control plane keep their version. Fix forward: the next release supersedes it in `testing`. |
 | `beta-macos-pkg`, `beta-macos-first-install` or another black-box test failed, or `blackbox` itself (its build on the build farm) did | The release is published (and in `stable` when `check-apt` passed), but not deployed: the farm and the control plane keep their version; RELEASE-RED is open | Fix forward with a new push, or re-run the failed jobs (once the build farm answers, when it was the cause): `blackbox` runs again, and `desired` and the control-plane deploy follow when it passes. |
 | Another beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the four beta jobs `promote-macos` needs pass. |
 | A run that `turn` gave the turn failed after it, and a newer release has been published since | The failed run is older than what is deployed | Do not re-run its failed jobs: a re-run keeps its `turn`, and its `gamma` or control-plane deploy would move those back to the older version (`desired` checks and starts nothing for an older release, so hostkeeper is not moved). Fix forward. |

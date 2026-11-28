@@ -42,7 +42,7 @@ use crate::logs::{Scope, SinkTemplate, StoreClock as LogClock};
 
 #[path = "agent_api_job_rig_replies.rs"]
 mod replies;
-pub(crate) use replies::{starts, stops};
+pub(crate) use replies::{starts, stop_reasons, stops};
 
 #[path = "agent_api_job_rig_logs.rs"]
 mod logging;

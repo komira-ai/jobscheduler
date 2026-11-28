@@ -48,7 +48,7 @@ use axum::http::StatusCode;
 use js_agent_wire::NodeLoad;
 use js_agent_wire::{Heartbeat, Hello, Welcome};
 use js_jobs::{
-    Beat, JobId, JobStoreError, LoadReading, NodeHello, NodeRow, NodeState, SessionDigest,
+    Beat, JobId, JobStoreError, LoadReading, NodeHello, NodeRow, NodeState, Orphan, SessionDigest,
 };
 use js_registry::{NodeSession, Refusal, session_digest};
 use js_types::HostId;
@@ -318,16 +318,22 @@ fn reading(load: &NodeLoad) -> LoadReading {
 }
 
 /// Records in `row`, at the version the beat wrote, what its applied listing left: the first
-/// listing since the hello is applied, whether the listing was `clean`, and the confirmed
-/// containers `missing` left out by applied beats in a row. When a newer beat or hello moved
-/// the row first, nothing is written, and that one's own write stands. A write that fails is
-/// logged: the flag stays as it was, and the next beat's listing (the agent's whole account)
-/// is judged as the first again.
-pub(super) fn settle(jobs: &ServerJobs, row: &NodeRow, clean: bool, missing: BTreeMap<JobId, u32>) {
+/// listing since the hello is applied, whether the listing was `clean`, the confirmed
+/// containers `missing` left out by applied beats in a row, and the host's `orphans`. When a
+/// newer beat or hello moved the row first, nothing is written, and that one's own write
+/// stands. A write that fails is logged: the flag stays as it was, and the next beat's listing
+/// (the agent's whole account) is judged as the first again.
+pub(super) fn settle(
+    jobs: &ServerJobs,
+    row: &NodeRow,
+    clean: bool,
+    (missing, orphans): (BTreeMap<JobId, u32>, BTreeMap<String, Orphan>),
+) {
     let state = NodeState {
         first_listing_pending: false,
         last_listing_clean: clean,
         missing_in_a_row: missing,
+        orphans,
         ..row.record.state.clone()
     };
     if let Err(error) = jobs.settle_node(row, state) {

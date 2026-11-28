@@ -28,7 +28,9 @@ the queue (two rules) and how a placement reaches its host (a dispatch queue the
 - **A host is rows.**
   - `node/<host>` (G15): the epoch of its last hello (and the digest of its session secret), its pool, claim, shape,
     capabilities and labels, its phase and last load reading, whether the first listing since the hello is applied, whether its
-    last listing was clean, the epoch and sequence of its last applied beat, and `heard_at`, the database's `now()` at that beat.
+    last listing was clean, its orphans (the listed jobs the store holds no record of, each with the store's time it was first
+    listed and whether an operator ended it, `crates/js-lease-server/src/orphans.rs`), the epoch and sequence of its last
+    applied beat, and `heard_at`, the database's `now()` at that beat.
     These are what the placement engine's hosts and a beat's reply read today from the registry.
   - `hostbook/<host>`: its booking (Built). `cordon/<host>`: its cordon (Built, #932). `hosts/binding/<host>`: its taint (G4).
   - `taint/<host>`, `mark/<job>`, `hostmark/<host>`: a host job's taint, a whole-host job's drain, a scale-down mark.

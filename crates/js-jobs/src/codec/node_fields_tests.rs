@@ -13,7 +13,7 @@ use super::{decode_node, encode_node};
 use crate::codec::tests::{at, framed, with, without};
 use crate::codec::{Carried, DecodeError, FORMAT, LATER_FORMAT, field_of};
 use crate::ids::JobId;
-use crate::node::{AppliedBeat, LoadReading, NodeRecord, NodeState, SessionDigest};
+use crate::node::{AppliedBeat, LoadReading, NodeRecord, NodeState, Orphan, SessionDigest};
 
 fn host(text: &str) -> HostId {
     HostId::new(text).expect("a host")
@@ -79,6 +79,7 @@ fn full_node() -> NodeRecord {
             first_listing_pending: true,
             last_listing_clean: false,
             missing_in_a_row: BTreeMap::from([(job("job-1"), 1), (job("job-2"), 2)]),
+            orphans: BTreeMap::new(),
         },
         last_beat: Some(AppliedBeat {
             epoch: 3,
@@ -107,6 +108,7 @@ fn bare_node() -> NodeRecord {
             first_listing_pending: false,
             last_listing_clean: true,
             missing_in_a_row: BTreeMap::new(),
+            orphans: BTreeMap::new(),
         },
         last_beat: None,
         heard_at: at(2),
@@ -333,6 +335,7 @@ fn a_row_with_only_the_required_fields_reads_as_the_defaults() {
                 first_listing_pending: false,
                 last_listing_clean: true,
                 missing_in_a_row: BTreeMap::new(),
+                orphans: BTreeMap::new(),
             },
             last_beat: None,
             heard_at: at(6),
@@ -595,4 +598,78 @@ fn a_version_another_epoch_wrote_reads_as_none() {
         decode_node(&earlier_beat).map(|node| node.agent_version),
         Ok(Some("2.0.1".to_owned()))
     );
+}
+
+fn orphan(secs: u64, end_asked: bool) -> Orphan {
+    Orphan {
+        first_seen: StoreTime::from_duration(Duration::new(secs, 7)),
+        end_asked,
+    }
+}
+
+// Catches orphans lost or changed on the way through a row, and a change of the bytes an
+// earlier build reads: each orphan is its id and first-seen time under tag 15, the ones an
+// operator asked to end are listed under tag 16 (absent when there is none), and a row with
+// no orphan writes neither tag (the bare row's layout is pinned above).
+#[test]
+fn the_orphans_read_back_as_written_and_their_layout_is_pinned() {
+    let mut node = bare_node();
+    node.state.orphans = BTreeMap::from([
+        ("ghost-1".to_owned(), orphan(5, false)),
+        ("ghost-2".to_owned(), orphan(6, true)),
+    ]);
+    let row = node_row(&node);
+    assert_eq!(decode_node(&row), Ok(node.clone()));
+    assert_eq!(
+        field_of(&row, 15),
+        Some(framed(&[b"ghost-1", &time(5, 7), b"ghost-2", &time(6, 7)]))
+    );
+    assert_eq!(field_of(&row, 16), Some(framed(&[b"ghost-2"])));
+
+    node.state.orphans = BTreeMap::from([("ghost-1".to_owned(), orphan(5, false))]);
+    let row = node_row(&node);
+    assert_eq!(field_of(&row, 16), None);
+    assert_eq!(decode_node(&row), Ok(node));
+    assert_eq!(
+        decode_node(&required_only()).map(|node| node.state.orphans),
+        Ok(BTreeMap::new())
+    );
+}
+
+// Catches an orphan map that does not parse taken for one: a time that is not twelve bytes,
+// an id named twice and an id without its time are each the error that names the field.
+#[test]
+fn every_malformed_orphan_field_is_an_error() {
+    let mut node = bare_node();
+    node.state.orphans = BTreeMap::from([("ghost-1".to_owned(), orphan(5, true))]);
+    let row = node_row(&node);
+    let at = time(5, 7);
+    let cases: [(&[&[u8]], DecodeError); 3] = [
+        (&[b"ghost-1", &[0, 1]], DecodeError::BadLength { tag: 15 }),
+        (
+            &[b"ghost-1", &at, b"ghost-1", &at],
+            DecodeError::BadValue { tag: 15 },
+        ),
+        (&[b"ghost-1"], DecodeError::BadValue { tag: 15 }),
+    ];
+    for (items, error) in cases {
+        assert_eq!(
+            decode_node(&with(&row, 15, &framed(items))),
+            Err(error),
+            "orphans {items:?}"
+        );
+    }
+}
+
+// Catches a row refused for an operator's end of a job that is no orphan of it (data another
+// build may write): the id is passed by, and the orphans read as the other tag holds them.
+#[test]
+fn an_end_of_a_job_that_is_no_orphan_is_passed_by() {
+    let mut node = bare_node();
+    node.state.orphans = BTreeMap::from([("ghost-1".to_owned(), orphan(5, false))]);
+    let row = node_row(&node);
+    let stray = with(&row, 16, &framed(&[b"ghost-9"]));
+    assert_eq!(decode_node(&stray), Ok(node));
+    let alone = decode_node(&without(&stray, 15)).map(|node| node.state.orphans);
+    assert_eq!(alone, Ok(BTreeMap::new()));
 }

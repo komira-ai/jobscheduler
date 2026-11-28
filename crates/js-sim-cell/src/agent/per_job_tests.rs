@@ -108,6 +108,7 @@ fn start(job: &str) -> Command {
 fn stop(job: &str) -> Command {
     Command::JobStop {
         job_id: job.to_owned(),
+        reason: None,
     }
 }
 

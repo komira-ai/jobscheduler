@@ -26,10 +26,12 @@
 //! capability [`js_agent_wire::PER_JOB_CAPABILITY`], the heartbeat reply also carries, after
 //! the registry has accepted the beat ([`crate::per_job`]):
 //!
-//! - `commands`: after the lease and run commands, a `job_stop` for each job of the host
-//!   with a cancel intent that has not ended, each listed job the store holds no live
-//!   allocation of on this host, and each listed job that ended without the host reporting
-//!   it; then a `job_start` for each job placed on the host that it does not list yet, with
+//! - `commands`: after the lease and run commands, a `job_stop`, each with its `reason`, for
+//!   each job of the host with a cancel intent that has not ended, each listed job that ended
+//!   without the host reporting it, each listed job with no live allocation on this host whose
+//!   end, cancel or ended attempt here the store records, and the orphan an operator ended or
+//!   that passed `--max-job-wall` (none of these but an operator's when most of the listing is
+//!   orphans, [`crate::orphans`]); then a `job_start` for each job placed on the host that it does not list yet, with
 //!   the allocation's booked resources, the wall limit, the network level and the declared
 //!   ports, keyed by the job id and the allocation id, and `isolation: host` for a job that
 //!   runs on the machine itself (sent only to a host that reported `host-jobs`). Each is
@@ -43,6 +45,8 @@
 //!   no live allocation of here, or an end its state cannot take).
 //! - `retired_acks`: every retired id the heartbeat listed, once its job is cancelled and
 //!   its allocation freed (or there was nothing to change).
+//! - `unknown_jobs`: the listed jobs the store holds no record of for this host, which are
+//!   not stopped for that; the host keeps them running ([`crate::orphans`]).
 //!
 //! Before the listing, the heartbeat's `phase`, `exclusive_ready` and `exclusive_refused`
 //! move the placed whole-host job of the host ([`crate::job_whole`]): a ready report starts
@@ -133,6 +137,7 @@ use crate::job_store::ServerJobs;
 use crate::job_whole;
 use crate::logs::{self, LogGrants};
 use crate::metrics::AgentRoute;
+use crate::orphans::Judged;
 use crate::per_job::{self, JobReply};
 use crate::util::blocking;
 
@@ -415,12 +420,15 @@ async fn add_jobs(
     reply.commands.extend(served.commands);
     reply.job_acks = served.job_acks;
     reply.retired_acks = served.retired_acks;
+    reply.unknown_jobs = served.unknown_jobs;
     let registry_exclusive = reply.exclusive.take();
     reply.exclusive = registry_exclusive.clone().or(served.exclusive);
+    let judged = served.judged;
     Ok(watched.map(|(watch, inputs)| held::Hold {
         watch,
         inputs,
         registry_exclusive,
+        judged,
     }))
 }
 
@@ -480,7 +488,10 @@ async fn serve_jobs(
             let guarded = inputs.jobs.guarded(&inputs.host, row.version);
             let (jobs, host) = (&guarded, &inputs.host);
             let first = row.record.state.first_listing_pending;
-            let missed = (!sequenced).then_some(&row.record.state.missing_in_a_row);
+            let row_state = per_job::RowState {
+                missed: (!sequenced).then_some(&row.record.state.missing_in_a_row),
+                orphans: Some(&row.record.state.orphans),
+            };
             // The first listing after a hello loses the jobs that ran and are not listed: their
             // container went with the agent (design section 6.7, step 6). The listing's commit
             // below then frees their allocations, since the host no longer lists them.
@@ -509,14 +520,16 @@ async fn serve_jobs(
             let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
             let whole = lost.and_then(serve);
             let served = whole.and_then(|taint_changed| {
-                let served = per_job::serve(jobs, &context, listed, retired, inputs.room, missed);
+                let listing = (listed.as_slice(), retired.as_slice());
+                let served = per_job::serve(jobs, &context, listing, inputs.room, row_state);
                 served.map(|served| (served, taint_changed))
             });
             // Whether the listing was clean is written to the row before the pass, so a host that
             // lists a job it holds no live allocation for takes no start until it lists only its
             // own (design section 8, row 37), on whichever server places.
             if let Ok((served, _)) = &served {
-                rows::settle(&inputs.jobs, row, served.clean, served.missing.clone());
+                let left = (served.missing.clone(), served.orphans.clone());
+                rows::settle(&inputs.jobs, row, served.clean, left);
             }
             served
         };
@@ -562,15 +575,24 @@ async fn serve_jobs(
 
 /// The per-job reply to a beat that changes nothing (the row applied a newer one first): the
 /// stops and starts that follow from the rows as they stand ([`per_job::commands_now`]), with
-/// no verdict on a result and no retired id answered, which the agent then reports again.
+/// no verdict on a result and no retired id answered, which the agent then reports again. Its
+/// listing's unknown jobs are named, and guard the host, as on a beat that applied it
+/// ([`per_job::unknown_of`]).
 fn rows_answer(
     jobs: &ServerJobs,
     context: &per_job::BeatContext<'_>,
     listing: (&[js_agent_wire::HeldJob], &[String]),
     room: usize,
 ) -> Result<JobReply, js_jobs::JobStoreError> {
-    let (commands, exclusive) =
-        per_job::commands_now(jobs, context, listing, &BTreeSet::new(), room)?;
+    // The listing is judged again, read only, so the reply names the same unknown jobs and
+    // holds the same guard as the beat that applied it.
+    let unknown = per_job::unknown_of(jobs, context.host, listing.0)?;
+    let running = unknown.values().filter(|ended| !**ended).count();
+    let judged = Judged {
+        stops: BTreeMap::new(),
+        guarded: running * 2 > listing.0.len(),
+    };
+    let (commands, exclusive) = per_job::commands_now(jobs, context, listing, &judged, room)?;
     Ok(JobReply {
         commands,
         job_acks: Vec::new(),
@@ -578,6 +600,9 @@ fn rows_answer(
         clean: true,
         exclusive,
         missing: BTreeMap::new(),
+        unknown_jobs: unknown.into_keys().collect(),
+        orphans: BTreeMap::new(),
+        judged,
     })
 }
 

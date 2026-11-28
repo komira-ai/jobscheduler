@@ -838,8 +838,14 @@ jobs:
   # Tailscale join refuses a federated client id without tags, so the call never sends none). The lint
   # (crates/xtask/tests/apt_workflow, `cp_deploy.rs`) holds the two jobs to this shape.
   #
-  # cp-deploy-digest  needs `blackbox` (with no status function, so it runs only when `blackbox`
-  #          passed: a red black-box test deploys nothing) and holds no permission. It
+  # When. Both jobs sit below the apt jobs' retry slots (through `blackbox`), which are skipped on
+  # every release whose first write meets no conflict, and GitHub skips a job whose `if:` has no
+  # status function when any job up its chain was skipped. So each `if:` starts
+  # `!cancelled() && !failure()` and names the result it waits for: `cp-deploy-digest` runs only
+  # when `plan`, `publish`, `deploy-tool` and `blackbox` succeeded (a red or skipped gate deploys
+  # nothing), and `cp-deploy` only when `cp-deploy-digest` did.
+  #
+  # cp-deploy-digest  needs `blackbox` and holds no permission. It
   #          downloads the files `publish` uploaded (the same artifacts, so the same bytes) and the `xtask` that `deploy-tool` built, and runs
   #          `release image-digest`: the image held to SHA256SUMS, its bundle present, and the
   #          manifest digest its index.json names, with the release's download addresses of the
@@ -860,7 +866,7 @@ jobs:
   #          updater's converge timeout (40 minutes). The release stays published whatever it
   #          says, and "Re-run failed jobs" repeats it.
   cp-deploy-digest:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' && needs.blackbox.result == 'success' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
     needs: [plan, publish, deploy-tool, blackbox]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -890,7 +896,7 @@ jobs:
         run: tool/xtask release image-digest --dist dist --repo "$GITHUB_REPOSITORY" --version "$VERSION" --output "$GITHUB_OUTPUT"
 
   cp-deploy:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release == 'true' && needs.cp-deploy-digest.result == 'success' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
     needs: [plan, cp-deploy-digest]
     permissions:
       id-token: write
@@ -2140,8 +2146,12 @@ jobs:
   # farm.yml, whose last step builds the target it is given in place of `//:ci`, with `local: 0`
   # (buildrules runs a test as a build action, so the build is the run). The target is named here
   # alone. The suite holds no test target yet: today the black-box tests are the two jobs it
-  # needs besides `plan` and `publish`, and it runs only when every job it needs passed (no status
-  # function), so a test that failed or was skipped holds the farm back:
+  # needs besides `plan` and `publish`, and it runs only when every job it needs passed, so a test
+  # that failed or was skipped holds the farm back. Its `if:` names each of the four by
+  # `needs.<job>.result == 'success'` after `!cancelled() && !failure()`, and is not left to
+  # GitHub's implied `success()`: that is false when any job up the chain was skipped, and the
+  # apt jobs' retry slots (`testing-apt-write-2` and `-3`, under `check-apt`) are skipped on every
+  # release whose first write meets no conflict, so the gate would never run:
   #   check-apt                 js-agent installed from the suite `testing` in a clean Ubuntu
   #                             container, amd64 and arm64;
   #   beta-macos-first-install  the release's macOS package (the unsigned build of
@@ -2156,7 +2166,7 @@ jobs:
   # passes: until a test target joins it, the build proves only that the farm answers.
   blackbox:
     needs: [plan, publish, check-apt, beta-macos-first-install]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.check-apt.result == 'success' && needs.beta-macos-first-install.result == 'success' }}
     permissions:
       contents: read
       id-token: write

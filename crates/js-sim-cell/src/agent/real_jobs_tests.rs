@@ -122,6 +122,7 @@ fn start_of(job: &str, allocation: &str) -> Command {
 fn stop(job: &str) -> Command {
     Command::JobStop {
         job_id: job.to_owned(),
+        reason: None,
     }
 }
 
@@ -168,7 +169,7 @@ impl Rig {
         let skipped = &noted.unaccounted;
         reply.commands.retain(|command| match command {
             Command::JobStart(spec) => !skipped.contains(&spec.job_id),
-            Command::JobStop { job_id } => !skipped.contains(job_id),
+            Command::JobStop { job_id, .. } => !skipped.contains(job_id),
             _ => true,
         });
         let created = self.real.apply(&reply);

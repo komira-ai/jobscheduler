@@ -109,7 +109,8 @@ fn an_unknown_kind_costs_only_its_own_start() {
         [
             Command::Unknown,
             Command::JobStop {
-                job_id: "job-0".into()
+                job_id: "job-0".into(),
+                reason: None,
             }
         ]
     );

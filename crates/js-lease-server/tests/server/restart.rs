@@ -195,8 +195,9 @@ pub(crate) fn stored(file: &Path) -> Vec<String> {
 /// snapshot is restored over the store offline (`js_state::sqlite::restore`), and the server
 /// starts again (`--boot resume`) while both agents still hold their jobs. Then:
 ///
-/// - Unknown jobs are stopped: `host-2`, which lists B (unknown to the restored store), is
-///   told to stop it on every reply while it lists it, its killed result is acknowledged
+/// - Unknown jobs are not stopped: `host-2`, which lists B (unknown to the restored store),
+///   is told to stop nothing on any reply while it lists it, and each reply names B in
+///   `unknown_jobs`; B runs on until it ends there by itself, its result is acknowledged
 ///   `STALE`, and B stays unknown (404, no row). `host-1`, which lists A, is told nothing,
 ///   and A keeps its allocation.
 /// - Nothing is booked twice: the next job, C, is not placed on `host-1`, whose booking for
@@ -209,13 +210,13 @@ pub(crate) fn stored(file: &Path) -> Vec<String> {
 ///   nothing there could refuse them; they stay unique because the ids come from a source a
 ///   restore does not wind back (in a service, 128 random bits), never from the store.
 ///
-/// It catches a restore that leaves an unknown job running, a job revived from a host's
-/// listing, a booking not rebuilt from the restored table (C placed beside A), a start sent
+/// It catches a restore that stops the work the restored store forgot (every host of a farm
+/// would lose its jobs to one restore), a job revived from a host's listing, a booking not rebuilt from the restored table (C placed beside A), a start sent
 /// to a host that still runs a job the store forgot, and a minted id written over a row the
 /// restored store holds. (That the service's ids come from a source a restore does not wind
 /// back is not shown here: the test gives the ids.)
 #[tokio::test]
-async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
+async fn a_restored_older_job_store_keeps_unknown_jobs_running_and_reissues_no_id() {
     let scratch = Scratch::new("restore_jobs");
     // The job tables' clock reads what the server's does, so no deadline is judged across
     // two clocks.
@@ -274,10 +275,12 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     let told = beat_with(&h, &host_1, &[running(&a)]).await;
     assert_eq!(commands(&told), (vec![], vec![]), "{told}");
     let told = beat_with(&h, &host_2, &[running(&b)]).await;
-    assert_eq!(commands(&told), (vec![], vec![b.clone()]), "{told}");
-    // Told again while it still lists the job.
+    assert_eq!(commands(&told), (vec![], vec![]), "{told}");
+    assert_eq!(told["unknown_jobs"], json!([b]), "{told}");
+    // Named again, and still not stopped, while it lists the job.
     let again = beat_with(&h, &host_2, &[running(&b)]).await;
-    assert_eq!(commands(&again).1, vec![b.clone()], "{again}");
+    assert_eq!(commands(&again), (vec![], vec![]), "{again}");
+    assert_eq!(again["unknown_jobs"], json!([b]), "{again}");
 
     let c = submit(&h).await;
     assert_eq!(c, "05".repeat(16), "the draw of A's id was drawn again");
@@ -286,22 +289,24 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     // capacity is not counted until its listing is clean.
     h.ticks.step().await;
     let busy = beat_with(&h, &host_2, &[running(&b)]).await;
-    assert_eq!(commands(&busy), (vec![], vec![b.clone()]), "{busy}");
+    assert_eq!(commands(&busy), (vec![], vec![]), "{busy}");
     let still = beat_with(&h, &host_1, &[running(&a)]).await;
     assert_eq!(commands(&still), (vec![], vec![]), "{still}");
 
-    let killed = json!({
+    let finished = json!({
         "job_id": b,
         "state": "exited_unacked",
-        "result": { "job_id": b, "allocation_id": b_allocation, "outcome": "killed" },
+        "result": {
+            "job_id": b, "allocation_id": b_allocation, "outcome": "succeeded", "exit_code": 0,
+        },
     });
-    let acked = beat_with(&h, &host_2, &[killed]).await;
+    let acked = beat_with(&h, &host_2, &[finished]).await;
     assert_eq!(
         acked["job_acks"],
         json!([{ "job_id": b, "ack": "STALE" }]),
         "{acked}"
     );
-    assert_eq!(commands(&acked), (vec![], vec![b.clone()]), "{acked}");
+    assert_eq!(commands(&acked), (vec![], vec![]), "{acked}");
     h.ticks.step().await;
     let clean = beat_with(&h, &host_2, &[]).await;
     assert_eq!(commands(&clean), (vec![], vec![]), "{clean}");
@@ -395,4 +400,97 @@ async fn the_job_path_is_unaffected() {
         job_of(&h, &b).await.json()["job"]["state"],
         "JOB_STATE_CANCELLED"
     );
+}
+
+/// Asserts that the server's `--max-job-wall` is the bound after which an orphan is ended:
+/// on a server started with `--max-job-wall 2h`, a host that runs a job the store placed and
+/// lists one it holds no record of is told to stop nothing a second before the orphan has
+/// been listed for two hours, by the store's clock, and is told to stop the orphan, with the
+/// reason `orphan_expired`, at two hours, the placed job left running. It catches a bound
+/// that does not follow the setting (an orphan kept for the default 30 days, or ended at
+/// once).
+#[tokio::test]
+async fn an_orphan_is_ended_at_the_servers_max_job_wall() {
+    let scratch = Scratch::new("orphan_bound");
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(Duration::from_millis(T0));
+    let mut args = job_args(&scratch, "initialise");
+    args.extend(["--max-job-wall".into(), "2h".into()]);
+    let checked = config(args).unwrap();
+    let store_clock: Arc<dyn js_state::Clock> = clock.clone();
+    let ids = Arc::new(ScriptedIds::new([1; 16], [[2; 16], [0xf0; 16]]));
+    let h = Harness::over(scratch, checked.with_job_sources(store_clock, ids)).await;
+    let host = job_agent(&h, "host-1").await;
+    let a = submit(&h).await;
+    h.ticks.step().await;
+    left_the_queue(&h, &a).await;
+    let (started, _) = one_start(&beat_with(&h, &host, &[]).await);
+    assert_eq!(started, a);
+
+    let listing = [running(&a), running("ghost-1")];
+    let first = beat_with(&h, &host, &listing).await;
+    assert_eq!(commands(&first), (vec![], vec![]), "{first}");
+    assert_eq!(first["unknown_jobs"], json!(["ghost-1"]), "{first}");
+    clock.advance(Duration::from_secs(2 * 3600 - 1));
+    let early = beat_with(&h, &host, &listing).await;
+    assert_eq!(commands(&early), (vec![], vec![]), "{early}");
+    clock.advance(Duration::from_secs(1));
+    let due = beat_with(&h, &host, &listing).await;
+    assert_eq!(
+        due["commands"],
+        json!([{ "type": "job_stop", "job_id": "ghost-1", "reason": "orphan_expired" }]),
+        "{due}"
+    );
+    h.running.shutdown().await.unwrap();
+}
+
+/// Asserts the operator's view of a host closed by an orphan, over the server's own HTTP: the
+/// orphan routes answer 401 without the client token or with a wrong one; with it, the
+/// listing shows the orphan, the host listing (`GET /v1/hosts`) and the job service's
+/// `ListHosts` (what `js host list` prints) show the host holding one orphan, the end is
+/// answered 202, and the host's next beat is told to stop the job with the reason `operator`.
+/// It catches orphan routes served without the token, an end that does not reach the host, and
+/// a host that takes no work without saying why.
+#[tokio::test]
+async fn an_operator_sees_a_host_closed_by_an_orphan_and_ends_it_over_http() {
+    let scratch = Scratch::new("orphan_routes");
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(Duration::from_millis(T0));
+    let ids = Arc::new(ScriptedIds::new([1; 16], [[0xf0; 16]]));
+    let h = job_server(scratch, "initialise", &clock, ids).await;
+    let host = job_agent(&h, "host-1").await;
+    let told = beat_with(&h, &host, &[running("ghost-1")]).await;
+    assert_eq!(told["unknown_jobs"], json!(["ghost-1"]), "{told}");
+
+    let list = "/v1/hosts/host-1/orphans";
+    let end = "/v1/hosts/host-1/orphans/ghost-1/end";
+    for token in [None, Some("nope")] {
+        for (method, path) in [("GET", list), ("POST", end)] {
+            let reply = request(h.addr(), method, path, token, None).await;
+            assert_eq!(reply.status, 401, "{method} {path} {token:?}");
+        }
+    }
+    let shown = h.call("GET", list, None).await;
+    assert_eq!(shown.status, 200, "{}", shown.body);
+    let orphans = &shown.json()["orphans"];
+    assert_eq!(orphans[0]["job_id"], "ghost-1", "{orphans}");
+    assert_eq!(orphans[0]["end_asked"], false, "{orphans}");
+    assert_eq!(entry(&hosts(&h).await, "host-1")["orphans"], 1);
+    let job = h.running.job_addr().expect("the job service is on");
+    let listed = request(job, "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    let listed = listed.json();
+    let served = listed["hosts"].as_array().unwrap();
+    let one = served.iter().find(|each| each["id"] == "host-1").unwrap();
+    assert_eq!(one["orphans"], 1, "{one}");
+
+    let asked = h.call("POST", end, None).await;
+    assert_eq!(asked.status, 202, "{}", asked.body);
+    let stopped = beat_with(&h, &host, &[running("ghost-1")]).await;
+    assert_eq!(
+        stopped["commands"],
+        json!([{ "type": "job_stop", "job_id": "ghost-1", "reason": "operator" }]),
+        "{stopped}"
+    );
+    h.running.shutdown().await.unwrap();
 }

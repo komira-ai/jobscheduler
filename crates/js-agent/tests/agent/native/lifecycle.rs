@@ -255,6 +255,19 @@ impl Native {
         panic!("the lifecycle never got there: the program never ended");
     }
 
+    /// Waits until the job of `run_id` has printed `want` on its standard output (the file
+    /// in its scratch directory the job writes itself); panics when it never does.
+    pub(super) fn printed(&self, run_id: &str, want: &str) {
+        let stdout = self.scratch_of(run_id).join("stdout");
+        for _ in 0..STEPS {
+            if fs::read(&stdout).is_ok_and(|text| text == want.as_bytes()) {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("{run_id} never printed {want:?} to {}", stdout.display());
+    }
+
     pub(super) fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
         fs::canonicalize(self.dir.path("scratch"))
             .unwrap()
@@ -332,6 +345,9 @@ fn a_native_job_outlives_a_restart_and_its_result_is_reported_once() {
     let script = "echo before the restart; exec /bin/sleep 600";
     h.start(job_with("r1", "/bin/sh", &["-c", script]));
     let (account, home) = (h.account_of(0), h.home_of(0));
+    // The exit written below stands for one after the job printed: wait for the line, so
+    // the record never comes before the shell has run its `echo`.
+    h.printed("r1", "before the restart\n");
     let events = h.restarted();
     let adopted: Vec<String> = names(&events)
         .into_iter()
