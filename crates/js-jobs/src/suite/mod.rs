@@ -142,6 +142,7 @@ where
     two_servers_beating_one_host_at_once_apply_each_beat_once(backend);
     a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
     a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved(backend);
+    a_view_guarded_on_absence_writes_only_while_the_host_has_no_row(backend);
     a_conflict_on_another_row_is_not_the_node_moving(backend);
     a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving(backend);
     a_guarded_view_shares_the_write_count_of_its_store(backend);
@@ -371,6 +372,7 @@ macro_rules! job_store_tests {
             two_servers_beating_one_host_at_once_apply_each_beat_once,
             a_beat_or_hello_that_loses_its_version_reads_the_row_again,
             a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved,
+            a_view_guarded_on_absence_writes_only_while_the_host_has_no_row,
             a_conflict_on_another_row_is_not_the_node_moving,
             a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving,
             a_guarded_view_shares_the_write_count_of_its_store,

@@ -13,7 +13,7 @@ use js_state::fake::Fake;
 use js_state::{ManualClock, Store, StoreError, StoreTime};
 use js_types::HostId;
 
-use super::{Observe, Seen, lose_absent, lose_silent, lose_unlisted};
+use super::{Observe, RowRead, Seen, lose_absent, lose_silent, lose_unlisted};
 use crate::agent_api::job_rig::{BOOKED, spec, tables_on};
 use crate::job_store::{ServerIds, ServerJobs};
 use crate::metrics::NoMetrics;
@@ -22,7 +22,7 @@ use crate::metrics::NoMetrics;
 struct Provider(BTreeMap<&'static str, Result<Seen, String>>);
 
 impl Observe for Provider {
-    fn observe(&self, host: &HostId) -> Result<Seen, String> {
+    fn observe(&self, host: &HostId, _: &RowRead) -> Result<Seen, String> {
         let read = self.0.get(host.as_str()).cloned();
         read.unwrap_or(Ok(Seen::Unknown))
     }
@@ -135,6 +135,59 @@ fn only_an_absent_host_loses_its_jobs_and_frees_its_allocations() {
         lose_absent(&jobs, &provider, &NoMetrics).unwrap(),
         Vec::<JobId>::new()
     );
+}
+
+/// A provider that reads every host absent and, as it reads one, writes the host's row as a
+/// hello does: a host whose row comes back between the pass's read of it and the first write
+/// of its settlement.
+struct Returning<'a>(&'a ServerJobs);
+
+impl Observe for Returning<'_> {
+    fn observe(&self, host: &HostId, _: &RowRead) -> Result<Seen, String> {
+        let hello = NodeHello {
+            session: None,
+            pool: "burst".to_owned(),
+            claim: None,
+            shape: None,
+            labels: BTreeMap::new(),
+            phase: js_agent_wire::Phase::Serving,
+            agent_process: None,
+            agent_version: None,
+        };
+        self.0.hello_node(host, &hello).unwrap();
+        Ok(Seen::Absent)
+    }
+}
+
+// Design `multi-instance.md`, G6. Catches a settlement that loses the jobs of a host whose row
+// came back after the pass read it absent: each commit checks the row still as read, so the
+// first conflicts and nothing of the host is lost, freed or written. With the row there and
+// still read absent, the settlement is held to the row's version and loses the jobs. Catches
+// too a settlement whose commits check nothing.
+#[test]
+fn a_row_that_comes_back_between_the_read_and_the_write_ends_nothing() {
+    let (_, jobs) = tables();
+    let running = at(&jobs, "job-run", "host-a", JobState::Running);
+    let placed = at(&jobs, "job-placed", "host-a", JobState::Placed);
+    let rows = |jobs: &ServerJobs| {
+        [&running, &placed].map(|id| (jobs.get_job(id).unwrap(), jobs.get_allocation(id).unwrap()))
+    };
+    let before = rows(&jobs);
+
+    let lost = lose_absent(&jobs, &Returning(&jobs), &NoMetrics).unwrap();
+    assert_eq!(lost, Vec::<JobId>::new());
+    assert_eq!(
+        rows(&jobs),
+        before,
+        "the settlement wrote a job or an allocation"
+    );
+    for (id, state) in [(&running, JobState::Running), (&placed, JobState::Placed)] {
+        assert_eq!(states(&jobs, id), (state, AllocationStep::Booked, None));
+    }
+
+    let provider = Provider(BTreeMap::from([("host-a", Ok(Seen::Absent))]));
+    let lost = lose_absent(&jobs, &provider, &NoMetrics).unwrap();
+    assert_eq!(lost, [placed, running]);
 }
 
 // Catches a placed job taken for lost on a returning host (its start is due again), a job

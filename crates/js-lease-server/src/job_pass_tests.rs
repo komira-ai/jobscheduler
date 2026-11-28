@@ -21,7 +21,7 @@ use js_state::Store;
 use js_types::{HostId, Resources};
 use tonic::{Request, Status};
 
-use super::{Passed, run, store_time};
+use super::{Passed, Rows, run, store_time};
 use crate::agent_api::job_rig::{
     FakeAgent, Rig, clocked_rig, clocked_rig_keeping, spec, starts, stops,
 };
@@ -32,7 +32,7 @@ use crate::job_api::read::Ctx;
 use crate::job_api::read::silence::Silence;
 use crate::job_api::roles::as_operator;
 use crate::job_expiry::JobLimits;
-use crate::job_loss::{Observe, Seen};
+use crate::job_loss::{Observe, RowRead, Seen};
 use crate::job_store::FeedTrim;
 use crate::metrics::NoMetrics;
 
@@ -129,7 +129,7 @@ impl Provider {
 }
 
 impl Observe for Provider {
-    fn observe(&self, host: &HostId) -> Result<Seen, String> {
+    fn observe(&self, host: &HostId, _: &RowRead) -> Result<Seen, String> {
         let read = self.0.lock().unwrap().get(host.as_str()).cloned();
         read.unwrap_or(Ok(Seen::Present))
     }
@@ -392,8 +392,10 @@ fn exited(stdout: &str) -> JobEnd {
 // and its log tail read one tick before the end, and are unknown one tick after.
 #[tokio::test]
 async fn a_job_past_retention_is_deleted_and_a_live_one_is_not() {
-    let rig = clocked_rig("pass_retention", false, NEVER);
+    let mut rig = clocked_rig("pass_retention", false, NEVER);
     let api = api(&rig);
+    // The host has a row, so the live job is not read absent however long the host is silent.
+    rig.register("host-a", true);
     let ended = rig.place("job-ended", "host-a");
     let live = rig.place("job-live", "host-a");
     for id in [&ended, &live] {
@@ -700,44 +702,67 @@ fn a_job_pass_reads_no_wall_clock() {
     assert_eq!((near, far), (want, want));
 }
 
-// A server that removed a host from its registry runs the pass in a period another server has
-// claimed, because only its own pass reads the host absent and settles the removal. The claim is
-// taken by another job store over the same tables, so without this the removal would wait for a
-// period this server won. It asserts the host's job lost and the removal settled in the claimed
-// period, and that a server with no removal still leaves a claimed period alone. Catches a
-// server that skips the pass of its removals and so starves the host's jobs.
-#[tokio::test]
-async fn a_server_with_a_removed_host_runs_the_pass_in_a_period_another_claimed() {
-    let mut rig = clocked_rig("pass_removed_claimed", true, NEVER);
-    rig.agents.set_duty_period(MINUTE);
-    rig.register("host-a", true);
-    let mut a = FakeAgent::new("host-a");
-    let on_a = started(&rig, &mut a, "job-a", true).await;
-    let placer = rig.agents.placer.clone().unwrap();
-    let claim = |rig: &Rig| rig.jobs.claim_duty("job-pass", MINUTE).unwrap();
-    assert!(claim(&rig), "another server claims the period");
-    assert_eq!(rig.agents.job_pass(), None, "nothing is owed: left to it");
+/// Deletes the `node/` row of `host` at the version it stands at, as the scaler's removal of a
+/// host whose machine the cloud confirmed gone does (`scaler::live_marks`, `forget_removed`).
+fn delete_row(rig: &Rig, host: &HostId) {
+    let row = rig.jobs.read_node(host).unwrap().unwrap();
+    assert_eq!(rig.jobs.forget_node(host, row.version), Ok(true));
+}
 
-    let host_a = HostId::new("host-a").unwrap();
-    let registry = &rig.agents.registry;
-    registry.drain(&host_a).unwrap();
-    registry.release_host(&host_a).unwrap();
-    registry.remove(&host_a).unwrap();
-    assert!(placer.gone().contains_key(&host_a));
+// Design `multi-instance.md`, G6. A host that holds a live allocation and has no `node/` row
+// is lost by the job pass of the server that claims the period, whichever server served it:
+// this server's registry never held the host. A period another server claimed is left to that
+// server however many such hosts there are, and the host's job is lost once: the next pass,
+// with the job lost and its allocation freed, finds nothing to settle. Catches a pass that
+// bypasses its claim for a removal, one that reads absence from its own registry, and one that
+// settles a host again.
+#[test]
+fn a_host_with_no_row_is_lost_once_by_the_pass_that_claims_the_period() {
+    let rig = clocked_rig("pass_rowless_claimed", true, NEVER);
+    rig.agents.set_duty_period(MINUTE);
+    let placed = rig.place("job-a", "host-a");
+    assert!(
+        rig.jobs.claim_duty("job-pass", MINUTE).unwrap(),
+        "another server claims the period"
+    );
+    assert_eq!(rig.agents.job_pass(), None, "the period is left to it");
+    assert_eq!(
+        rig.states(&placed),
+        (JobState::Placed, AllocationStep::Booked)
+    );
+
+    rig.advance(MINUTE);
     assert!(matches!(
         rig.agents.job_pass(),
         Some(crate::store_health::Pass::Ran(_))
     ));
-    assert_eq!(rig.states(&on_a), (JobState::Lost, AllocationStep::Freed));
-    assert!(placer.gone().is_empty(), "the removal is settled");
+    assert_eq!(rig.states(&placed), (JobState::Lost, AllocationStep::Freed));
+    assert_eq!(
+        rig.allocation(&placed).end_reason,
+        Some(EndReason::HostAbsent)
+    );
+    let now = store_time(now_ms(&rig));
+    let again = run(
+        &rig.jobs,
+        (NEVER, &WholeNodeConfig::dedicated(1)),
+        (&Rows, &NoMetrics),
+        (now, now),
+    );
+    assert_eq!(
+        again.unwrap(),
+        Passed::default(),
+        "the host is settled once"
+    );
 }
 
-// Catches a host the registry removed (the provider read it gone) not read absent by the
-// server's own tick, a removal kept after its allocations are settled, and a host that said
-// hello again before the tick still read absent. A host merely silent is read unknown and
-// keeps everything.
+// Design section 6.3, question 25, and G6. A removal is read from the rows only: the registry
+// removing a host whose row stays loses nothing, and the host's row deleted as the scaler's
+// removal deletes it loses the host's job at the next tick. A host whose row is deleted and
+// that says hello again before the tick is not absent: it keeps its job, which its first
+// listing (omitting it) then loses. Catches the registry's removal still deciding, a removal
+// of the row not read absent by the tick, and a host that came back still read absent.
 #[tokio::test]
-async fn a_removed_host_is_read_absent_by_the_tick_and_a_returning_one_is_not() {
+async fn a_host_whose_row_was_deleted_is_lost_by_the_tick_and_a_returning_one_is_not() {
     let mut rig = clocked_rig("pass_removed", true, NEVER);
     rig.register("host-a", true);
     rig.register("host-b", true);
@@ -745,45 +770,41 @@ async fn a_removed_host_is_read_absent_by_the_tick_and_a_returning_one_is_not() 
     let mut b = FakeAgent::new("host-b");
     let on_a = started(&rig, &mut a, "job-a", true).await;
     let on_b = started(&rig, &mut b, "job-b", true).await;
-    rig.advance(GRACE + SECOND);
-    agent_beat(&rig, &mut b).await;
-    rig.tick();
-    assert_eq!(
-        rig.states(&on_a),
-        (JobState::Running, AllocationStep::Booked)
-    );
+    let running = (JobState::Running, AllocationStep::Booked);
 
-    let placer = rig.agents.placer.clone().unwrap();
-    let removed = |host: &HostId| {
-        let registry = &rig.agents.registry;
-        registry.drain(host).unwrap();
-        registry.release_host(host).unwrap();
-        registry.remove(host).unwrap();
-    };
     let host_a = HostId::new("host-a").unwrap();
-    removed(&host_a);
-    assert!(placer.gone().contains_key(&host_a));
+    let registry = &rig.agents.registry;
+    registry.drain(&host_a).unwrap();
+    registry.release_host(&host_a).unwrap();
+    registry.remove(&host_a).unwrap();
+    rig.tick();
+    assert_eq!(rig.states(&on_a), running, "the registry's removal decided");
+
+    delete_row(&rig, &host_a);
     rig.tick();
     assert_eq!(rig.states(&on_a), (JobState::Lost, AllocationStep::Freed));
-    assert_eq!(
-        rig.states(&on_b),
-        (JobState::Running, AllocationStep::Booked)
-    );
-    assert!(placer.gone().is_empty(), "a settled removal is kept");
+    assert_eq!(rig.states(&on_b), running);
 
-    // Removed, then back with a hello before any tick: not absent. Its first listing, which
-    // omits the job, loses it instead.
+    // The row deleted, then written again by a hello before any tick: not absent.
     let host_b = HostId::new("host-b").unwrap();
-    removed(&host_b);
+    delete_row(&rig, &host_b);
+    rig.advance(GRACE + SECOND);
     rig.register("host-b", true);
-    assert!(placer.gone().is_empty());
     rig.tick();
-    assert_eq!(
-        rig.states(&on_b),
-        (JobState::Running, AllocationStep::Booked)
-    );
+    assert_eq!(rig.states(&on_b), running);
     agent_beat(&rig, &mut FakeAgent::new("host-b")).await;
     assert_eq!(rig.states(&on_b), (JobState::Lost, AllocationStep::Freed));
+}
+
+// The production reading of a host's row ([`Rows`]): no row is absent, a row (heard lately or
+// not) is present, and a row that could not be read is unknown, never absent. Catches an
+// unreadable row taken for a removal, which would lose a live host's jobs.
+#[test]
+fn the_rows_read_a_host_absent_only_when_it_has_no_row() {
+    let host = HostId::new("host-a").unwrap();
+    assert_eq!(Rows.observe(&host, &Ok(None)), Ok(Seen::Absent));
+    let unreadable = Err(js_jobs::JobStoreError::NodeMoved { host: host.clone() });
+    assert_eq!(Rows.observe(&host, &unreadable), Ok(Seen::Unknown));
 }
 
 /// A heartbeat of `agent` whose reply it takes.

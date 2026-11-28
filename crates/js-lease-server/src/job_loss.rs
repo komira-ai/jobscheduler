@@ -1,11 +1,20 @@
 //! How a job becomes lost (design section 6.3): the three ways, and nothing else.
 //!
 //! 1. **The provider reads its host absent** ([`lose_absent`], step 2 of the tick, design
-//!    section 6.1). For an elastic machine that is an explicit not-found; for a registered
-//!    host it is the registry removing the host. Every live (booked or releasing) allocation
-//!    on the host is freed for [`Freed::ProviderAbsent`](crate::job_alloc::Freed), and its
-//!    job, when it has not ended, becomes lost in the same commit
-//!    ([`job_alloc::lose_on_absent`]). A job with a cancel intent is lost too, not cancelled:
+//!    section 6.1). The provider's word is read from the store's rows, so every server that
+//!    claims the pass reads it alike, whichever server served the host (design
+//!    `multi-instance.md`, G6): a host that holds a live allocation and has no `node/<host>`
+//!    row is absent. Only a removal deletes such a row: the scaler's, once the cloud confirmed
+//!    the machine gone ([`crate::scaler`]), or the operator's retirement of a lost host that
+//!    owes only the unconfirmed stops of ended jobs ([`crate::agents::Agents::retire`], which
+//!    frees those itself); a silent host's row is forgotten only once it holds nothing
+//!    ([`js_jobs::JobStore::forget_silent_nodes`]). Every live (booked or releasing)
+//!    allocation on the host is freed for [`Freed::ProviderAbsent`](crate::job_alloc::Freed),
+//!    and its job, when it has not ended, becomes lost in the same commit
+//!    ([`job_alloc::lose_on_absent`]). Each of those commits also checks that the host's row is
+//!    as the pass read it (still absent), so a hello of the host that lands meanwhile makes the
+//!    settlement a conflict: what the conflicting commit would have changed is kept, and so is
+//!    every allocation of the host after it, which the host's first listing then judges. A job with a cancel intent is lost too, not cancelled:
 //!    no host report exists, and its record keeps the intent, which `GetJob` shows. A job that
 //!    had already ended (a start timeout waiting for its host's confirmation, or a job lost to
 //!    the host's silence) keeps its end and only its allocation is freed. An unknown read and a
@@ -57,9 +66,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, LostCause};
+use js_jobs::{
+    AllocationRecord, JobEnd, JobId, JobRecord, JobState, JobStoreError, LostCause, NodeRow,
+};
 use js_state::StoreTime;
 use js_types::HostId;
+use tracing::info;
 
 use crate::job_alloc::{self, Freed};
 use crate::job_retry::{self, Next, Settled};
@@ -77,22 +89,29 @@ pub(crate) enum Seen {
     Unknown,
 }
 
+/// The row of a host as the job pass read it: the row with its version, none, or the error of
+/// a read that failed (a row this build cannot read included).
+pub(crate) type RowRead = Result<Option<NodeRow>, JobStoreError>;
+
 /// Where the job pass reads what the provider says of a host.
 pub(crate) trait Observe {
-    /// What the provider reads of `host` now; an error is a read that failed, which counts as
-    /// [`Seen::Unknown`].
-    fn observe(&self, host: &HostId) -> Result<Seen, String>;
+    /// What the provider reads of `host` now, given `row`, the host's `node/` row as the pass
+    /// read it; an error is a read that failed, which counts as [`Seen::Unknown`].
+    fn observe(&self, host: &HostId, row: &RowRead) -> Result<Seen, String>;
 }
 
 /// Settles the live allocations of each host `observer` reads absent (the first way of the
 /// module docs), one commit per allocation (two for a job it retries: the retry, then the
 /// free), and returns the jobs it made lost. Each host that holds a live allocation is read
-/// once; only [`Seen::Absent`] changes anything. Each job it loses or retries is told to
-/// `metrics` as its commit lands, with a loss whose retry policy had no attempt left.
+/// once, its row first; only [`Seen::Absent`] of a row that could be read changes anything,
+/// and every commit for the host checks its row is still as read (at its version, or absent).
+/// A commit that finds the row moved ends the host's settlement for this pass and loses
+/// nothing more of it; the other hosts are settled as usual. Each job it loses or retries is
+/// told to `metrics` as its commit lands, with a loss whose retry policy had no attempt left.
 ///
 /// # Errors
-/// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
-/// the next pass reads the host again.
+/// The first [`JobStoreError`] of a read or a commit, other than the moved row; what was
+/// committed before it stays, and the next pass reads the host again.
 pub(crate) fn lose_absent(
     jobs: &ServerJobs,
     observer: &dyn Observe,
@@ -100,12 +119,47 @@ pub(crate) fn lose_absent(
 ) -> Result<Vec<JobId>, JobStoreError> {
     let live = jobs.live_allocations()?;
     let hosts: BTreeSet<&HostId> = live.iter().map(|allocation| &allocation.host).collect();
-    let absent: BTreeSet<&HostId> = hosts
-        .into_iter()
-        .filter(|host| matches!(observer.observe(host), Ok(Seen::Absent)))
-        .collect();
     let mut lost = Vec::new();
-    for allocation in live.iter().filter(|live| absent.contains(&live.host)) {
+    for host in hosts {
+        let Some(settling) = absent_view(jobs, observer, host) else {
+            continue;
+        };
+        let on_host = live.iter().filter(|live| live.host == *host);
+        match lose_each(&settling, on_host, metrics, &mut lost) {
+            Err(JobStoreError::NodeMoved { .. }) => {
+                info!(%host, "the host's row came back while its jobs were settled; the rest are kept");
+            }
+            settled => settled?,
+        }
+    }
+    Ok(lost)
+}
+
+/// The view of `jobs` the allocations of `host` are settled through when `observer` reads it
+/// absent: every write checks the host's row is as read now (at its version, or absent);
+/// `None` when the host is not read absent, or its row could not be read.
+fn absent_view(jobs: &ServerJobs, observer: &dyn Observe, host: &HostId) -> Option<ServerJobs> {
+    let row = jobs.read_node(host);
+    let absent = matches!(observer.observe(host, &row), Ok(Seen::Absent));
+    let row = row.ok().filter(|_| absent)?;
+    Some(row.map_or_else(
+        || jobs.guarded_absent(host),
+        |row| jobs.guarded(host, row.version),
+    ))
+}
+
+/// Loses or retries the job of each of `allocations`, all on one host, through `jobs` (the
+/// host's guarded view), adding each job it made lost to `lost`.
+///
+/// # Errors
+/// The first [`JobStoreError`] of a read or a commit, [`JobStoreError::NodeMoved`] included.
+fn lose_each<'a>(
+    jobs: &ServerJobs,
+    allocations: impl Iterator<Item = &'a AllocationRecord>,
+    metrics: &dyn MetricsSink,
+    lost: &mut Vec<JobId>,
+) -> Result<(), JobStoreError> {
+    for allocation in allocations {
         let job = jobs.get_job(&allocation.job)?;
         let next = job.as_ref().map(|job| job_retry::next(job, &JobEnd::Lost));
         if let (Some(job), Some(Next::Retry { wait })) = (&job, next) {
@@ -123,7 +177,7 @@ pub(crate) fn lose_absent(
             job.id
         }));
     }
-    Ok(lost)
+    Ok(())
 }
 
 /// The jobs of `host` that are starting or running and that its listing `held` (the ids the

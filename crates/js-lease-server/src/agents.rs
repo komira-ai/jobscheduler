@@ -43,7 +43,6 @@ use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
-use crate::job_pass::SilenceFloor;
 use crate::job_sizes::Sizes;
 use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
@@ -119,8 +118,8 @@ pub(crate) struct Agents {
     pub(crate) logs: Option<Arc<LogGrants>>,
     /// The pool's limits and the server's `silence_limit`, which the job pass enforces.
     pub(crate) job_limits: JobLimits,
-    /// Where the job pass counts a host's silence from ([`SilenceFloor`]).
-    pub(crate) silence_floor: SilenceFloor,
+    /// Where the job pass counts a host's silence from ([`crate::job_pass::SilenceFloor`]).
+    pub(crate) silence_floor: crate::job_pass::SilenceFloor,
     /// How far past its cores a host's CPU may be booked ([`crate::config::CpuSlack`]), which
     /// the capacity a placement is held to in its own transaction allows too.
     pub(crate) cpu_slack: CpuSlack,
@@ -357,7 +356,7 @@ fn placed_in(
         rows_read: Mutex::default(),
         logs,
         job_limits,
-        silence_floor: SilenceFloor::default(),
+        silence_floor: Default::default(),
         cpu_slack: load.cpu_slack,
         duty_period_ms: AtomicU64::new(0),
         meter: OnceLock::new(),
@@ -436,7 +435,7 @@ impl Agents {
             rows_read: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
-            silence_floor: SilenceFloor::default(),
+            silence_floor: Default::default(),
             cpu_slack: CpuSlack::default(),
             duty_period_ms: AtomicU64::new(0),
             meter: OnceLock::new(),
