@@ -390,6 +390,7 @@ fn commands_are_validated() {
     for command in [
         Command::JobStop {
             job_id: "../x".into(),
+            reason: None,
         },
         Command::JobStop {
             job_id: String::new(),

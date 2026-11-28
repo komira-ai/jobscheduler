@@ -485,12 +485,6 @@ impl Job {
         }
     }
 
-    /// Asks a running job, or one still waiting to start, to stop; a job past its
-    /// exit has nothing to stop.
-    pub(super) fn request_stop(&mut self) {
-        self.request_stop_for(Cause::Stopped);
-    }
-
     /// Stops a job adopted after a restart whose host ports could not be offered again
     /// (`why`), and notes it once: it ends killed, its result's `input_failure` saying
     /// `host-port-lost`, which a job that exits by itself before the stop reaches it keeps
