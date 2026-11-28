@@ -779,3 +779,43 @@ fn the_model_refuses_what_it_does_not_read() {
         Some("the needs make a cycle")
     );
 }
+
+/// `text` with the `if:` of `job` left to GitHub's implied `success()`: its leading
+/// `!cancelled() && !failure() && ` removed, as the conditions of the gate and the deploy were
+/// before they named their results.
+fn implied(text: &str, job: &str) -> String {
+    let start = text
+        .find(&format!("\n  {job}:\n"))
+        .unwrap_or_else(|| panic!("no job {job}"));
+    let from = "if: ${{ !cancelled() && !failure() && ";
+    let at = start
+        + text[start..]
+            .find(from)
+            .unwrap_or_else(|| panic!("{job} does not start its if: with {from}"));
+    format!("{}if: ${{{{ {}", &text[..at], &text[at + from.len()..])
+}
+
+/// Asserts that each of the gate, `cp-deploy-digest` and `cp-deploy`, its `if:` left to the
+/// implied `success()`, is skipped on a normal release, with everything below it: the skipped
+/// retry slots up its chain hold it back, so naming the results is what makes it run.
+#[test]
+fn the_implied_success_skips_the_gate_and_the_deploy_on_a_normal_release() {
+    let text = workflow();
+    use Outcome::{Skipped, Success};
+    for (job, want) in [
+        ("blackbox", [Skipped, Skipped, Skipped, Skipped]),
+        ("cp-deploy-digest", [Success, Skipped, Skipped, Success]),
+        ("cp-deploy", [Success, Success, Skipped, Success]),
+    ] {
+        let want: Vec<(String, Outcome)> = FARM
+            .iter()
+            .zip(want)
+            .map(|(j, o)| ((*j).to_owned(), o))
+            .collect();
+        assert_eq!(
+            outcomes(&implied(&text, job), normal(&[]), &FARM),
+            want,
+            "{job}"
+        );
+    }
+}
