@@ -62,8 +62,11 @@ pub(crate) struct Receiver {
     /// The port it listens on, on `127.0.0.1`.
     pub(crate) port: u16,
     /// The head of each request it read, in order: the request line and the headers, up to and
-    /// including the blank line. A connection whose handshake failed counts for nothing.
+    /// including the blank line. A connection whose handshake failed is not here but in
+    /// `abandoned`.
     heads: mpsc::Receiver<String>,
+    /// One message for each connection that ended before a whole request head arrived.
+    abandoned: mpsc::Receiver<()>,
     /// Every connection it answered, held open while the receiver lives.
     _held: mpsc::Receiver<Held>,
 }
@@ -78,6 +81,7 @@ impl Receiver {
         let replies: Vec<String> = replies.iter().map(|reply| (*reply).to_owned()).collect();
         let (head_to, heads) = mpsc::channel();
         let (held_to, held) = mpsc::channel();
+        let (_abandoned_to, abandoned) = mpsc::channel();
         thread::spawn(move || {
             let mut index = 0;
             loop {
@@ -100,6 +104,7 @@ impl Receiver {
         Receiver {
             port,
             heads,
+            abandoned,
             _held: held,
         }
     }
@@ -108,6 +113,14 @@ impl Receiver {
     /// once that send has returned with an answer.
     pub(crate) fn heads(&self) -> Vec<String> {
         self.heads.try_iter().collect()
+    }
+
+    /// How many connections ended before a whole request head arrived (a sender that refused
+    /// the certificate, say) since the last call. The receiver takes one connection at a time
+    /// and counts an abandoned one before it accepts the next, so every connection abandoned
+    /// before a later request is counted once that request's send has returned with an answer.
+    pub(crate) fn abandoned(&self) -> usize {
+        self.abandoned.try_iter().count()
     }
 
     /// The callback URL of `path` (which starts with `/`) on this receiver, by [`HOST`].
