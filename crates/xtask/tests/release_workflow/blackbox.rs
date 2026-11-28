@@ -4,17 +4,20 @@
 //! [`suite_problems`] every way the root BUCK file's target does:
 //!
 //! - `blackbox` needs `plan`, `publish` and the black-box tests that are release jobs today
-//!   ([`TESTS`]), and nothing else; its `if:` is [`BLACKBOX_IF`] alone: a push to main on the
-//!   plan's release, with no status function, so it runs only when every job it needs passed (a
-//!   test that failed or was skipped holds it back).
+//!   ([`TESTS`]), and nothing else; its `if:` is [`BLACKBOX_IF`] alone: not cancelled, nothing up
+//!   the chain failed, a push to main on the plan's release, and each job it needs succeeded, by
+//!   name, so it runs only when every job it needs passed (a test that failed or was skipped holds
+//!   it back). The results are named, not left to GitHub's implied `success()`, which is false
+//!   when any job up the chain was skipped: the apt jobs' retry slots under `check-apt` are
+//!   skipped on every release with no apt conflict (`skip_rule` runs the scenarios).
 //! - It calls farm.yml ([`FARM`]) with the one input `target` = [`TARGET`], the Buck2 target of the
 //!   black-box tests, which farm.yml's last step builds on the build farm in place of `//:ci`
 //!   (`tests/apt_workflow`'s `farm_steps` holds that step). [`TARGET`] is named nowhere else in
 //!   release.yml but its comments. It grants `contents: read` and `id-token: write` (farm.yml's
 //!   job joins the build farm's network with the token) and passes no secret.
 //! - `desired` and `cp-deploy-digest` ([`GATED`]) need `blackbox`; `desired`, whose `if:` has
-//!   `!cancelled()`, also requires `needs.blackbox.result == 'success'`, and `cp-deploy-digest`'s
-//!   `if:` has no status function, so GitHub's implied `success()` requires it.
+//!   `!cancelled()`, also requires `needs.blackbox.result == 'success'`, and so does
+//!   `cp-deploy-digest`'s, which starts `!cancelled() && !failure()` and has no `always()`.
 //! - `release-red` and `release-green` need `blackbox`, so its result is reported, and
 //!   `release-green` runs only when it passed: a run whose black-box tests were skipped deployed
 //!   nothing, and closes no RELEASE-RED issue.
@@ -39,7 +42,7 @@ const TESTS: [&str; 2] = ["check-apt", "beta-macos-first-install"];
 const GATED: [&str; 2] = ["desired", "cp-deploy-digest"];
 
 /// The `if:` of `blackbox`.
-const BLACKBOX_IF: &str = "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}";
+const BLACKBOX_IF: &str = "    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.check-apt.result == 'success' && needs.beta-macos-first-install.result == 'success' }}";
 
 /// The workflow `blackbox` calls: the build farm lane, which builds the target it is given.
 const FARM: &str = "./.github/workflows/farm.yml";
@@ -126,11 +129,11 @@ fn gate_problems(text: &str) -> Vec<String> {
     }
     let digest = ifs(job(&all, "cp-deploy-digest"));
     if digest.len() != 1
-        || ["always()", "!cancelled()", "failure()", "success()"]
-            .iter()
-            .any(|f| digest[0].contains(f))
+        || !digest[0].starts_with("    if: ${{ !cancelled() && !failure() && ")
+        || digest[0].contains("always()")
+        || !digest[0].contains(" && needs.blackbox.result == 'success'")
     {
-        problems.push("cp-deploy-digest has a status function".to_owned());
+        problems.push("cp-deploy-digest runs without blackbox's success".to_owned());
     }
     problems
 }
@@ -152,8 +155,8 @@ fn suite_problems(text: &str) -> Vec<String> {
 }
 
 /// Asserts the shape of `blackbox`: it needs `publish` and the black-box test jobs, runs only when
-/// all of them passed, and calls farm.yml with the one target named here alone; each change below
-/// is refused.
+/// all of them passed (each named by its result, after `!cancelled() && !failure()`), and calls
+/// farm.yml with the one target named here alone; each change below is refused.
 #[test]
 fn blackbox_builds_the_black_box_target_on_the_farm_after_every_test_job_passed() {
     let text = workflow();
@@ -174,14 +177,24 @@ fn blackbox_builds_the_black_box_target_on_the_farm_after_every_test_job_passed(
             "needs: [plan, publish, check-apt, beta-macos-first-install]",
             "needs: [plan, publish, check-apt, beta-macos-first-install, beta-macos]",
         ),
+        // Left to the implied `success()`, which a skipped retry slot up the chain makes false.
+        ("if: ${{ !cancelled() && !failure() && ", "if: ${{ "),
         (
-            "if: ${{ github.event_name",
-            "if: ${{ !cancelled() && github.event_name",
+            "if: ${{ !cancelled() && !failure() && ",
+            "if: ${{ !cancelled() && ",
         ),
         (
-            "if: ${{ github.event_name",
-            "if: ${{ always() && github.event_name",
+            "if: ${{ !cancelled() && !failure() && ",
+            "if: ${{ always() && ",
         ),
+        (
+            " && needs.check-apt.result == 'success'",
+            " && needs.check-apt.result != 'failure'",
+        ),
+        (" && needs.check-apt.result == 'success'", ""),
+        (" && needs.publish.result == 'success'", ""),
+        (" && needs.plan.result == 'success'", ""),
+        (" && needs.beta-macos-first-install.result == 'success'", ""),
         (
             "github.event_name == 'push' && github.ref == 'refs/heads/main' && ",
             "",
@@ -254,13 +267,18 @@ fn the_farm_is_told_only_after_blackbox_passed() {
         ),
         (
             "cp-deploy-digest",
-            "if: ${{ github.event_name",
-            "if: ${{ !cancelled() && github.event_name",
+            "if: ${{ !cancelled() && !failure() && ",
+            "if: ${{ ",
         ),
         (
             "cp-deploy-digest",
-            "if: ${{ github.event_name",
-            "if: ${{ always() && github.event_name",
+            "if: ${{ !cancelled() && !failure() && ",
+            "if: ${{ always() && !cancelled() && !failure() && ",
+        ),
+        (
+            "cp-deploy-digest",
+            " && needs.blackbox.result == 'success'",
+            "",
         ),
         ("release-red", "promote-macos, blackbox,", "promote-macos,"),
         (
