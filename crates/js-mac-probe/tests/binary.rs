@@ -103,7 +103,7 @@ fn write_bytes_into_a_missing_directory_is_refused() {
     assert!(stderr(&out).starts_with("errno=2 "), "{out:?}");
 }
 
-/// Linux enforces `RLIMIT_AS` (macOS does not, which `limits/as-not-enforced` checks): an
+/// Linux enforces `RLIMIT_AS` (macOS gives no cap, which `limits/as-not-enforced` checks): an
 /// allocation larger than the limit is refused and the mode exits 1 naming the size. A
 /// smaller one under the same limit succeeds. Catches a mode that sets no limit (the large
 /// allocation then succeeds) and one that reports an allocation it did not make. Built on
