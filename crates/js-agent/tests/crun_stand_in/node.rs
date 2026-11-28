@@ -361,13 +361,17 @@ impl Node {
 
     /// The hooks: nothing is given away, the clock reads 5000, the monotonic clock stands still
     /// (so a run's CPU has no peak: no time passes), the waits are as given, and the `/proc` of
-    /// the node is [`elsewhere`]'s.
+    /// the node is [`elsewhere`]'s. A supervisor a removal ends by force is waited for until it
+    /// is gone (the force wait is [`LONG`]): how long a process sent SIGKILL takes to go is the
+    /// kernel's, and a loaded host takes longer than any short wait a test could pick. Only a
+    /// test of a supervisor the kill cannot end sets a force wait of its own.
     pub fn hooks(kill_wait: Duration, pull_limit: Duration) -> Hooks {
         Hooks {
             chown: note,
             now_ms: clock,
             mono_us: || 7_000_000,
             kill_wait,
+            force_wait: LONG,
             pull_limit,
             call_limit: LONG,
             proc_read: elsewhere,
