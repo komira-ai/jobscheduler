@@ -1,8 +1,13 @@
 //! Small helpers shared by the modules.
 
 use std::future::pending;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::task::spawn_blocking;
+
+/// The calls of [`blocking`] the process has made: each one a task on the runtime's pool for
+/// blocking calls, what `js_blocking_tasks_total` serves.
+static BLOCKING_TASKS: AtomicU64 = AtomicU64::new(0);
 
 /// `value` when there is one; otherwise a future that never completes. A channel whose
 /// sender is gone has no more to say, and the caller waits on its other events (a
@@ -19,10 +24,17 @@ pub(crate) async fn or_pending<T>(value: Option<T>) -> T {
 /// which an async handler must not make itself. A panic in `work` is raised again in the
 /// caller.
 pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    BLOCKING_TASKS.fetch_add(1, Ordering::Relaxed);
     match spawn_blocking(work).await {
         Ok(done) => done,
         Err(failed) => std::panic::resume_unwind(failed.into_panic()),
     }
+}
+
+/// How many tasks [`blocking`] has run on the runtime's pool for blocking calls since the process
+/// started, whichever server of the process ran them.
+pub(crate) fn blocking_tasks() -> u64 {
+    BLOCKING_TASKS.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -36,9 +48,9 @@ mod tests {
 
     /// Asserts that the work runs on a thread of its own, not on the thread of the task
     /// that awaits it (the single thread of this test's runtime), and that a panic in
-    /// the work reaches the caller as a panic. It catches a helper that calls the work
-    /// inline, which would block the runtime on a file sync, and one that swallows a
-    /// panic.
+    /// the work reaches the caller as a panic, and that the call is counted. It catches a
+    /// helper that calls the work inline, which would block the runtime on a file sync, one
+    /// that swallows a panic, and one that the count of blocking tasks misses.
     #[tokio::test]
     async fn work_runs_off_the_task_and_its_panic_is_raised() {
         // Both jobs are plain functions, so one instantiation of the helper runs both.
@@ -50,7 +62,10 @@ mod tests {
             panic!("the work failed");
         }
         let jobs: [fn(); 2] = [record, fail];
+        let before = blocking_tasks();
         blocking(jobs[0]).await;
+        // Other tests of the process run tasks too, so the count is at least one more.
+        assert!(blocking_tasks() > before);
         let ran_on = *RAN_ON.lock().unwrap();
         assert!(ran_on.is_some());
         assert_ne!(ran_on, Some(thread::current().id()));
