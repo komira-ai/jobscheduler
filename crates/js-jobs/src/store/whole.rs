@@ -2,8 +2,9 @@
 //! and 6.2): a placement that writes its prepare deadline and its own wall limit and drops the
 //! job's mark in the same commit ([`JobStore::place_with`]), the failed prepare as the placement
 //! engine decided it ([`JobStore::fail_prepare_with`]), and the restart of a prepare after a
-//! hello ([`JobStore::restart_prepare`]). Each is one transaction whose preconditions are the
-//! versions of the rows it read, so a row that changed in between makes it
+//! hello ([`JobStore::restart_prepare`]), and the start of a prepared job on a host no row
+//! holds tainted ([`JobStore::start_untainted`]). Each is one transaction whose preconditions
+//! are the versions of the rows it read, so a row that changed in between makes it
 //! [`JobStoreError::Stale`].
 //!
 //! The reads and refusals that a placement, a requeue and a restart share are here too, so the
@@ -437,6 +438,32 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let txn = txn.check(keys::job(id), Cond::Version(job_version));
         self.commit(id, txn)?;
         Ok(restarted)
+    }
+
+    /// Moves the placed whole-host job `id` on `host` to starting, as [`JobStore::transition`]
+    /// moves it (its start is queued for the host in the same transaction), when no row holds
+    /// the host tainted: the host's `taint/<host>` row and the taint its binding
+    /// `hosts/binding/<host>` holds are read, and the commit checks the first absent and the
+    /// binding at the version read, so a taint any server stores in between makes the start
+    /// [`JobStoreError::Stale`] rather than letting the job start on a tainted host (design
+    /// `multi-instance.md`, section 3.3). Returns the job as it is after the move.
+    ///
+    /// # Errors
+    /// [`JobStoreError::HostTainted`] when a row holds the host tainted, and nothing is written;
+    /// [`JobStoreError::Corrupt`] when the binding cannot be read for its taint; otherwise as
+    /// [`JobStore::transition`] from placed to starting.
+    pub fn start_untainted(&self, id: &JobId, host: &HostId) -> Result<JobRecord, JobStoreError> {
+        let taint_key = keys::taint(host);
+        let taint = self.store.get(&taint_key)?;
+        let binding = self.store.get(&keys::binding(host))?;
+        let (binding_key, binding_cond) =
+            host_rows::untainted((id, host), taint.as_ref(), binding)?;
+        let (txn, moved) = self.transition_txn(id, JobState::Placed, JobState::Starting)?;
+        let txn = txn
+            .check(taint_key, Cond::Absent)
+            .check(binding_key, binding_cond);
+        self.commit(id, txn)?;
+        Ok(moved)
     }
 
     /// The job `id` and its allocation, each at the version read, for the failed prepare of a

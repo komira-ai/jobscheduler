@@ -512,6 +512,18 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         expected: JobState,
         next: JobState,
     ) -> Result<JobRecord, JobStoreError> {
+        let (txn, moved) = self.transition_txn(id, expected, next)?;
+        self.commit(id, txn)?;
+        Ok(moved)
+    }
+
+    /// The transaction of [`JobStore::transition`] and the job as it writes it, not committed.
+    pub(super) fn transition_txn(
+        &self,
+        id: &JobId,
+        expected: JobState,
+        next: JobState,
+    ) -> Result<(Txn, JobRecord), JobStoreError> {
         let (job, job_version) = self.job_row(id)?;
         ensure(
             job.state == expected,
@@ -538,8 +550,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             ..job.clone()
         };
         let txn = index::put_job(Txn::new(), Some(&job), &moved, Cond::Version(job_version))?;
-        self.commit(id, self.start_on_move(txn, &job, next, now)?)?;
-        Ok(moved)
+        Ok((self.start_on_move(txn, &job, next, now)?, moved))
     }
 
     /// The requeue after a failed prepare (design section 5.4): a placed whole-host job goes

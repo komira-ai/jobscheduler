@@ -671,9 +671,8 @@ impl HostBooking {
 /// kinds of js-sched's `Bar`, with its ends on the store's clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exclusion {
-    /// A back-off until the instant given (exclusive): the job marks no host under it, and
-    /// takes it when quiet only if no other host could run it. No hold is given up any
-    /// more, so only a caller's bar or an older row sets one.
+    /// A back-off until the instant given (exclusive): the job marks no host under it, and takes
+    /// it when quiet only if no other host could run it (only a caller's bar or an older row).
     Backoff(StoreTime),
     /// A hard exclusion until the instant given (exclusive).
     Until(StoreTime),
@@ -682,10 +681,8 @@ pub enum Exclusion {
 }
 
 /// The mark of a queued whole-host job (design section 5.4): the host it holds while that host
-/// drains, when the mark was made, its deadline, the end of the host's tail when it was made,
-/// and the hosts the job is kept off, each with its end. It is the row `mark/<id>`, one per
-/// job, written with [`crate::JobStore::put_mark`]. The failed-prepare count of a job is not
-/// here: it belongs to the job's row.
+/// drains, and what the fields say. It is the row `mark/<id>`, one per job, written with
+/// [`crate::JobStore::put_mark`]; the failed-prepare count belongs to the job's row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkRecord {
     /// The job that holds the mark; the row's key is the job's.
@@ -702,13 +699,15 @@ pub struct MarkRecord {
     pub tail_end: Option<StoreTime>,
     /// The hosts the job may not mark, each with what keeps it off and until when.
     pub exclusions: BTreeMap<HostId, Exclusion>,
+    /// Until when the mark waits for its host's hello, on the store's clock, written once
+    /// ([`crate::JobStore::wait_for_hello`]); `None`: no pass waited (an earlier build's row).
+    pub hello_by: Option<StoreTime>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }
 
 impl MarkRecord {
-    /// The mark of `job` on `host`, made at `made`, with its deadline at `deadline`, no tail end
-    /// known and no exclusions.
+    /// The mark of `job` on `host`, made at `made`, due at `deadline`, with nothing else set.
     #[must_use]
     pub fn new(job: JobId, host: HostId, made: StoreTime, deadline: StoreTime) -> MarkRecord {
         MarkRecord {
@@ -718,6 +717,7 @@ impl MarkRecord {
             deadline,
             tail_end: None,
             exclusions: BTreeMap::new(),
+            hello_by: None,
             carried: Carried::default(),
         }
     }
