@@ -245,6 +245,25 @@ fn each_failure_is_retried_with_backoff() {
     assert_eq!(stranger.heads(), Vec::<String>::new());
 }
 
+/// Asserts that a receiver counts a connection whose sender refused its certificate as one
+/// abandoned handshake with no request, and then answers the next sender's request. A sender
+/// that trusts the receiver's authority sends after the refused one: the receiver takes one
+/// connection at a time, so its answer comes only after the abandoned handshake was counted,
+/// and the count is whole when the test reads it. Catches a receiver that counts nothing for
+/// a handshake that ended, one that reads it as a request, and one that stops accepting
+/// after it.
+#[test]
+fn a_refused_certificate_is_an_abandoned_handshake() {
+    let authority = Authority::new();
+    let other = Authority::new();
+    let receiver = Receiver::start(&other, &[&status(200)]);
+    let url = receiver.url("/");
+    let refused = send(&sender(&loopback(), &authority), &url);
+    let trusted = send(&sender(&loopback(), &other), &url);
+    assert_eq!([refused, trusted], [FAILED, CallbackAnswer::Delivered]);
+    assert_eq!((receiver.abandoned(), receiver.heads().len()), (1, 1));
+}
+
 /// Asserts that a try goes to the address the resolver gave and the rule admitted (the name
 /// is asked once and the receiver gets the call), that a literal host is connected to with no
 /// lookup, and that an answer holding one denied address among admitted ones refuses the

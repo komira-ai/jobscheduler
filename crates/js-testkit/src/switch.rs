@@ -133,4 +133,49 @@ mod tests {
         let mut stream = TcpStream::connect(switch.addr).await.expect("connect");
         assert!(round_trip(&mut stream).await.is_err());
     }
+
+    /// A server on loopback that answers every connection with `pong` and closes it.
+    async fn pong() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                tokio::spawn(async move {
+                    let mut ping = [0; 4];
+                    stream.read_exact(&mut ping).await.expect("ping");
+                    stream.write_all(b"pong").await.expect("pong");
+                });
+            }
+        });
+        addr
+    }
+
+    /// A connection that finishes by itself: the client gets the server's answer and then end
+    /// of stream, and once the client has closed too the forwarding task of that connection
+    /// ends. The test waits for the task's handle to say it finished, so the end of the
+    /// forwarding task has run before the test returns. Catches a forwarder that does not
+    /// carry a finished connection to its end, and one whose forwarding task outlives both
+    /// sides' close.
+    #[tokio::test]
+    async fn a_connection_that_finishes_ends_its_forwarding_task() {
+        let switch = Switch::start(pong().await).await;
+        let mut client = TcpStream::connect(switch.addr).await.expect("connect");
+        client.write_all(b"ping").await.expect("write");
+        let mut answer = Vec::new();
+        client
+            .read_to_end(&mut answer)
+            .await
+            .expect("read to the end");
+        assert_eq!(answer, b"pong");
+        drop(client);
+        // The accept task records the handle in the same step as it spawns the forwarding
+        // task, which has carried the answer, so the handle is there.
+        let copy = switch.connections.lock().expect("lock")[0].clone();
+        // The test's runtime has one thread, and the forwarding task sees the client's close
+        // only once it runs again, so the first look finds it still running.
+        while !copy.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    }
 }
