@@ -12,7 +12,7 @@ use super::{Rig, cancelled, host, rig, share};
 use crate::codec::{encode_cordon, encode_taint};
 use crate::interfere::INJECTED;
 use crate::record::ScaleMark;
-use crate::{EndReason, HostTaint, JobStoreError, Kept, Retire};
+use crate::{AllocationStep, EndReason, HostTaint, JobEnd, JobStoreError, Kept, Retention, Retire};
 
 /// `secs` seconds.
 fn secs(secs: u64) -> Duration {
@@ -168,6 +168,70 @@ where
         "{name}: a host whose allocation was freed"
     );
     assert!(!has_row(&rig, "host-freed"), "{name}: the freed host's row");
+}
+
+/// A lost host whose only allocations are releasing under jobs that have ended (lost to its
+/// silence, or ended and since deleted at their retention end) is retired, its allocations left
+/// releasing for the server to free; one releasing under a job that has not ended (a cancel sent
+/// whose stop the host never confirmed) keeps the row, as does a booked one beside the ended.
+/// Catches a retirement refused for a stop the host will never confirm, so a dead host's row is
+/// never retired, and one that drops a host still owed a cancel's stop or holding a booked job.
+pub fn retire_node_gives_up_the_unconfirmed_stops_of_ended_jobs<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "retire_node_gives_up_the_unconfirmed_stops_of_ended_jobs";
+    let rig = rig(backend);
+    for text in ["host-lost", "host-cancel", "host-mixed"] {
+        hello_of(&rig, text);
+    }
+    let placed = |job: &str, on: &str| {
+        let id = rig.queue(job);
+        rig.jobs.place(&id, host(on), share()).expect("placed");
+        id
+    };
+    let swept = placed("rt-swept", "host-lost");
+    rig.jobs.end_job(&swept, cancelled()).expect("ends");
+    rig.clock.advance(Retention::DEFAULT.window() + secs(1));
+    assert_eq!(
+        rig.jobs.tick(),
+        Ok(vec![swept.clone()]),
+        "{name}: the sweep"
+    );
+    let lost = placed("rt-lost", "host-lost");
+    rig.jobs.end_job(&lost, JobEnd::HostSilent).expect("ends");
+    let asked = placed("rt-asked", "host-cancel");
+    rig.jobs.request_cancel(&asked).expect("a cancel");
+    rig.jobs.mark_releasing(&asked).expect("releasing");
+    let ended = placed("rt-ended", "host-mixed");
+    rig.jobs.end_job(&ended, JobEnd::HostSilent).expect("ends");
+    placed("rt-booked", "host-mixed");
+    rig.clock.advance(GRACE + secs(1));
+
+    for (text, why) in [
+        ("host-cancel", "a cancel's stop the host owes"),
+        ("host-mixed", "a booked job beside an ended one"),
+    ] {
+        assert_eq!(
+            rig.jobs.retire_node(&host(text), GRACE),
+            Ok(Retire::Refused(Kept::HoldsJobs)),
+            "{name}: {why}"
+        );
+    }
+    assert_eq!(
+        rig.jobs.retire_node(&host("host-lost"), GRACE),
+        Ok(Retire::Retired),
+        "{name}: a host owed only the stops of ended jobs"
+    );
+    assert!(!has_row(&rig, "host-lost"), "{name}: the retired row");
+    for id in [&lost, &swept] {
+        let step = rig.jobs.get_allocation(id).expect("reads").map(|a| a.step);
+        assert_eq!(
+            step,
+            Some(AllocationStep::Releasing),
+            "{name}: {id} was freed"
+        );
+    }
 }
 
 /// A beat that lands between the read and the delete moves the row, and the retirement reads it

@@ -57,8 +57,9 @@ pub(crate) struct AgentSetup {
     /// whether the placement engine trusts a wall time for backfill, up to which, and the
     /// margin it keeps.
     pub(crate) backfill: BackfillSetting,
-    /// The pool's `max_queue_wait` and `start_timeout`, which the tick's job pass enforces
-    /// (their defaults for a pool that does not set them, and for `--agent-pool-config`).
+    /// The pool's `max_queue_wait` and `start_timeout`, and the server's `silence_limit`, which
+    /// the tick's job pass enforces (their defaults for a pool or a file that does not set them,
+    /// and for `--agent-pool-config`).
     pub(crate) job_limits: JobLimits,
     /// The job store's setup when the job service is on; the agent side then opens it.
     pub(crate) jobs: Option<JobStoreSetup>,
@@ -113,6 +114,15 @@ pub(crate) fn check_more(
 }
 
 impl Config {
+    /// The same configuration with the job pass ending the jobs of a host silent for `limit`,
+    /// in place of `server.silence_limit` (or its default for a server started on flags): how a
+    /// server run in a simulation keeps a cut-off host's jobs past the default ten minutes.
+    #[must_use]
+    pub fn with_silence_limit(mut self, limit: std::time::Duration) -> Self {
+        self.agents.job_limits = self.agents.job_limits.with_silence_limit(limit);
+        self
+    }
+
     /// The same configuration with the job store (when the job service is on) stamping its
     /// rows with `clock` and minting its ids from `ids`, in place of the system's clock and
     /// random source: how a simulation makes its job and allocation ids, and the times it

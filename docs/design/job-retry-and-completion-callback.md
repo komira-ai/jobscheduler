@@ -75,7 +75,9 @@ What does not change:
   window counts from the job's final end.
 - The placement-time requeues stay as they are: a failed whole-host prepare, and a start refused `host-held`, `no-capacity` or
   `bundle-pending`. None of them is an attempt (section 3.2).
-- A host that is only silent still ends nothing (section 6.3 of the design), so silence never starts a retry.
+- Silence never starts a retry. A host silent for less than the server's `silence_limit` ends nothing; one silent past it has its jobs
+  ended lost with the cause `host-silent` (section 6.3 of the design), and that loss is never retried, whatever the job's policy: the
+  attempt may still run on the host, and a retry would place it a second time.
 
 ## 2. What the design rests on (merged code today)
 

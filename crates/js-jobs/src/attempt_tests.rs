@@ -41,6 +41,7 @@ fn job(host_id: Option<&str>, placed_at: Option<StoreTime>, trail: AttemptTrail)
         cancel_requested_at: None,
         result: None,
         start_failure_detail: None,
+        lost_cause: None,
         retention_ends: None,
         deadline_floor: None,
         client: None,

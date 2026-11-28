@@ -317,7 +317,8 @@ fn agents_killed_for_good() -> Scenario {
 }
 
 /// Covers section 7 ("Result lost": the agent holds a result until it is acknowledged
-/// and resends it) and section 6.3 (nothing times out for silence alone). Twenty of a
+/// and resends it) and section 6.3 (no silence shorter than the server's `silence_limit`
+/// ends anything). Twenty of a
 /// hundred agents are cut off for 30 s, longer than the 15 s grace, while their runs
 /// end, and the cut heals. Proves, with every invariant on (`no-result-lost` among
 /// them), that every result produced during the cut arrives after the heal and is

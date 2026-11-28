@@ -33,6 +33,8 @@
 //!   `layered-rootfs` capability a submit records beside them has no field and is not shown.
 //! - The record keeps the agent's code of a start it refused: it is the job's
 //!   `start_failure_detail`, empty for every other job.
+//! - The record keeps why a job was lost when its end recorded a cause (a host silent past the
+//!   server's `silence_limit`): it is the job's `lost_cause`, unspecified for every other job.
 //! - The record keeps a job's retry policy, which its spec shows as given.
 //! - The record keeps a job's attempts (`docs/design/job-retry-and-completion-callback.md`,
 //!   section 3.7): the job and its result show its current attempt (from 1, also for a row
@@ -51,8 +53,8 @@ use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProto
 use js_caps::XCODE;
 use js_jobs::{
     Attempt, AttemptOutcome, CallbackState, CallbackStatus, Isolation, JobCallback, JobEvent,
-    JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy, ResourceUsage, ResultReason,
-    StartFailure,
+    JobRecord, JobResult, JobSpec, JobState, LostCause, Needs, NetworkPolicy, ResourceUsage,
+    ResultReason, StartFailure,
 };
 use js_proto::v1;
 use js_state::StoreTime;
@@ -437,6 +439,15 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
             .map(millis),
         callback_status: None,
         dropped_attempts: job.attempt.dropped(),
+        lost_cause: lost_cause(job.lost_cause).into(),
+    }
+}
+
+/// The cause the job service shows for `cause`, a lost job's; unspecified for none.
+fn lost_cause(cause: Option<LostCause>) -> v1::LostCause {
+    match cause {
+        Some(LostCause::HostSilent) => v1::LostCause::HostSilent,
+        None => v1::LostCause::Unspecified,
     }
 }
 

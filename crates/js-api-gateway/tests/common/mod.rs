@@ -539,6 +539,7 @@ pub fn job() -> Job {
             deadline_at_ms: Some(BIG + 9000),
         }),
         dropped_attempts: 1,
+        lost_cause: 0,
     }
 }
 

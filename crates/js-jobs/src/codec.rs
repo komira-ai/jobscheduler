@@ -46,6 +46,7 @@ pub(crate) mod dispatch_fields;
 mod file_fields;
 pub(crate) mod host_fields;
 mod key_fields;
+mod lost_fields;
 mod mark_fields;
 pub(crate) mod node_fields;
 mod queue_fields;
@@ -70,7 +71,7 @@ pub(crate) const FORMAT: u8 = 1;
 /// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`, the
 /// history key 66 in `key_fields`, the callback 68 in `callback_fields`, the retry policy 67 and
 /// the attempts 69 to 73 in `attempt_fields`, the usage's CPU tags 60 to 62, the series 64 and 65
-/// and the usage's swap peak 74 in `result_fields`).
+/// and the usage's swap peak 74 in `result_fields`, the lost cause 75 in `lost_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -398,6 +399,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put_opt(t::RETENTION_ENDS, job.retention_ends.map(time));
     result_fields::put_result(&mut row, job.result.as_ref());
     rootfs_fields::put_detail(&mut row, job.start_failure_detail.as_deref());
+    lost_fields::put_job(&mut row, job.lost_cause);
     row.put_opt(t::DEADLINE_FLOOR, job.deadline_floor.map(time));
     row.put_opt(
         t::CLIENT,
@@ -914,6 +916,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         cancel_requested_at,
         result,
         start_failure_detail,
+        lost_cause: lost_fields::take_job(&mut fields),
         retention_ends,
         deadline_floor: fields.opt(t::DEADLINE_FLOOR, time_of)?,
         client,

@@ -24,6 +24,7 @@ use crate::config::{
 };
 use crate::error::StartupError;
 use crate::job_api::submit::DEFAULT_MAX_JOB_WALL;
+use crate::job_expiry::DEFAULT_SILENCE_LIMIT;
 use crate::job_store::JobStoreSetup;
 use crate::rate::HelloLimit;
 use crate::store_health::UNREACHABLE_AFTER;
@@ -87,6 +88,7 @@ const SERVER_KEYS: &[&str] = &[
     "store",
     "allow_sqlite_store",
     "store_unreachable_after",
+    "silence_limit",
     "dispatch_lease_secs",
     "dispatch_recheck_ms",
     "metrics_listen",
@@ -135,6 +137,9 @@ pub(crate) struct Server {
     /// `store_unreachable_after`: how long the tick's store paths may fail before the store
     /// is unreachable; 60 s unless the file sets it.
     pub(crate) store_unreachable_after: Duration,
+    /// `silence_limit`: how long a host may go unheard before the job pass ends its jobs as
+    /// lost ([`crate::job_loss::lose_silent`]); 10 minutes unless the file sets it.
+    pub(crate) silence_limit: Duration,
     /// `dispatch_lease_secs` and `dispatch_recheck_ms`: what the dispatch poll is timed by;
     /// 10 s and 500 ms unless the file sets them.
     pub(crate) dispatch: DispatchTimes,
@@ -360,6 +365,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let max_job_wall = read_max_job_wall(&mut s)?;
     let (store, allow_sqlite_store) = read_store(&mut s)?;
     let store_unreachable_after = s.duration_or("store_unreachable_after", UNREACHABLE_AFTER)?;
+    let silence_limit = s.duration_or("silence_limit", DEFAULT_SILENCE_LIMIT)?;
     let dispatch = read_dispatch(&mut s)?;
     let max_lease_wall = s.duration("max_lease_wall")?;
     if let Some(wall) = max_lease_wall {
@@ -391,6 +397,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         store,
         allow_sqlite_store,
         store_unreachable_after,
+        silence_limit,
         dispatch,
     })
 }

@@ -46,8 +46,9 @@
 //!
 //! A retirement of a host id ([`Hosts::retire`]) deletes the host's row in the job store, this
 //! server's record of it and its stored binding, so that a pool at its `max_machines` has room
-//! for a new id (`crate::agents::retire`). A live host, and one that holds a job's allocation, a
-//! taint, a cordon or a scale-down mark, is refused `FAILED_PRECONDITION` with `host-live`,
+//! for a new id (`crate::agents::retire`). A live host, and one that holds a job's work (a job
+//! placed, starting or running there, or asked to cancel with its stop unconfirmed), a taint, a
+//! cordon or a scale-down mark, is refused `FAILED_PRECONDITION` with `host-live`,
 //! `host-holds-jobs`, `host-tainted`, `host-cordoned` or `host-marked`, and nothing is written;
 //! a store that fails is `UNAVAILABLE` `retire-unsaved`, and the same call again is the retry. An
 //! id with nothing left to retire answers `retired` false and writes nothing. An id no host can
@@ -326,8 +327,9 @@ pub(super) async fn clear_host_taint(
     }))
 }
 
-/// `RetireHost`: retires the id of a lost host that holds nothing, so that its pool has room
-/// for a new id; an id with nothing left to retire changes nothing.
+/// `RetireHost`: retires the id of a lost host that holds nothing but the unconfirmed stops of
+/// ended jobs (which it frees), so that its pool has room for a new id; an id with nothing left
+/// to retire changes nothing.
 pub(super) async fn retire_host(
     api: &JobApi,
     request: Request<RetireHostRequest>,

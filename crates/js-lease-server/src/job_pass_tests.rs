@@ -44,10 +44,11 @@ const DAY: Duration = Duration::from_secs(24 * 3600);
 /// The registry's grace: a host not heard for longer is silent.
 const GRACE: Duration = Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS);
 
-/// Limits long enough that no job of a test runs out of time.
+/// Limits long enough that no job of a test runs out of time or is lost to its host's silence.
 const NEVER: JobLimits = JobLimits {
     max_queue_wait: Duration::from_secs(365 * 24 * 3600),
     start_timeout: Duration::from_secs(365 * 24 * 3600),
+    silence_limit: Duration::from_secs(365 * 24 * 3600),
     ..JobLimits::DEFAULT
 };
 
@@ -136,11 +137,12 @@ impl Observe for Provider {
 
 /// One pass over the rig's tables at its clock, under `limits`, reading hosts from `provider`.
 fn pass(rig: &Rig, limits: JobLimits, provider: &Provider) -> Passed {
+    let now = store_time(now_ms(rig));
     run(
         &rig.jobs,
         (limits, &WholeNodeConfig::dedicated(1)),
         (provider, &NoMetrics),
-        store_time(now_ms(rig)),
+        (now, now),
     )
     .unwrap()
 }
@@ -422,13 +424,14 @@ async fn a_job_past_retention_is_deleted_and_a_live_one_is_not() {
     assert_eq!(rig.job(&live).state, JobState::Running);
 }
 
-// Rows 28, 35 and 41, and question 25. Catches any clock that ends a silent host's jobs or
-// frees their allocations (the rejected options B and C), a host forgotten under its jobs, a
-// silence read from the wrong instant, and a silence that never clears. The limits are set
-// long here so that only silence could end anything; the start timeout of a silent host's
-// starting job is a limit of its own (the test above).
+// Rows 28, 35 and 41, and question 25. Catches a silence shorter than the server's
+// `silence_limit` (a year here, so that only a limit read wrongly could end anything) that ends
+// a silent host's jobs or frees their allocations, a host forgotten under its jobs, a silence
+// read from the wrong instant, and a silence that never clears. The start timeout of a silent
+// host's starting job is a limit of its own (the test above); a silence past the limit is in
+// `job_pass_silence_tests.rs`.
 #[tokio::test]
-async fn a_lost_host_shows_silence_and_ends_nothing() {
+async fn a_silence_inside_the_limit_shows_and_ends_nothing() {
     let mut rig = clocked_rig("pass_silence", true, NEVER);
     let api = api(&rig);
     rig.register("host-a", true);
@@ -738,11 +741,12 @@ fn a_host_with_no_row_is_lost_once_by_the_pass_that_claims_the_period() {
         rig.allocation(&placed).end_reason,
         Some(EndReason::HostAbsent)
     );
+    let now = store_time(now_ms(&rig));
     let again = run(
         &rig.jobs,
         (NEVER, &WholeNodeConfig::dedicated(1)),
         (&Rows, &NoMetrics),
-        store_time(now_ms(&rig)),
+        (now, now),
     );
     assert_eq!(
         again.unwrap(),

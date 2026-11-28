@@ -141,7 +141,8 @@ pub enum Outcome {
     TimedOut,
     /// It was cancelled.
     Cancelled,
-    /// Its container is gone and no result exists.
+    /// Its host lost it (read absent, back without it, or silent past the server's limit, which
+    /// the job's `lost_cause` says) and no result exists. The service never runs it again.
     Lost,
     /// It did not get to run.
     FailedToStart,

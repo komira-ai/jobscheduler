@@ -21,13 +21,14 @@ use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version, Versioned};
 use js_types::HostId;
 
 use super::host_rows::binding_tainted;
-use super::{JobStore, booked_in};
+use super::{JobStore, allocation_at, booked_in, job_at, live_rows_in};
 use crate::codec::DecodeError;
 use crate::codec::node_fields::{decode_node, encode_node};
 use crate::error::JobStoreError;
-use crate::ids::IdSource;
+use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::node::{AppliedBeat, Beat, Kept, NodeHello, NodeRecord, NodeRow, NodeState, Retire};
+use crate::record::AllocationStep;
 
 /// The host's record the row `key` holds, which must name the host of its key.
 fn node_at(key: &str, row: &Versioned) -> Result<NodeRow, JobStoreError> {
@@ -414,9 +415,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
 
     /// Deletes the row of `host`, which the operator retires, when the host is silent and holds
     /// nothing: its `heard_at` is more than `grace` before the store's time now (so it is not
-    /// live), and it holds no live allocation, no taint (its own row or its binding's), no
-    /// cordon and no scale-down mark, as [`JobStore::forget_silent_nodes`] judges a row it
-    /// forgets. It is that forget for one host, without waiting out the lost-host retention.
+    /// live), and it holds no work, no taint (its own row or its binding's), no cordon and no
+    /// scale-down mark, as [`JobStore::forget_silent_nodes`] judges a row it forgets. It is that
+    /// forget for one host, without waiting out the lost-host retention, with one difference:
+    /// work is an allocation that is booked, or releasing under a job that has not ended (a
+    /// cancel whose stop the host has not confirmed). A releasing allocation whose job has ended
+    /// (lost to the host's silence, say), or whose job's row is gone, is a stop the host never
+    /// confirmed, which the operator gives up on by retiring the host: it keeps no row, and
+    /// stays releasing for the caller to free once the row is gone.
     /// The host's row is claimed and deleted at the version read; a hello or beat that lands
     /// between the read and the delete moves the row, and the row is read and judged again (so
     /// a host that came back is [`Kept::Live`]), as is a row another server deleted first
@@ -525,7 +531,7 @@ fn hello_record(
 }
 
 /// Whether the rows `read` shows let the row of `host`, read at `version`, be forgotten: it is
-/// still at that version, and the host holds nothing ([`kept_by`]).
+/// still at that version, and the host holds nothing ([`forget_kept`]).
 fn holds_nothing(
     read: &mut dyn TxnRead,
     host: &HostId,
@@ -534,13 +540,29 @@ fn holds_nothing(
     let same = read
         .get(&keys::node(host))?
         .is_some_and(|row| row.version == version);
-    Ok(same & kept_by(read, host)?.is_none())
+    Ok(same & forget_kept(read, host)?.is_none())
 }
 
-/// What the rows `read` shows `host` still holds or is owed, which keeps its row: a live
-/// allocation first, then a taint (its own row or its binding's), a cordon and a scale-down
-/// mark; `None` when it holds none of them.
+/// What the rows `read` shows `host` still holds or is owed, which keeps its row from being
+/// forgotten: a live allocation first, then a taint (its own row or its binding's), a cordon
+/// and a scale-down mark; `None` when it holds none of them.
+fn forget_kept(read: &mut dyn TxnRead, host: &HostId) -> Result<Option<Kept>, JobStoreError> {
+    kept(read, host, false)
+}
+
+/// What keeps the row of `host` from a retirement, as [`forget_kept`] judges it, but for the
+/// live allocations: only work keeps it ([`holds_work`]).
 fn kept_by(read: &mut dyn TxnRead, host: &HostId) -> Result<Option<Kept>, JobStoreError> {
+    kept(read, host, true)
+}
+
+/// What the rows `read` shows `host` still holds or is owed: a live allocation first (for a
+/// `retiring` judgement, only work), then a taint, a cordon and a scale-down mark.
+fn kept(
+    read: &mut dyn TxnRead,
+    host: &HostId,
+    retiring: bool,
+) -> Result<Option<Kept>, JobStoreError> {
     let binding_key = keys::binding(host);
     let binding_taint = match read.get(&binding_key)? {
         Some(row) => binding_tainted(&binding_key, &row.value)?,
@@ -549,9 +571,12 @@ fn kept_by(read: &mut dyn TxnRead, host: &HostId) -> Result<Option<Kept>, JobSto
     let taint_row = read.get(&keys::taint(host))?.is_some();
     let cordoned = read.get(&keys::cordon(host))?.is_some();
     let marked = read.get(&keys::hostmark(host))?.is_some();
-    let booked = booked_in(read, host)?;
+    let holds = match retiring {
+        true => holds_work(read, host)?,
+        false => booked_in(read, host)?.allocations > 0,
+    };
     let reasons = [
-        (booked.allocations > 0, Kept::HoldsJobs),
+        (holds, Kept::HoldsJobs),
         (binding_taint | taint_row, Kept::Tainted),
         (cordoned, Kept::Cordoned),
         (marked, Kept::Marked),
@@ -559,6 +584,28 @@ fn kept_by(read: &mut dyn TxnRead, host: &HostId) -> Result<Option<Kept>, JobSto
     Ok(reasons
         .into_iter()
         .find_map(|(holds, kept)| holds.then_some(kept)))
+}
+
+/// Whether `host` holds work that keeps its row from a retirement, as the reads of `read` show
+/// it: an allocation live there that is booked, or releasing under a job that has not ended. A
+/// releasing allocation whose job has ended, or whose job's row is gone, is not work.
+fn holds_work(read: &mut dyn TxnRead, host: &HostId) -> Result<bool, JobStoreError> {
+    let mut holds = false;
+    for (key, value) in live_rows_in(read, host)? {
+        let allocation = allocation_at(&key, &value)?;
+        let given_up =
+            (allocation.step == AllocationStep::Releasing) && job_ended(read, &allocation.job)?;
+        holds |= !given_up;
+    }
+    Ok(holds)
+}
+
+/// Whether the job `id` has ended, as the reads of `read` show it: its row says so, or it has
+/// no row (deleted at its retention end, which only an ended job reaches).
+fn job_ended(read: &mut dyn TxnRead, id: &JobId) -> Result<bool, JobStoreError> {
+    let key = keys::job(id);
+    let job = read.get(&key)?.map(|row| job_at(&key, &row.value));
+    Ok(job.transpose()?.is_none_or(|job| job.state.is_ended()))
 }
 
 /// Whether `record`, as read at the store's time `now`, holds a live session of another agent

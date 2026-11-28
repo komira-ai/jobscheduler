@@ -36,6 +36,16 @@ pub const BOOT_GRACE: Duration = Duration::from_secs(120);
 /// in one transaction.
 pub const SWEEP_BATCH: NonZeroUsize = NonZeroUsize::MIN.saturating_add(499);
 
+/// Why a job ended lost, when the server recorded a cause ([`JobRecord::lost_cause`]). A job
+/// lost another way (its host read absent, or not listing the job after a hello) records none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LostCause {
+    /// Its host was silent for longer than the server's `silence_limit`
+    /// ([`JobEnd::HostSilent`]): the job was not seen to end, and the container may still run
+    /// on the host until the host is heard again and told to stop it.
+    HostSilent,
+}
+
 /// Why a job that has a result ended (design section 3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultReason {
@@ -212,6 +222,10 @@ pub enum JobEnd {
     },
     /// Its container is gone and no result exists.
     Lost,
+    /// Its host was silent for longer than the server's `silence_limit`: lost, with the cause
+    /// [`LostCause::HostSilent`] kept on the record and no result. Its allocation is released,
+    /// not freed, and the host is told to stop the job when it is heard again.
+    HostSilent,
     /// It did not get to run.
     FailedToStart(StartFailure),
     /// Its host's agent refused the start, or failed it while preparing, with its own code:
@@ -249,7 +263,7 @@ impl JobEnd {
             | JobEnd::Memory { .. }
             | JobEnd::InputFailed { .. } => JobState::Failed,
             JobEnd::Cancelled { .. } => JobState::Cancelled,
-            JobEnd::Lost => JobState::Lost,
+            JobEnd::Lost | JobEnd::HostSilent => JobState::Lost,
             JobEnd::FailedToStart(failure) | JobEnd::Refused { failure, .. } => {
                 JobState::FailedToStart(*failure)
             }
@@ -260,6 +274,14 @@ impl JobEnd {
     fn detail(&self) -> Option<String> {
         match self {
             JobEnd::Refused { detail, .. } => Some(detail.clone()),
+            _ => None,
+        }
+    }
+
+    /// Why the job was lost, for an end that records a cause; `None` for every other end.
+    fn lost_cause(&self) -> Option<LostCause> {
+        match self {
+            JobEnd::HostSilent => Some(LostCause::HostSilent),
             _ => None,
         }
     }
@@ -290,7 +312,10 @@ impl JobEnd {
                 output,
                 Some(input_failure),
             )),
-            JobEnd::Lost | JobEnd::FailedToStart(_) | JobEnd::Refused { .. } => None,
+            JobEnd::Lost
+            | JobEnd::HostSilent
+            | JobEnd::FailedToStart(_)
+            | JobEnd::Refused { .. } => None,
         }
     }
 }
@@ -362,7 +387,7 @@ fn tail_of(mut text: String) -> (String, bool) {
 
 /// `job` ended as `end` says at `now`: its state, its end time, its result (none for a job
 /// that was lost or failed to start, with the tails cut to the cap), the agent's code of a
-/// refused start, its retention end,
+/// refused start, why it was lost when its end says, its retention end,
 /// `now` plus `retention`, its files' contents replaced by their digests
 /// ([`crate::JobFiles`]), and its current attempt, when it holds a host, appended to its
 /// attempts as the last ([`AttemptTrail::closed`]). This is the one place a job record is made
@@ -382,6 +407,7 @@ pub(crate) fn ended(
         ended_at: now,
     };
     let start_failure_detail = end.detail();
+    let lost_cause = end.lost_cause();
     let attempt = AttemptTrail::closed(&job, AttemptRecord::of_end(&end), now, false);
     let result = end
         .report()
@@ -408,6 +434,7 @@ pub(crate) fn ended(
         ended_at: Some(now),
         result,
         start_failure_detail,
+        lost_cause,
         retention_ends: Some(now.saturating_add(retention.window())),
         attempt,
         ..job
@@ -515,6 +542,7 @@ mod tests {
             queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
             start_failure_detail: None,
+            lost_cause: None,
             attempt: crate::AttemptTrail::default(),
         }
     }
@@ -548,8 +576,9 @@ mod tests {
 
     // Catches an end mapped to the wrong state or reason (a clean exit read as failed, a wall
     // limit read as an exit, a cancel without its reason), an exit code dropped or invented,
-    // the stream lengths or the CPU or memory series the host reported dropped from the result, and a
-    // result made for a job that was lost or failed to start.
+    // the stream lengths or the CPU or memory series the host reported dropped from the result, a
+    // result made for a job that was lost or failed to start, and a lost cause kept on an end
+    // other than a silent host's, or not kept on that one.
     #[test]
     fn every_end_has_its_state_and_its_result() {
         let cases = [
@@ -594,6 +623,7 @@ mod tests {
                 Some((ResultReason::Cancelled, Some(143))),
             ),
             (JobEnd::Lost, JobState::Lost, None),
+            (JobEnd::HostSilent, JobState::Lost, None),
             (
                 JobEnd::FailedToStart(StartFailure::StartTimeout),
                 JobState::FailedToStart(StartFailure::StartTimeout),
@@ -612,6 +642,8 @@ mod tests {
             assert_eq!(record.state, state, "{end:?}");
             assert_eq!(record.ended_at, Some(at(9)), "{end:?}");
             assert_eq!(record.retention_ends, Some(at(69)), "{end:?}");
+            let cause = matches!(end, JobEnd::HostSilent).then_some(LostCause::HostSilent);
+            assert_eq!(record.lost_cause, cause, "{end:?}");
             let got = record
                 .result
                 .as_ref()

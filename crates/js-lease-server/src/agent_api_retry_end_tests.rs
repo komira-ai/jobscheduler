@@ -162,7 +162,8 @@ fn pass_reading_absent(rig: &Rig, gone: &'static str) -> Vec<JobId> {
         &rig.jobs,
         (JobLimits::DEFAULT, &rules),
         (&provider, &NoMetrics),
-        now,
+        // A floor of now: no host is silent past a limit, so the pass reads absence alone.
+        (now, now),
     );
     passed.unwrap().lost
 }

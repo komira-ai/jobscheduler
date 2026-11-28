@@ -418,6 +418,7 @@ mod tests {
         }
         let decided = [
             JobEnd::Lost,
+            JobEnd::HostSilent,
             JobEnd::Cancelled {
                 exit_code: None,
                 output,

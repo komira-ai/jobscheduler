@@ -12,7 +12,7 @@ use crate::callback::JobCallback;
 use crate::codec::Carried;
 use crate::ids::{AllocationId, ClientName, JobId};
 use crate::queue::QueueTrail;
-use crate::result::JobResult;
+use crate::result::{JobResult, LostCause};
 
 /// What a job needs of the host it runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,8 +198,7 @@ impl JobFiles {
 /// the same job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSpec {
-    /// The image, pinned by digest. `None` only for a job whose root is its [`Self::layers`]
-    /// alone.
+    /// The image, pinned by digest. `None` only for a job whose root is its [`Self::layers`] alone.
     pub image: Option<ImageDigestRef>,
     /// The command.
     pub command: Vec<String>,
@@ -349,7 +348,8 @@ pub enum JobState {
     Failed,
     /// The client cancelled it.
     Cancelled,
-    /// Its container is gone and no result exists.
+    /// Its host was read absent, did not list it after a hello, or was silent past the server's
+    /// `silence_limit` ([`JobRecord::lost_cause`]): no result exists.
     Lost,
     /// It did not get to run.
     FailedToStart(StartFailure),
@@ -413,8 +413,7 @@ pub struct JobRecord {
     /// The host it is placed on, once placed.
     pub host: Option<HostId>,
     /// Whether the client asked to cancel it. Kept after the job ends, however it ends; the job
-    /// service's `Job.cancel_requested` shows it only until the end, and on a job that ended
-    /// lost.
+    /// service's `Job.cancel_requested` shows it only until the end, and on a job that ended lost.
     pub cancel_requested: bool,
     /// When the client first asked to cancel it.
     pub cancel_requested_at: Option<StoreTime>,
@@ -424,6 +423,8 @@ pub struct JobRecord {
     /// The agent's code for a start it refused ([`crate::JobEnd::Refused`]), set when the job
     /// ends so; `None` otherwise.
     pub start_failure_detail: Option<String>,
+    /// Why the job was lost, when its end recorded a cause ([`LostCause`]); `None` otherwise.
+    pub lost_cause: Option<LostCause>,
     /// When the job's record may be deleted: set when it ends, to the end plus the store's
     /// retention window, and raised at boot ([`crate::JobStore::raise_deadlines_at_boot`]);
     /// `None` until it ends.
@@ -516,8 +517,7 @@ pub enum AllocationStep {
     Booked,
     /// The job ended or a cancel was sent, and the host has not confirmed the container gone.
     Releasing,
-    /// The container is gone (or was never made). The row is kept as history and books
-    /// nothing.
+    /// The container is gone (or was never made). The row is kept as history and books nothing.
     Freed,
 }
 

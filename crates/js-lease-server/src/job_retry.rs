@@ -58,7 +58,9 @@ pub(crate) fn attempt_end(end: &JobEnd) -> AttemptEnd {
         JobEnd::Memory { .. } => AttemptEnd::Memory,
         JobEnd::InputFailed { .. } => AttemptEnd::InputFailed,
         JobEnd::Cancelled { .. } => AttemptEnd::Cancelled,
-        JobEnd::Lost => AttemptEnd::HostLost,
+        // A silent host's loss is never offered for a retry ([`crate::job_loss::lose_silent`]
+        // ends it without asking); classed with the other losses of a host.
+        JobEnd::Lost | JobEnd::HostSilent => AttemptEnd::HostLost,
         JobEnd::FailedToStart(failure) => start_failed(*failure, ""),
         JobEnd::Refused { failure, detail } => {
             let code = detail.split(':').next().unwrap_or_default();
@@ -127,7 +129,7 @@ pub(crate) fn retry(
     let not_before = jobs.now()?.saturating_add(wait);
     let queued = jobs.retry_txn(&job.id, AttemptRecord::of_end(end), not_before)?;
     let outcome = match end {
-        JobEnd::Lost => RetryOutcome::HostLost,
+        JobEnd::Lost | JobEnd::HostSilent => RetryOutcome::HostLost,
         _ => RetryOutcome::StartFailed,
     };
     metrics.job_retried(outcome);

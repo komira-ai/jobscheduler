@@ -3,15 +3,21 @@
 //! that is gone, leaves behind a row, a binding and a record that each keep counting toward its
 //! pool's `max_machines`, so a fixed pool sized to its machines refuses the new id `pool-full`.
 //! A retirement deletes all three, once the server has judged that the host is not live and
-//! holds nothing: no job's allocation, no taint, no cordon and no scale-down mark.
+//! holds nothing: no job's work, no taint, no cordon and no scale-down mark. Work is an
+//! allocation that is booked, or releasing under a job that has not ended; a releasing
+//! allocation whose job has ended (a job lost to the host's silence, a start that timed out,
+//! one ended and since deleted) is a stop the host never confirmed, which the operator gives
+//! up on by retiring the host: once the row is gone, each such allocation of the host is freed
+//! as the provider's absence frees it ([`crate::job_alloc::Freed::Retired`]), with its usage
+//! history row, so the host's room is booked no longer.
 //!
 //! The judgement is the registry's and the stored binding's first (a host this server holds
 //! that is live, tainted, cordoned or marked is kept, and so is one whose stored binding holds
 //! a taint, so that no server's retirement ends a taint another server stored), then the job
 //! store's, which deletes the row at the version it
 //! read ([`js_jobs::JobStore::retire_node`]): a hello or beat that lands in between keeps it.
-//! Only after the row is gone are the registry's record and the stored binding forgotten, so a
-//! refusal changes nothing. Every step is under [`Agents::host_writes`], as a hello and a
+//! Only after the row is gone are the given-up allocations freed and the registry's record and
+//! the stored binding forgotten, so a refusal changes nothing. Every step is under [`Agents::host_writes`], as a hello and a
 //! cordon are. A step that fails after the row is gone leaves the rest to the same call
 //! again, which finds no row and forgets what is left: a repeat is the retry, and a retirement
 //! with nothing left to forget answers `false` and writes nothing. Another server over the same
@@ -21,12 +27,14 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use js_jobs::{Kept, Retire};
+use js_jobs::{AllocationStep, JobId, JobStoreError, Kept, Retire};
 use js_registry::{HostState, OwnHost};
 use js_types::HostId;
 use tracing::{error, info};
 
 use super::Agents;
+use crate::job_alloc::{self, Freed};
+use crate::job_store::ServerJobs;
 use crate::util::blocking;
 
 /// Why a retirement was not made, or not wholly.
@@ -75,6 +83,11 @@ impl Agents {
             Retire::Retired => true,
             Retire::Absent => false,
         };
+        if let Some(jobs) = self.jobs.clone() {
+            let id = host.clone();
+            let freed = blocking(move || free_given_up(&jobs, &id)).await;
+            freed.map_err(unsaved)?;
+        }
         let record = self.registry.forget_host(host);
         let (this, id) = (Arc::clone(self), host.clone());
         let binding = blocking(move || this.store.forget(&id)).await;
@@ -100,6 +113,33 @@ fn held_by(own: &OwnHost) -> Option<Kept> {
     reasons
         .into_iter()
         .find_map(|(holds, kept)| holds.then_some(kept))
+}
+
+/// Frees each allocation of `host`, whose row a retirement deleted, that is releasing under a
+/// job that has ended or whose row is gone: the stops the host never confirmed. Answers how
+/// many it freed.
+///
+/// # Errors
+/// The first [`JobStoreError`] of a read or a free; what was freed before it stays, and the
+/// same retirement again frees the rest.
+fn free_given_up(jobs: &ServerJobs, host: &HostId) -> Result<usize, JobStoreError> {
+    let given_up: Vec<JobId> = jobs
+        .live_on(host)?
+        .into_iter()
+        .filter(|(allocation, job)| {
+            let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
+            (allocation.step == AllocationStep::Releasing) & ended
+        })
+        .map(|(allocation, _)| allocation.job)
+        .collect();
+    for id in &given_up {
+        job_alloc::free_allocation(jobs, id, Freed::Retired)?;
+    }
+    if !given_up.is_empty() {
+        let freed = given_up.len();
+        info!(%host, freed, "a retired host's unconfirmed stops were given up");
+    }
+    Ok(given_up.len())
 }
 
 /// The fault of a retirement whose store failed, logged as an error naming the failure.

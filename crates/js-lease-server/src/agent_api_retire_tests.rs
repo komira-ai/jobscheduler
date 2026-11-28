@@ -1,12 +1,13 @@
 //! The operator's retirement of a host id ([`crate::agents::Agents::retire`]) over a server
 //! that holds the job tables: a fixed pool at its cap refuses a new id until the lost old id is
 //! retired, and then admits it; a live host, and one that holds a job or a cordon, is refused
-//! with nothing written; a retirement whose store fails is the same call's to finish. Hellos go
+//! with nothing written; one that owes only the stops of ended jobs is retired and those
+//! allocations freed; a retirement whose store fails is the same call's to finish. Hellos go
 //! through the route; two servers share one store and one manual clock, and nothing sleeps.
 
 use std::time::Duration;
 
-use js_jobs::Kept;
+use js_jobs::{AllocationStep, EndReason, JobEnd, Kept, StartFailure};
 use js_types::HostId;
 use js_types::cordon::Asker;
 
@@ -88,6 +89,32 @@ async fn a_retire_of_a_host_holding_a_job_or_a_cordon_is_refused_and_writes_noth
     for kept in [&busy, &cordoned] {
         assert!(first.jobs.read_node(kept).unwrap().is_some(), "{kept}");
         assert!(first.agents.registry.own_host(kept).is_some(), "{kept}");
+    }
+}
+
+/// Asserts that a lost host whose jobs have all ended with their stops unconfirmed (one lost to
+/// the host's silence, one whose start timed out), their allocations releasing, is retired, and
+/// that the retirement frees both allocations as the host's absence does. Catches a dead host
+/// that can never be retired, its room booked for good, and a retirement that leaves booked the
+/// room of stops no host will ever confirm.
+#[tokio::test]
+async fn a_retire_of_a_host_owing_only_the_stops_of_ended_jobs_frees_them() {
+    let (mut first, _second) = two_servers("retire_given_up");
+    first.join("host-1", false).await;
+    let lost = first.place("job-lost", "host-1");
+    let timed_out = first.place("job-timeout", "host-1");
+    first.jobs.end_job(&lost, JobEnd::HostSilent).unwrap();
+    let start_timeout = JobEnd::FailedToStart(StartFailure::StartTimeout);
+    first.jobs.end_job(&timed_out, start_timeout).unwrap();
+    first.advance(PAST_GRACE);
+
+    let old = host("host-1");
+    assert_eq!(first.agents.retire(&old).await, Ok(true));
+    assert_eq!(first.jobs.read_node(&old).unwrap(), None, "the row");
+    for id in [&lost, &timed_out] {
+        let freed = first.allocation(id);
+        let absent = (AllocationStep::Freed, Some(EndReason::HostAbsent));
+        assert_eq!((freed.step, freed.end_reason), absent, "{id}");
     }
 }
 

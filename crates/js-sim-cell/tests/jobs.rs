@@ -70,6 +70,9 @@ const SILENT_CUT_AT: Duration = Duration::from_secs(45);
 const SILENT_CUT_FOR: Duration = Duration::from_secs(1_155);
 const SILENT_CHECK_AT: Duration = Duration::from_secs(1_100);
 const SILENT_SETTLE: Duration = Duration::from_secs(300);
+/// The server's silence limit in the silent-host scenario: longer than the cut, so the start
+/// timeout, not the silence limit (ten minutes by default), is what ends the job.
+const SILENT_LIMIT: Duration = Duration::from_secs(3_600);
 
 /// The cancel before the start is listed: hosts beat every second; every job is cancelled
 /// while its start is on the way, on a bus that delays a message by more than the interval
@@ -165,7 +168,8 @@ fn a_resubmitted_job_id_after_a_lost_answer_is_one_job() {
 /// until the host confirms) and 43 (a start never completes: failed to start,
 /// `start-timeout`; the allocation freed once the host confirms, kept while it is
 /// silent). One host is placed a job and cut off after the start reached it and before
-/// any heartbeat listed the job, for longer than the start timeout. States, while it is
+/// any heartbeat listed the job, for longer than the start timeout, under a silence limit
+/// longer than the cut ([`SILENT_LIMIT`]: the default ten minutes would end the job first). States, while it is
 /// still cut off, that the job was last read failed to start with `start-timeout` and its
 /// allocation releasing; and at the end, after the host came back still running the job,
 /// was told to stop it and confirmed it gone, that the allocation was freed, that the job
@@ -180,7 +184,8 @@ fn a_resubmitted_job_id_after_a_lost_answer_is_one_job() {
 fn a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it() {
     let timeout = JobState::FailedToStart(StartFailure::StartTimeout);
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), 1)
-        .heartbeat(SILENT_INTERVAL, SILENT_GRACE);
+        .heartbeat(SILENT_INTERVAL, SILENT_GRACE)
+        .silence_limit(SILENT_LIMIT);
     Scenario::new("a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)

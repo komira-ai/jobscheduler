@@ -1,9 +1,10 @@
 //! The one way the server frees an allocation (design section 6.2).
 //!
 //! An allocation is freed only when the host confirms the job's container is gone
-//! ([`Freed::HostConfirmed`]) or the provider reads the host absent
-//! ([`Freed::ProviderAbsent`]). A host that is only silent frees nothing: unknown is not
-//! absent. Every path that frees is in this module: [`free_allocation`], which records why
+//! ([`Freed::HostConfirmed`]), the provider reads the host absent ([`Freed::ProviderAbsent`]),
+//! or the operator retires the host while the stop of an ended job is unconfirmed
+//! ([`Freed::Retired`]). A host that is only silent frees nothing, even once its jobs are lost
+//! to its silence: unknown is not absent. Every path that frees is in this module: [`free_allocation`], which records why
 //! in the allocation's row from the job's end, [`answer_retired`], which ends a cancelled
 //! job and frees its allocation in the same commit ([`cancel_and_free`] is that end, which a
 //! whole-host job whose host has left `preparing` takes too, [`crate::job_whole`]), and
@@ -40,6 +41,9 @@ pub(crate) enum Freed {
     HostConfirmed,
     /// The provider read the host absent.
     ProviderAbsent,
+    /// The operator retired the host ([`crate::agents::Agents::retire`]) while the job's stop
+    /// was unconfirmed: recorded as the provider's absence is.
+    Retired,
 }
 
 /// Frees the allocation of the job `id` because `freed` (design section 6.2): booked or
@@ -64,7 +68,7 @@ pub(crate) fn free_allocation<S: Store, I: IdSource>(
 ) -> Result<AllocationRecord, JobStoreError> {
     let job = store.get_job(id)?;
     let reason = match freed {
-        Freed::ProviderAbsent => EndReason::HostAbsent,
+        Freed::ProviderAbsent | Freed::Retired => EndReason::HostAbsent,
         Freed::HostConfirmed => match &job {
             Some(job) if !attempt_over(job) & !job.cancel_requested => {
                 return Err(JobStoreError::NotReleasable { id: id.clone() });

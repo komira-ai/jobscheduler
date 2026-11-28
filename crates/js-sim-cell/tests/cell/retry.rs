@@ -467,6 +467,10 @@ const CUT_AT: Duration = Duration::from_secs(45);
 const CUT_FOR: Duration = Duration::from_secs(1_155);
 const LATE_RUN: Duration = Duration::from_secs(1_500);
 const LATE_SETTLE: Duration = Duration::from_secs(1_800);
+/// The server's silence limit in the late-result scenario: longer than the cut, so the first
+/// attempt ends at the start timeout and retries, rather than being lost to the silence limit
+/// (ten minutes by default), which never retries.
+const LATE_LIMIT: Duration = Duration::from_secs(3_600);
 
 /// Proves that a late result of an earlier attempt is answered stale and changes nothing.
 /// Two hosts beating every 30 s, a job that asks for two attempts, and both hosts cut off at
@@ -482,7 +486,9 @@ const LATE_SETTLE: Duration = Duration::from_secs(1_800);
 /// (`one-attempt-at-a-time`).
 pub fn a_late_result_of_an_earlier_attempt_is_stale() -> Scenario {
     let job = ItemId(0);
-    let spec = pool(2).heartbeat(LATE_INTERVAL, LATE_GRACE);
+    let spec = pool(2)
+        .heartbeat(LATE_INTERVAL, LATE_GRACE)
+        .silence_limit(LATE_LIMIT);
     Scenario::new("a_late_result_of_an_earlier_attempt_is_stale")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)

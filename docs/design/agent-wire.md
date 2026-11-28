@@ -483,7 +483,7 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
   since transport delay, a broken stream and a full worker queue remain. The design states no goal for this delay.
 
 **What a stream would change about section 6.3 (presence and loss).** Section 6.3 makes a host lost when it misses the grace, and
-says "Nothing times out for silence alone" for jobs. With a stream, a break would be a new, earlier signal, but it must not shorten
+says that no silence shorter than the server's `silence_limit` (10 minutes by default) ends a job. With a stream, a break would be a new, earlier signal, but it must not shorten
 the grace: a break followed by a reconnect inside the grace is the equivalent of today's lost heartbeat that the next one repairs,
 and treating the break as loss would make a network blip end a session that polling keeps. Whether a reconnect resumes the session
 (same epoch and secret) or says hello again (new epoch) is a choice the design does not make (open point 6). The grace would have to
