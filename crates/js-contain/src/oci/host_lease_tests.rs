@@ -91,12 +91,16 @@ async fn a_host_bundle_needs_a_lease_directory_of_the_daemons() {
 /// Proves a daemon that owns the lease directory runs `crun` as itself for it, writes the
 /// host container's `config.json` alone (no `etc` files: nothing is bound), with the
 /// host's `/` as the root, and starts it with that `crun`; a kill and a delete by the
-/// lease's name succeed with it. Catches a host bundle over the image's root, and one
-/// whose start, kill or delete takes the job user's `crun`.
+/// lease's name succeed with it; the start takes the host start lock (in this test's
+/// directory). Catches a host bundle over the image's root, and one whose start, kill or
+/// delete takes the job user's `crun`.
 #[tokio::test]
 async fn a_host_lease_of_the_daemons_gets_its_config_alone_and_the_daemons_crun() {
     let dir = scratch("host-lease-own");
-    let oci = start(&config(&dir, true), &dir.join("s")).expect("started");
+    let mut oci = start(&config(&dir, true), &dir.join("s")).expect("started");
+    let lock = dir.join("host-start.lock");
+    let locking = oci.crun.clone().with_start_lock(Some(lock.clone()));
+    Arc::get_mut(&mut oci).expect("the only handle").crun = locking;
     let me = rustix::process::getuid().as_raw();
     let lease = oci.lease_dirs("js-x-r1").dir;
     let spec = ContainerSpec {
@@ -116,6 +120,7 @@ async fn a_host_lease_of_the_daemons_gets_its_config_alone_and_the_daemons_crun(
     let mut running = oci.start(&spec, None).expect("started");
     running.wait().await;
     assert_eq!(running.run_end(), crun::RunEnd::Exited(0));
+    assert!(lock.is_file(), "the host start took no lock");
     oci.terminate("js-x-r1").await.expect("kill");
     oci.remove("js-x-r1").expect("delete");
 }

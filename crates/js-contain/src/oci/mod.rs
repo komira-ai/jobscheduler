@@ -24,7 +24,9 @@
 //! A host container ([`Isolation::Host`](crate::container::Isolation::Host)) is the
 //! exception: `crun` runs it as the daemon (which must be root), in the host's namespaces,
 //! with the host's `/` as its root and no mount, image root, helper or hand-over
-//! (`host_spec`); only its cgroup, `<lease cgroup>/ctr`, is its own.
+//! (`host_spec`); only its cgroup, `<lease cgroup>/ctr`, is its own. `crun` prepares the
+//! host's own `/dev` as it starts one, so its start holds the node's host start lock until
+//! `crun` is past that step (`start_lock`): two host starts on a node never run it at once.
 //!
 //! **What the container sees:** the unpacked image, read-only, as `/`, or the root the
 //! caller mounted ([`ContainerSpec::mounted_root`](crate::container::ContainerSpec::mounted_root),
@@ -76,6 +78,7 @@ pub(crate) mod logs;
 pub mod mounts;
 mod pin;
 pub(crate) mod spec;
+mod start_lock;
 pub mod supervise;
 pub mod words;
 

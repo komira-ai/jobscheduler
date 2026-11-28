@@ -248,6 +248,9 @@ pub(crate) struct Crun {
     program: PathBuf,
     scrub: EnvScrub,
     job: Option<JobDrop>,
+    /// The lock a host start holds across `crun`'s `/dev` step, none for a daemon that is not
+    /// root ([`super::start_lock::node_lock`]).
+    pub(super) start_lock: Option<PathBuf>,
 }
 
 /// The state directory of a lease's `crun` (`--root`), inside the lease directory: no
@@ -267,6 +270,7 @@ impl Crun {
             program,
             scrub,
             job,
+            start_lock: super::start_lock::node_lock(rustix::process::geteuid().as_raw()),
         }
     }
 
@@ -318,7 +322,8 @@ impl Crun {
 
     /// Runs the container `id` of the bundle in `bundle` to its end (`crun run`: create,
     /// start and delete in one process), its stdout and stderr to the given pipes. The
-    /// result is `crun`'s exit status. Dropping the future kills `crun`.
+    /// result is `crun`'s exit status. Dropping the future kills `crun`. A host lease's run
+    /// holds the node's host start lock while `crun` is at its `/dev` step (`start_lock`).
     pub(crate) async fn run(
         &self,
         lease: &Path,
@@ -337,7 +342,9 @@ impl Crun {
             stdout,
             stderr,
         }));
-        match client.run(id, bundle, Some(&opts)).await {
+        let lock = self.start_lock.as_deref();
+        let ran = super::start_lock::run(&client, (lease, lock), (id, bundle), opts);
+        match ran.await {
             Ok(()) => RunEnd::Exited(0),
             Err(Error::CommandFailed { status, .. }) => RunEnd::Exited(code_of(status)),
             Err(e) => RunEnd::Failed(format!("crun run: {e}")),

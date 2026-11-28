@@ -1,7 +1,8 @@
 //! Host jobs (`isolation = host`) over a real `crun`, as root: a host job shares the host's
 //! namespaces, is accounted and limited in its lease's cgroup, and is ended whole by a stop
 //! and by a removal (a cancel); a contained job beside it is still contained; and a runtime
-//! that does not launch host jobs refuses one.
+//! that does not launch host jobs refuses one. Host jobs start while another host start is
+//! at `crun`'s step that replaces the host's `/dev/ptmx`.
 //!
 //! A host job's root is the host's `/`, so its program is the host's `/bin/sh`, and it writes
 //! what it sees to the run's directory of the test (`sync`) at its host path, then opens the
@@ -197,6 +198,78 @@ fn a_host_job_shares_the_hosts_namespaces_and_network() {
     );
     assert_eq!(runtime.stop(&id, Duration::ZERO), Ok(()));
     assert_eq!(runtime.remove(&id), Ok(()));
+}
+
+/// The file every host start on a node locks while `crun` is at its `/dev` step: the runtime
+/// takes the same one (js-contain's `oci::start_lock`).
+const HOST_START_LOCK: &str = "/dev/.js-host-start.lock";
+
+/// How many host jobs [`host_jobs_start_while_another_start_replaces_dev_ptmx`] starts.
+const PTMX_STARTS: usize = 24;
+
+/// What `crun` does to `<root>/dev/ptmx` as it starts a host container, whose root is the
+/// host's `/` (crun's `create_missing_devs`): a link `ptmx -> pts/ptmx` made by force, an
+/// entry already there unlinked and the link made again. Done under the host start lock, as
+/// every host start takes it. What it cannot do (another start removed or made the entry in
+/// between) is left: the next round makes the link again.
+fn replace_dev_ptmx_as_crun_does(lock: &fs::File) {
+    lock.lock().expect("the host start lock");
+    let ptmx = Path::new("/dev/ptmx");
+    if std::os::unix::fs::symlink("pts/ptmx", ptmx).is_err() {
+        let _ = fs::remove_file(ptmx);
+        let _ = std::os::unix::fs::symlink("pts/ptmx", ptmx);
+    }
+    lock.unlock().expect("unlock the host start lock");
+}
+
+/// Proves a host job starts while another host start is at the step of `crun`'s that
+/// replaces the host's `/dev/ptmx`: a thread does that step over and over (as a second host
+/// job starting on the node does, under the host start lock) while [`PTMX_STARTS`] host jobs
+/// start one after another, and every one of them comes up. Afterwards `/dev/ptmx` is the link
+/// to `pts/ptmx` both leave. Catches host starts that are not serialized on the node: `crun`
+/// of one start unlinks the `/dev/ptmx` the other is about to unlink, and its start fails
+/// with `creating symlink for /dev/ptmx: File exists` (the job ends 126 before it is up).
+///
+/// It changes the host's `/dev/ptmx` as every host job's `crun` does.
+#[test]
+#[ignore = "real crun: run through cargo xtask crun-tests"]
+fn host_jobs_start_while_another_start_replaces_dev_ptmx() {
+    let mut s = crun_subject("host_job_ptmx");
+    s.prepared();
+    let mut runtime = s.open_allowing_host_jobs("crun-host-ptmx");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(HOST_START_LOCK)
+        .expect("the host start lock");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let other = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                replace_dev_ptmx_as_crun_does(&lock);
+                // Lets a start waiting for the lock take it between two rounds.
+                std::thread::yield_now();
+            }
+            replace_dev_ptmx_as_crun_does(&lock);
+        })
+    };
+    for n in 0..PTMX_STARTS {
+        let run = format!("p{n}");
+        let sync = s.sync_dir(&run);
+        let script = format!("echo up > {}/ready; exec sleep 100000", sync.display());
+        let spec = host_spec(&mut s, &run, &script);
+        let id = start_and_wait(&s, &mut runtime, &spec, &sync);
+        assert_eq!(runtime.stop(&id, Duration::ZERO), Ok(()), "{run}");
+        assert_eq!(runtime.remove(&id), Ok(()), "{run}");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    other.join().expect("the other start's thread");
+    let link = fs::read_link("/dev/ptmx").expect("/dev/ptmx is a link");
+    assert_eq!(link, Path::new("pts/ptmx"));
 }
 
 /// Proves a host job is accounted in its lease's cgroup: its process is in the
