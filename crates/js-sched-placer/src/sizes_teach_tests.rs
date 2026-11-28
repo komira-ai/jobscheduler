@@ -126,9 +126,17 @@ fn read_through(teaching: &mut Teaching, tables: &Tables) -> usize {
     teaching.pages()
 }
 
-/// The history of `placer` as its engine holds it, in full.
+/// The history of `placer` as its engine holds it, in full: every field of its sizes but the
+/// fit, its last, which counts the runs freed while serving and so differs, by design, between a
+/// start that taught the ended jobs and one whose passes freed them.
 fn held_history(placer: &SchedPlacer) -> String {
-    format!("{:?}", placer.engine().sizes())
+    let text = format!("{:?}", placer.engine().sizes());
+    let history = text.split(", fit: RunFit").next().unwrap_or(&text);
+    assert!(
+        history.len() < text.len(),
+        "the fit is the last field: {text}"
+    );
+    history.to_owned()
 }
 
 /// A start over [`history`] with 1000 fillers and a job live, then the passes of a farm: a job

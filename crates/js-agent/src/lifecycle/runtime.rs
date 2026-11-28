@@ -941,6 +941,28 @@ pub trait Runtime {
     fn whereabouts(&mut self, _id: &RunHandle) -> Whereabouts {
         Whereabouts::NoProcess
     }
+
+    /// The leases of this agent that the runtime found when it opened and left alone because
+    /// it cannot read their ledger files: it neither took their runs over nor removed them, so
+    /// a job among them may still run. The lifecycle keeps their provider sources and reports
+    /// each. The default, for a runtime that keeps no ledger, is none.
+    fn unread_leases(&self) -> Vec<UnreadLease> {
+        Vec::new()
+    }
+}
+
+/// A lease of this agent that a runtime left alone because it cannot read its ledger file
+/// ([`Runtime::unread_leases`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadLease {
+    /// The run the lease's name says it is of.
+    pub run_id: String,
+    /// The lease's name.
+    pub lease: String,
+    /// The version the file says it is of, when it says one this agent can find.
+    pub version: Option<u64>,
+    /// Why the file cannot be read.
+    pub why: String,
 }
 
 #[cfg(test)]

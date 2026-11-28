@@ -100,6 +100,7 @@ fn a_stopped_job_retires_its_fence_so_a_late_start_never_runs() {
     let (mut h, contact) = fenced("fence-stopped");
     h.apply(vec![Command::JobStop {
         job_id: "j1".to_owned(),
+        reason: None,
     }]);
     assert_eq!(
         names(&h.apply(vec![job_start("j1", "a1")])),
@@ -111,6 +112,7 @@ fn a_stopped_job_retires_its_fence_so_a_late_start_never_runs() {
     h.apply(vec![job_start("j2", "a2")]);
     h.apply(vec![Command::JobStop {
         job_id: "j2".to_owned(),
+        reason: None,
     }]);
     assert_eq!(
         retired_list(&h),
@@ -153,6 +155,7 @@ fn retired_fences_survive_an_agent_restart() {
     h.apply(vec![job_start("j2", "a2"), job_start("j3", "a3")]);
     h.apply(vec![Command::JobStop {
         job_id: "j2".to_owned(),
+        reason: None,
     }]);
     h.clock.advance(BOUND_MS);
     h.life.step();

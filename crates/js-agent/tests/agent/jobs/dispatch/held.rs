@@ -152,7 +152,7 @@ fn each_count_rises_once_for_each_event_and_each_event_is_one_line() {
         poller.poll(&mut script, &route(1)),
         Next::After(Duration::from_secs(2))
     );
-    assert_eq!(poller.failed(None), Next::After(Duration::from_secs(4)));
+    assert_eq!(poller.failed(None), Next::After(Duration::from_secs(2)));
     assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
     assert_eq!(poller.counts(), counts(1, 4));
     assert_eq!(
@@ -163,7 +163,7 @@ fn each_count_rises_once_for_each_event_and_each_event_is_one_line() {
             "dispatch: a poll failed (it was answered 503); the next in 1000 ms (failed polls: 2)",
             "dispatch: a poll failed (its answer was not a usable reply); the next in 2000 ms \
              (failed polls: 3)",
-            "dispatch: a poll failed (no transport could be made); the next in 4000 ms \
+            "dispatch: a poll failed (no transport could be made); the next in 2000 ms \
              (failed polls: 4)",
         ]
     );

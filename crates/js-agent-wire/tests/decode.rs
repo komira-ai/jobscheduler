@@ -47,7 +47,13 @@ fn unknown_isolation_is_typed_error_not_contained() {
     let reply: HeartbeatReply = serde_json::from_value(reply).unwrap();
     assert_eq!(
         reply.commands,
-        vec![Command::Unknown, Command::JobStop { job_id: "r".into() }]
+        vec![
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None
+            }
+        ]
     );
 }
 
@@ -187,6 +193,7 @@ fn unknown_fields_ignored_everywhere() {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        unknown_jobs: Vec::new(),
         log_grant: None,
         beat_now: false,
     };
@@ -222,7 +229,10 @@ fn unknown_enum_values_leave_known_entries_intact() {
         reply.commands,
         vec![
             Command::Unknown,
-            Command::JobStop { job_id: "b".into() },
+            Command::JobStop {
+                job_id: "b".into(),
+                reason: None
+            },
             Command::Unknown,
         ]
     );
@@ -382,7 +392,8 @@ fn an_older_servers_run_commands_read_as_unknown_beside_job_commands() {
             Command::JobStart(Box::new(job_start())),
             Command::Unknown,
             Command::JobStop {
-                job_id: "j1".into()
+                job_id: "j1".into(),
+                reason: None
             },
             Command::Unknown,
         ]

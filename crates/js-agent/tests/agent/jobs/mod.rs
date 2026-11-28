@@ -310,6 +310,7 @@ pub fn stops(id: &str) -> HeartbeatReply {
     HeartbeatReply {
         commands: vec![Command::JobStop {
             job_id: id.to_owned(),
+            reason: None,
         }],
         ..HeartbeatReply::default()
     }

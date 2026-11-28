@@ -824,6 +824,36 @@ pub struct JobResultAck {
     pub ack: Ack,
 }
 
+/// Why the server sends a [`crate::Command::JobStop`]: each is a record the server holds of
+/// the job (or, for the last two, of its own hold of a job it holds no record of), never the
+/// absence of one. A job the server holds no record of is not stopped for that; it is named in
+/// [`crate::HeartbeatReply::unknown_jobs`] instead and keeps running.
+///
+/// The agent stops the job whatever the reason, and an agent from before the field ignores
+/// it: the reason is what the agent tells its operator, never a second rule of what to stop.
+/// A reason this version does not know reads as [`StopReason::Unknown`], so a stop from a
+/// newer server is still a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The job's client cancelled it.
+    Cancelled,
+    /// The server holds the job's end, or the end of the attempt this host ran (a retry
+    /// ended it, a start timeout, a loss).
+    Ended,
+    /// The server holds that the attempt of the job on this host ended and the job was sent
+    /// back to the queue, or placed again elsewhere: the copy this host runs is an old one.
+    Replaced,
+    /// The server holds no record of the job, and the host has listed it for longer than the
+    /// most any job may run (the server's `max_job_wall`).
+    OrphanExpired,
+    /// The server holds no record of the job, and an operator ended it on this host.
+    Operator,
+    /// A reason this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// The `job_acks` of a reply: at most [`limits::MAX_RESULTS`], each a good job id, none
 /// twice.
 pub(crate) fn check_job_acks(at: At, acks: &[JobResultAck]) -> Result<(), ValidationError> {

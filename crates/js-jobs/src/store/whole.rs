@@ -144,6 +144,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
         let mut failed = None;
         let mut placed = None;
+        let mut wakes = BTreeSet::new();
         let claim = [keys::job(id)];
         // The store's time is read before the transaction opens: a call on the store from
         // inside the decision would need a second connection while the decision holds one.
@@ -153,6 +154,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             match decided {
                 Ok((txn, job, allocation)) => {
                     let txn = self.guard_txn(txn);
+                    wakes = crate::wake::wakes_of(&txn);
                     placed = Some((job, allocation));
                     Some(txn)
                 }
@@ -163,6 +165,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             }
         });
         self.writes.fetch_add(1, Ordering::SeqCst);
+        self.tell(matches!(outcome, Ok(Claim::Committed(_))), &wakes);
         match (outcome?, placed, failed) {
             (Claim::Committed(_), Some(placed), _) => Ok(placed),
             (_, _, Some(error)) => Err(error),

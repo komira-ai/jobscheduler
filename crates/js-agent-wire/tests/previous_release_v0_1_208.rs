@@ -236,7 +236,7 @@ fn a_v0_1_208_reply_decodes_with_its_run_commands_unknown() {
         [Command::Unknown, Command::Unknown, Command::Unknown]
     );
     assert!(matches!(&reply.commands[3], Command::JobStart(spec) if spec.job_id == "job-3"));
-    assert!(matches!(&reply.commands[4], Command::JobStop { job_id } if job_id == "job-1"));
+    assert!(matches!(&reply.commands[4], Command::JobStop { job_id, .. } if job_id == "job-1"));
     assert_eq!(
         reply.result_acks,
         [

@@ -438,6 +438,7 @@ impl AgentHarness for JsAgent {
     fn cancel(&mut self, lease: &str) -> Delivery {
         let command = Command::JobStop {
             job_id: lease.to_owned(),
+            reason: None,
         };
         self.reply(of(vec![command]))
     }

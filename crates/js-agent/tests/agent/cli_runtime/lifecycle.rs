@@ -96,6 +96,7 @@ fn a_stop_and_the_wall_limit_stop_the_container() {
     w.start("r2");
     w.life.apply(&reply(vec![Command::JobStop {
         job_id: "r1".to_owned(),
+        reason: None,
     }]));
     w.life.step();
     w.clock.advance(60_000);

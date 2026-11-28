@@ -86,7 +86,10 @@ fn a_start_command_needs_a_pinned_image() {
     let reply = HeartbeatReply {
         commands: vec![
             Command::JobStart(Box::new(broken_job("ubuntu:24.04"))),
-            Command::JobStop { job_id: "r".into() },
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None,
+            },
         ],
         ..HeartbeatReply::default()
     };

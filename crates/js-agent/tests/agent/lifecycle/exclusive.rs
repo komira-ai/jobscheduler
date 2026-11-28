@@ -159,6 +159,7 @@ fn commands_alone_leave_a_ready_lease_hold_as_it_is() {
     let stopped = h.life.apply_commands_at(
         &reply(vec![Command::JobStop {
             job_id: "a".to_owned(),
+            reason: None,
         }]),
         now,
     );
@@ -429,6 +430,7 @@ fn restoring_waits_for_the_runs_then_checks_once() {
     h.life.apply(&granting(LEASE, vec![start(of(LEASE, "a"))]));
     h.life.apply(&reply(vec![Command::JobStop {
         job_id: "a".to_owned(),
+        reason: None,
     }]));
     assert_eq!(h.life.exclusive(), None);
     assert_eq!(restore(&mut h).0, Restored::Busy, "the run is not gone yet");

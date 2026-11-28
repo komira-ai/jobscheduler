@@ -188,6 +188,7 @@ fn a_closed_worker_takes_no_start_and_still_stops() {
     let mut both = starts(&["r2"]);
     both.commands.push(Command::JobStop {
         job_id: "r1".to_owned(),
+        reason: None,
     });
     assert_eq!(worker.try_deliver(both), Delivery::Delivered);
     assert!(worker.handle().settle());
@@ -255,6 +256,7 @@ fn a_refused_command_is_logged_by_its_place() {
         commands: vec![
             Command::JobStop {
                 job_id: "r1".to_owned(),
+                reason: None,
             },
             Command::JobStart(Box::new(bad)),
         ],

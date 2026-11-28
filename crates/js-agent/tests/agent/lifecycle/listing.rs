@@ -154,6 +154,7 @@ fn job_starts_past_what_a_beat_lists_are_skipped_and_results_and_retired_ids_wai
     let stops: Vec<String> = (0..RETIRED_LISTED).map(|i| format!("s{i:0>127}")).collect();
     let commands = stops.iter().map(|job_id| Command::JobStop {
         job_id: job_id.clone(),
+        reason: None,
     });
     h.apply(commands.collect());
     h.life.step();

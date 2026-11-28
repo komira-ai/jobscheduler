@@ -488,10 +488,13 @@ The live mode books today's memory figure, so its fallback is today's:
   (`crates/js-lease-server/src/metrics/render.rs:201`). That is an added label value, not a new metric.
 - **`js_curve_wait_expiries_total`:** jobs tested flat after the wait bound. If this rises, curves are booking
   more than hosts can give.
-- **`js_curve_classes{state}`:** a gauge with `state` one of `curve` (passing all four checks) or `flat`. `state` is
+- **`js_curve_classes{state}`:** a gauge with `state` one of `curve` (passing all four checks) or `flat`, written
+  under `shadow` and under `on` (under `shadow` no class is booked by its curve; the counts say which would be). `state` is
   a label name the metrics already use (`js_jobs{state}`); its values here are new.
-- **`js_host_cpu_booked_peak_millicores{host}`:** the fullest slot of each host's booked curve. It sits beside the
-  existing `js_host_cpu_booked_millicores`, which stays the sum of flat numbers.
+- **`js_host_cpu_booked_peak_millicores{host}`:** the fullest slot of each host's booked curve, with a line for a host
+  only under `on`. It sits beside the existing `js_host_cpu_booked_millicores`, which stays the sum of flat numbers.
+- **`js_curve_checks_total{resource,status}` and `js_curve_overruns_total{resource}`:** the runs freed while serving
+  by the status of their check, and those past their predicted peak (`placement-by-load.md`, Telemetry).
 - **Memory shadow, under `shadow` and `on` only** (section 2, "Memory over time, in shadow"):
   `js_memory_curve_placements_total{verdict}` (`same`, `sooner`, `later`), `js_memory_curve_sooner_milliseconds_total`,
   and per host `js_host_memory_projected_bytes`, `js_host_memory_measured_bytes`,

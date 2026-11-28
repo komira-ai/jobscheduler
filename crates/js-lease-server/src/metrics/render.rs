@@ -9,8 +9,10 @@ use std::time::Duration;
 use js_jobs::JobState;
 use js_registry::HostMark;
 use js_sched_placer::curves::{CurveView, HostMemoryShadow, MemoryShadowView};
+use js_sched_placer::telemetry::Telemetry;
 use js_types::HostId;
 
+use super::placement;
 use super::{
     AGENT_ROUTES, CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder,
     SUBMIT_PHASES, TABLES_FROM,
@@ -46,13 +48,15 @@ fn state_slot(state: JobState) -> usize {
 }
 
 /// What a scrape read of the job tables: how many jobs are in each state, how long the
-/// oldest queued job has waited (zero with none queued), and how many completion callbacks are
-/// pending.
+/// oldest queued job has waited (zero with none queued), how many completion callbacks are
+/// pending, and each host that holds orphans ([`crate::orphans`]) with how many and how long
+/// the oldest has been listed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobsSeen {
     by_state: [u64; 9],
     oldest_queued: Duration,
     callbacks_pending: u64,
+    orphans: Vec<(String, u64, Duration)>,
 }
 
 impl JobsSeen {
@@ -67,6 +71,11 @@ impl JobsSeen {
     /// Records that `pending` completion callbacks are pending.
     pub(crate) fn callbacks_pending(&mut self, pending: u64) {
         self.callbacks_pending = pending;
+    }
+
+    /// Records that `host` holds `count` orphans, the oldest listed for `oldest`.
+    pub(crate) fn orphans(&mut self, host: &str, count: u64, oldest: Duration) {
+        self.orphans.push((host.to_owned(), count, oldest));
     }
 }
 
@@ -96,16 +105,26 @@ pub(crate) struct HostSeen {
     /// In bytes.
     pub(crate) memory: Split,
     pub(crate) mark: Option<HostMark>,
+    /// Whether the registry lists the host live: it said hello or beat within the grace.
+    pub(crate) live: bool,
+    /// The host's cumulative CPU pressure (some) time in microseconds, 0 when its agent does
+    /// not measure it; `None` for a host with no load reported.
+    pub(crate) cpu_pressure_some_usec: Option<u64>,
+    /// How many times the OOM killer ran for the limit of the host's actions control group;
+    /// `None` for a host that reported none.
+    pub(crate) actions_oom_events: Option<u64>,
 }
 
 /// What a scrape read: the job tables (`None` without the job service), the hosts, the curve
-/// view of the placer (`None` unless it books by curve) and its memory shadow (`None` unless
-/// it runs, under `shadow` and `on`).
+/// view of the placer (`None` under `--placement-curves off`; under `shadow` it has the class
+/// counts and no host peaks), its memory shadow (`None` unless it runs, under `shadow` and
+/// `on`) and the placer's telemetry (`None` without a placer).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) jobs: Option<JobsSeen>,
     pub(crate) hosts: Vec<HostSeen>,
     pub(crate) curves: Option<CurveView>,
+    pub(crate) telemetry: Option<Telemetry>,
     pub(crate) memory: Option<MemoryShadowView>,
 }
 
@@ -124,11 +143,11 @@ pub(crate) fn label(value: &str) -> String {
 }
 
 /// A duration in seconds, as the text writes a number.
-fn seconds(value: Duration) -> String {
+pub(super) fn seconds(value: Duration) -> String {
     value.as_secs_f64().to_string()
 }
 
-fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+pub(super) fn family(out: &mut String, name: &str, kind: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
 }
 
@@ -168,7 +187,7 @@ fn submit_phases(out: &mut String, recorder: &Recorder) {
     }
 }
 
-fn counter(out: &mut String, name: &str, help: &str, value: u64) {
+pub(super) fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     family(out, name, "counter", help);
     let _ = writeln!(out, "{name} {value}");
 }
@@ -195,6 +214,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         let help = "Completion callbacks of ended jobs not yet delivered, abandoned or expired; one past its deadline counts until a try finds it expired.";
         family(&mut out, pending, "gauge", help);
         let _ = writeln!(out, "{pending} {}", jobs.callbacks_pending);
+        orphans(&mut out, &jobs.orphans);
     }
     let placed = recorder.placed.load(Ordering::Relaxed);
     let help = "Queued jobs placed on a host.";
@@ -252,8 +272,10 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     counter(&mut out, "js_curve_wait_expiries_total", help, expired);
     start_refusals(&mut out, recorder);
     bodies_too_large(&mut out, recorder);
+    unknown(&mut out, recorder);
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
+    placement::write(&mut out, seen);
     if let Some(view) = &seen.curves {
         curves(&mut out, view);
     }
@@ -300,6 +322,47 @@ fn bodies_too_large(out: &mut String, recorder: &Recorder) {
     for (route, count) in AGENT_ROUTES.iter().zip(&recorder.bodies_too_large) {
         let count = count.load(Ordering::Relaxed);
         let _ = writeln!(out, "{name}{{route=\"{route}\"}} {count}");
+    }
+}
+
+/// The hosts that hold orphans now, each with how many and how long the oldest has been
+/// listed: a host is written only while it holds one, so either gauge above 0 is a host that
+/// takes no new job.
+fn orphans(out: &mut String, held: &[(String, u64, Duration)]) {
+    let count = "js_host_orphans";
+    let help = "Jobs a host lists that the job store holds no record of (its orphans), by host, written only for a host that holds one. While it does, the host takes no new job: see docs/runbooks/orphan-jobs.md.";
+    family(out, count, "gauge", help);
+    for (host, held, _) in held {
+        let _ = writeln!(out, "{count}{{host=\"{}\"}} {held}", label(host));
+    }
+    let age = "js_host_oldest_orphan_age_seconds";
+    let help = "How long the oldest orphan of a host has been listed, by the store's clock, by host, written only for a host that holds one.";
+    family(out, age, "gauge", help);
+    for (host, _, oldest) in held {
+        let _ = writeln!(
+            out,
+            "{age}{{host=\"{}\"}} {}",
+            label(host),
+            seconds(*oldest)
+        );
+    }
+}
+
+fn unknown(out: &mut String, recorder: &Recorder) {
+    let (found, guarded) = recorder.unknown();
+    let name = "js_unknown_jobs_found_total";
+    let help = "Jobs a host's heartbeat listed that the store holds no record of, by host, each counted once, at the beat that first listed it. They are kept running as orphans of the host, which takes no job while it lists one.";
+    family(out, name, "counter", help);
+    for (host, count) in found {
+        let host = label(&host);
+        let _ = writeln!(out, "{name}{{host=\"{host}\"}} {count}");
+    }
+    let name = "js_unknown_listing_guarded_total";
+    let help = "Heartbeats whose listing was more than half jobs the store holds no record of, by host: the reply told the host to stop nothing but the orphans an operator ended (a stop already in its dispatch queue is still handed out). Any rise means the store may have lost or rolled back its tables.";
+    family(out, name, "counter", help);
+    for (host, count) in guarded {
+        let host = label(&host);
+        let _ = writeln!(out, "{name}{{host=\"{host}\"}} {count}");
     }
 }
 
@@ -442,11 +505,12 @@ fn memory_shadow(out: &mut String, view: &MemoryShadowView) {
     }
 }
 
-/// The families of the curve mode, written only when the placer books by curve: the classes
-/// booking their curve and those booking flat, and the fullest booked slot of each curve host.
+/// The families of the curve mode, written only when the placer reads curves (`shadow` or
+/// `on`): the classes booking their curve and those booking flat, and the fullest booked slot
+/// of each curve host (a host of none under `shadow`, which books no curve).
 fn curves(out: &mut String, view: &CurveView) {
     let name = "js_curve_classes";
-    let help = "Job classes with a profile, by how they are booked: curve (passing all four checks, booked by their CPU curve) or flat (failing a check, booked their flat number).";
+    let help = "Job classes with a profile, by how they are booked: curve (passing all four checks, booked by their CPU curve under `on`) or flat (failing a check, booked their flat number).";
     family(out, name, "gauge", help);
     let _ = writeln!(out, "{name}{{state=\"curve\"}} {}", view.curve_classes);
     let _ = writeln!(out, "{name}{{state=\"flat\"}} {}", view.flat_classes);

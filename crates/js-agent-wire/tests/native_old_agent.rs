@@ -209,7 +209,13 @@ fn old_agent_reads_open_as_invalid() {
         serde_json::from_value(json!({"commands": [unknown, stop]})).unwrap();
     assert_eq!(
         reply.commands,
-        vec![Command::Unknown, Command::JobStop { job_id: "r".into() }]
+        vec![
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None
+            }
+        ]
     );
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [start]})).unwrap();
     let [Command::JobStart(read)] = reply.commands.as_slice() else {

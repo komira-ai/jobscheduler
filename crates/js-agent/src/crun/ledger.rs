@@ -253,6 +253,32 @@ fn at(dir: &Path) -> impl Fn(io::Error) -> LedgerError + '_ {
     }
 }
 
+/// The bytes of the file `path`, at most [`MAX_BYTES`] of them: a link is refused, not
+/// followed, and so is what is not a regular file.
+fn body_of(path: &Path) -> Result<Vec<u8>, String> {
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path);
+    let file = opened.map_err(|why| format!("cannot be opened: {why}"))?;
+    let mut body = Vec::new();
+    let read = file
+        .metadata()
+        .and_then(|meta| {
+            if meta.is_file() {
+                Ok(())
+            } else {
+                Err(io::Error::other("it is not a regular file"))
+            }
+        })
+        .and_then(|()| file.take(MAX_BYTES + 1).read_to_end(&mut body));
+    read.map_err(|why| why.to_string())?;
+    if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_BYTES {
+        return Err(format!("it is longer than {MAX_BYTES} bytes"));
+    }
+    Ok(body)
+}
+
 /// What reading one sidecar found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Read {
@@ -506,27 +532,7 @@ impl Ledger {
 
     /// Reads the file `path`, which must be the sidecar of the lease `stem`.
     fn load(&self, stem: &str, path: &Path) -> Result<Entry, String> {
-        // A link is refused, not followed.
-        let opened = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path);
-        let file = opened.map_err(|why| format!("cannot be opened: {why}"))?;
-        let mut body = Vec::new();
-        let read = file
-            .metadata()
-            .and_then(|meta| {
-                if meta.is_file() {
-                    Ok(())
-                } else {
-                    Err(io::Error::other("it is not a regular file"))
-                }
-            })
-            .and_then(|()| file.take(MAX_BYTES + 1).read_to_end(&mut body));
-        read.map_err(|why| why.to_string())?;
-        if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_BYTES {
-            return Err(format!("it is longer than {MAX_BYTES} bytes"));
-        }
+        let body = body_of(path)?;
         let entry: Entry =
             serde_json::from_slice(&body).map_err(|why| format!("it is not a sidecar: {why}"))?;
         if !(OLDEST..=VERSION).contains(&entry.version) {
@@ -540,6 +546,21 @@ impl Ledger {
             ));
         }
         Ok(entry)
+    }
+
+    /// The version the file `path` says it is of, whatever else it holds, for a sidecar that
+    /// cannot be read ([`Left::Malformed`]); none when it says none, or is not a file that can
+    /// be read as one.
+    pub(super) fn version_of(path: &Path) -> Option<u64> {
+        /// The one field of a sidecar of any form; the rest is not looked at.
+        #[derive(Deserialize)]
+        struct Versioned {
+            version: u64,
+        }
+        let body = body_of(path).ok()?;
+        serde_json::from_slice::<Versioned>(&body)
+            .ok()
+            .map(|read| read.version)
     }
 
     /// Every file of the ledger: this agent's sidecars by name, and what is left alone.

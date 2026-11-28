@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
 use js_caps::FULL_DISK_ACCESS;
-use js_jobs::{HOST_JOB_TAINT, ScaleMark};
+use js_jobs::{HOST_JOB_TAINT, NodeRecord, ScaleMark};
 use js_registry::{HostMark, HostState, HostView, LoadSeconds};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, MemoryHeadroom, Shape};
@@ -124,10 +124,23 @@ pub(crate) struct HostEntry {
     /// lifts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cordon: Option<CordonListed>,
+    /// How many jobs the host lists that the job store holds no record of (its orphans,
+    /// [`crate::orphans`]): while it lists one the host takes no new job. Not written when
+    /// it is 0.
+    #[serde(skip_serializing_if = "no_orphans")]
+    pub(crate) orphans: u32,
     /// Set for a registered host whose latest heartbeat carried a load: the reading of
     /// its actions control group.
     #[serde(skip_serializing_if = "Option::is_none")]
     load: Option<LoadView>,
+    /// The host's cumulative CPU pressure (some) time in microseconds, from the same load: 0
+    /// when its agent does not measure it. `/metrics` reads it; the body does not list it.
+    #[serde(skip)]
+    pub(crate) cpu_pressure_some_usec: Option<u64>,
+    /// How many times the OOM killer ran for the limit of the host's actions control group,
+    /// as of the same load. `/metrics` reads it; the body does not list it.
+    #[serde(skip)]
+    pub(crate) actions_oom_events: Option<u64>,
 }
 
 /// The cordon of a listed host: when it lapses, and who holds it when a holder placed or took
@@ -281,6 +294,10 @@ fn listed_capabilities(host: &HostView) -> BTreeMap<String, String> {
 impl HostEntry {
     fn registered(host: HostView) -> Self {
         let capabilities = listed_capabilities(&host);
+        let pressure = host
+            .load
+            .as_ref()
+            .map(|load| load.cpu_pressure_some_total_usec);
         Self {
             id: host.id,
             source: Source::Registered,
@@ -301,7 +318,10 @@ impl HostEntry {
                 expires_at_ms: at.millis(),
                 holder: host.cordon_holder.map(|holder| holder.to_string()),
             }),
+            orphans: 0,
             load: host.load.map(|load| LoadView::of(load, host.load_seconds)),
+            cpu_pressure_some_usec: pressure,
+            actions_oom_events: host.actions_oom_events,
         }
     }
 }
@@ -324,6 +344,7 @@ impl HostEntry {
             ScaleMark::Releasing => HostMark::Releasing,
         });
         let memory = MemoryHeadroom::full(seen.placed.resources().memory_bytes());
+        let orphans = orphans_of(&record);
         let claimed = record.claim.as_ref().unwrap_or(&seen.placed);
         Self {
             id: record.host,
@@ -346,9 +367,22 @@ impl HostEntry {
             reserved_for: None,
             drain_deadline_ms: None,
             cordon: None,
+            orphans,
             load: None,
+            cpu_pressure_some_usec: None,
+            actions_oom_events: None,
         }
     }
+}
+
+/// How many orphans the row `record` holds, saturated at `u32::MAX`.
+fn orphans_of(record: &NodeRecord) -> u32 {
+    u32::try_from(record.state.orphans.len()).unwrap_or(u32::MAX)
+}
+
+/// Whether `count` of orphans is 0: the body leaves the field out then.
+fn no_orphans(count: &u32) -> bool {
+    *count == 0
 }
 
 impl HostList {
@@ -362,11 +396,23 @@ impl HostList {
     /// host in both is listed once, as the registry that holds it sees it.
     pub(crate) fn with_rows(registered: Vec<HostView>, rows: Vec<Seen>) -> Self {
         let held: BTreeSet<HostId> = registered.iter().map(|host| host.id.clone()).collect();
+        // A host's orphans are its row's, whichever server holds its session.
+        let orphans: BTreeMap<HostId, u32> = rows
+            .iter()
+            .map(|seen| (seen.host().clone(), orphans_of(&seen.row.record)))
+            .collect();
         let by_row = rows
             .into_iter()
             .filter(|seen| !held.contains(seen.host()))
             .map(HostEntry::by_row);
-        let mut hosts: Vec<HostEntry> = registered.into_iter().map(HostEntry::registered).collect();
+        let registered = registered.into_iter().map(|host| {
+            let count = orphans.get(&host.id).copied().unwrap_or(0);
+            HostEntry {
+                orphans: count,
+                ..HostEntry::registered(host)
+            }
+        });
+        let mut hosts: Vec<HostEntry> = registered.collect();
         hosts.extend(by_row);
         hosts.sort_by(|a, b| a.id.cmp(&b.id));
         Self { hosts }
@@ -447,6 +493,7 @@ mod tests {
             cordon_holder: None,
             load: None,
             load_seconds: Default::default(),
+            actions_oom_events: None,
         }
     }
 
@@ -495,6 +542,30 @@ mod tests {
             assert_eq!(host.get("mark").and_then(|m| m.as_str()), listed);
             assert_eq!(host.get("mark").is_none(), listed.is_none());
         }
+    }
+
+    /// Asserts that a registered host with a load carries its CPU pressure time and its OOM
+    /// count for `/metrics` (4.5 s of pressure, 3 events), that one with none carries neither,
+    /// and that the body lists neither key either way. It catches a figure read from the wrong
+    /// field, one kept for a host with no load, and a key that leaks into `GET /v1/hosts`.
+    #[test]
+    fn a_host_with_a_load_carries_its_pressure_and_oom_count_for_the_metrics_only() {
+        let mut loaded = view(None);
+        loaded.load = Some(NodeLoad {
+            cpu_pressure_some_total_usec: 4_500_000,
+            ..NodeLoad::default()
+        });
+        loaded.actions_oom_events = Some(3);
+        let mut hosts = HostList::of(vec![loaded, view(None)]).hosts;
+        let plain = hosts.pop().unwrap();
+        let loaded = hosts.pop().unwrap();
+        assert_eq!(loaded.cpu_pressure_some_usec, Some(4_500_000));
+        assert_eq!(loaded.actions_oom_events, Some(3));
+        assert_eq!(plain.cpu_pressure_some_usec, None);
+        assert_eq!(plain.actions_oom_events, None);
+        let body = serde_json::to_string(&loaded).unwrap();
+        assert!(!body.contains("cpu_pressure_some_usec"), "{body}");
+        assert!(!body.contains("actions_oom_events"), "{body}");
     }
 
     /// Asserts that a host that books scratch disk lists it as `shape.disk_bytes`, that a

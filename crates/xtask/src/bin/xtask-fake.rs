@@ -27,15 +27,14 @@
 //! - Run as `js`, it is the client of `site-demo`: `job submit` prints the refusal the real client
 //!   prints when no host could serve the job and exits 3, and `job list` prints nothing.
 //!
-//! - Run as `buck2`, it is the buck2 of `farm-build`: it appends its arguments, joined by spaces, as
-//!   one line to `buck2.calls` of its working directory. `kill` then exits 0. Any other call answers
-//!   from the files `buck2-<key>.stdout`, `.stderr` and `.status` of the working directory, where
-//!   `<key>` is `tool` for the build of `buildrules//cli:buildrules` and the verb (`audit`, `build`)
-//!   for any other: it prints the first (when there is none: for `audit`, `{}`, buck2's answer for a
-//!   key that is not set; for `tool`, the line `buildrules//cli:buildrules <its own directory>/buildrules`;
-//!   for any other, nothing), prints the second on stderr, and exits with the number in the third
-//!   (0 when there is none). It answers from files, not from the environment.
-//! - Run as `buildrules`, it is the command line `farm-build` builds, over a table of its own: it
+//! - Run as `buck2`, it is the buck2 of `farm-workers`, whose one call is `audit config`: it
+//!   appends its arguments, joined by spaces, as one line to `buck2.calls` of its working
+//!   directory, prints the file `buck2-audit.stdout` of the working directory (when there is
+//!   none, `{}`, buck2's answer for a key that is not set), prints `buck2-audit.stderr` on stderr,
+//!   and exits with the number in `buck2-audit.status` (0 when there is none). It answers from
+//!   files, not from the environment. (`farm-table` passes its buck2 to `buildrules sync` alone,
+//!   which the stand-in `buildrules` does not run.)
+//! - Run as `buildrules`, it is the command line `farm-table` is given, over a table of its own: it
 //!   appends its arguments as one line to `buildrules.calls` of its working directory. `sync` writes
 //!   what a sync of the working directory writes: `buildrules.lock.bzl`, one line `<file> <sha256>`
 //!   for each of `Cargo.toml` and `Cargo.lock`, and `third_party/buildrules/git_archives.tsv` when
@@ -226,32 +225,15 @@ fn server(args: &[String]) -> ExitCode {
     }
 }
 
-/// The target of the `buildrules` command line.
-const TOOL: &str = "buildrules//cli:buildrules";
-
-/// The fake `buck2`: records the call and answers from the files of the working directory.
-fn buck2(me: &Path, args: &[String]) -> ExitCode {
+/// The fake `buck2`: records the call and answers it as the audit, from the files of the
+/// working directory.
+fn buck2(args: &[String]) -> ExitCode {
     append(Path::new("buck2.calls"), &args.join(" "));
-    let verb = args.first().map_or("", String::as_str);
-    if verb == "kill" {
-        return ExitCode::SUCCESS;
-    }
-    let key = if args.iter().any(|a| a == TOOL) {
-        "tool"
-    } else {
-        verb
-    };
     let read = |suffix: &str, default: &str| {
-        std::fs::read_to_string(format!("buck2-{key}.{suffix}"))
+        std::fs::read_to_string(format!("buck2-audit.{suffix}"))
             .unwrap_or_else(|_| default.to_owned())
     };
-    let tool = format!("{TOOL} {}\n", me.with_file_name("buildrules").display());
-    let stdout = match key {
-        "audit" => "{}",
-        "tool" => &tool,
-        _ => "",
-    };
-    print!("{}", read("stdout", stdout));
+    print!("{}", read("stdout", "{}"));
     eprint!("{}", read("stderr", ""));
     ExitCode::from(read("status", "0").trim().parse().unwrap_or(2))
 }
@@ -388,7 +370,7 @@ fn main() -> ExitCode {
     } else if name == "js" {
         job_client(&args)
     } else if name == "buck2" {
-        buck2(&me, &args)
+        buck2(&args)
     } else if name == "buildrules" {
         buildrules(&args)
     } else if name == "testbin" {

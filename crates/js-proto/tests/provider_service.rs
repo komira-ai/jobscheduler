@@ -17,8 +17,8 @@ use js_proto::provider::v1::mount_provider_server::{
     MountProvider, MountProviderServer, SERVICE_NAME,
 };
 use js_proto::provider::v1::{
-    MountMode, MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest,
-    ReleaseResponse, Source, SweepRequest, SweepResponse,
+    KeptAttempt, MountMode, MountRequest, MountResponse, PrepareRequest, PrepareResponse,
+    ReleaseRequest, ReleaseResponse, Source, SweepRequest, SweepResponse,
 };
 use prost::Message;
 use prost::encoding::{WireType, encode_key, encode_varint};
@@ -129,6 +129,23 @@ fn source() -> Source {
         agent: "host-1".to_owned(),
         run: "js.job-1".to_owned(),
         index: 2,
+        attempt: 0,
+    }
+}
+
+/// [`source`] of the run's third attempt.
+fn source_with_attempt() -> Source {
+    Source {
+        attempt: 3,
+        ..source()
+    }
+}
+
+/// The run `js.job-1` kept from its third attempt on.
+fn kept_attempt() -> KeptAttempt {
+    KeptAttempt {
+        run: "js.job-1".to_owned(),
+        attempt: 3,
     }
 }
 
@@ -162,6 +179,15 @@ fn sweep_request() -> SweepRequest {
     SweepRequest {
         agent: "host-1".to_owned(),
         keep: vec!["js.job-1".to_owned(), "js.job-2".to_owned()],
+        keep_attempts: Vec::new(),
+    }
+}
+
+/// [`sweep_request`] that keeps `js.job-1` only from its third attempt on.
+fn sweep_request_with_attempts() -> SweepRequest {
+    SweepRequest {
+        keep_attempts: vec![kept_attempt()],
+        ..sweep_request()
     }
 }
 
@@ -172,8 +198,12 @@ fn sweep_response() -> SweepResponse {
 /// Asserts that a fully populated message of each kind encodes to the bytes of its line of
 /// `golden/provider_messages.hex`, written by hand from the field numbers, decodes from them,
 /// and decodes from them with unknown fields of every wire type appended; and that the
-/// golden holds no other line. It catches a renumbered, retyped or reordered field, a field
-/// that does not skip an unknown one, and a message the golden does not pin.
+/// golden holds no other line. The lines of `Source` and `SweepRequest` without an attempt
+/// are the bytes of an agent before attempts were counted: a reader of attempts reads them as
+/// attempt 0, and attempt 0 is not written, so each side reads the other's. It catches a
+/// renumbered, retyped or reordered field, a field that does not skip an unknown one, an
+/// attempt of 0 that is written (an older provider would still skip it, but the bytes would no
+/// longer be an older agent's), and a message the golden does not pin.
 #[test]
 fn every_message_of_the_protocol_has_its_golden_bytes() {
     let golden = golden();
@@ -186,7 +216,14 @@ fn every_message_of_the_protocol_has_its_golden_bytes() {
     holds(&golden, "ReleaseResponse", &ReleaseResponse {});
     holds(&golden, "SweepRequest", &sweep_request());
     holds(&golden, "SweepResponse", &sweep_response());
-    assert_eq!(golden.len(), 9);
+    holds(&golden, "SourceWithAttempt", &source_with_attempt());
+    holds(&golden, "KeptAttempt", &kept_attempt());
+    holds(
+        &golden,
+        "SweepRequestWithAttempts",
+        &sweep_request_with_attempts(),
+    );
+    assert_eq!(golden.len(), 12);
 }
 
 /// Asserts the numbers of the mount mode and how a request reads one: the four values at 0 to

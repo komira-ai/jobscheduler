@@ -239,7 +239,10 @@ fn round_trip_of_every_variant() {
     }
     for command in [
         Command::JobStart(Box::new(job_start())),
-        Command::JobStop { job_id: "r".into() },
+        Command::JobStop {
+            job_id: "r".into(),
+            reason: None,
+        },
         Command::Unknown,
     ] {
         round_trip(&command);
@@ -309,6 +312,7 @@ fn round_trip_of_every_message() {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        unknown_jobs: Vec::new(),
         log_grant: None,
         beat_now: false,
     });

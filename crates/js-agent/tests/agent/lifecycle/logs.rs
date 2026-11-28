@@ -186,6 +186,7 @@ pub(super) fn full_load() -> NodeLoad {
         cpu_usage_usec: u64::MAX,
         host_cpu_usec: None,
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
         host_nonfile_bytes: None,

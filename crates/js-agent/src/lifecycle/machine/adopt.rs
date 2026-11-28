@@ -14,12 +14,31 @@ use super::job::{
 use super::provided::Attached;
 use super::{Lifecycle, SLOTS, Slots};
 use crate::lifecycle::quota::QuotaHealth;
-use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
+use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status, UnreadLease};
 use crate::lifecycle::taint::TaintState;
 use crate::lifecycle::{
     CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, Wake, code,
     label,
 };
+
+/// The `lease-unreadable` finding of the lease `lease`, which the runtime left alone: it names
+/// the lease, its job and the version of its ledger file, and says what nothing does now.
+fn unread_finding(lease: &UnreadLease) -> Event {
+    let version = match lease.version {
+        Some(version) => format!("of version {version}"),
+        None => "of no version this agent can read".to_owned(),
+    };
+    Event::Finding(Finding {
+        run_id: Some(lease.run_id.clone()),
+        code: code::LEASE_UNREADABLE,
+        message: format!(
+            "the lease {} of job {} is left alone: its ledger file, {version}, cannot be read \
+             ({}); its job, if it still runs, is neither taken over nor stopped, and its \
+             provider sources and run directory are kept",
+            lease.lease, lease.run_id, lease.why
+        ),
+    })
+}
 
 impl Lifecycle {
     /// Starts the lifecycle of an agent that has just started, taking over the labelled
@@ -45,6 +64,11 @@ impl Lifecycle {
     /// result of a run taken over is set on it, which then makes no second one when its
     /// container is seen to have exited, and any other is held by a job that owns nothing, so
     /// the next heartbeat lists it again. A file that cannot be read is dropped and reported.
+    ///
+    /// A lease the runtime left alone because it cannot read its ledger file
+    /// ([`Runtime::unread_leases`]) is reported (`lease-unreadable`, naming the lease, its job
+    /// and the file's version), and its run's directories are kept as an adopted run's are:
+    /// its job may still run, and nothing of this agent bounds it.
     ///
     /// The records of checks an earlier process owed are read before any container is taken
     /// over, and the checks they record are run once the containers are taken over and the
@@ -96,6 +120,7 @@ impl Lifecycle {
             quota_health: QuotaHealth::default(),
             parked_reminded_ms: None,
             answered: Vec::new(),
+            unknown_here: Vec::new(),
             silence: None,
             blind_wait: DEFAULT_SETTLE,
             taint_recheck: DEFAULT_TAINT_RECHECK,
@@ -145,10 +170,16 @@ impl Lifecycle {
         }
         this.stuck = stuck;
         this.adopted_leases = this.jobs.iter().map(|job| job.lease_id.clone()).collect();
-        // A container that could not be removed may still use its run's directory.
+        // A container that could not be removed may still use its run's directory, and so
+        // may the job of a lease the runtime left alone.
+        let unread = this.runtime.unread_leases();
+        for lease in &unread {
+            events.push(unread_finding(lease));
+        }
         let kept = this.jobs.iter().map(|job| job.run_id.as_str());
         let held = this.stuck.iter().filter_map(|held| held.run_id.as_deref());
-        let owned: Vec<&str> = kept.chain(held).collect();
+        let left = unread.iter().map(|lease| lease.run_id.as_str());
+        let owned: Vec<&str> = kept.chain(held).chain(left).collect();
         // Leftover directories carry the project ids of runs that no longer exist. Which
         // slots they sit on is read before the sweep, as usage, and their projects are
         // cleared after the trees are gone.

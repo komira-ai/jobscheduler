@@ -39,6 +39,7 @@ fn empty_reply() -> HeartbeatReply {
         retired_acks: Vec::new(),
         log_grant: None,
         beat_now: false,
+        unknown_jobs: Vec::new(),
     }
 }
 

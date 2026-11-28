@@ -143,7 +143,13 @@ fn an_unknown_network_level_fails_to_decode() {
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [start, stop]})).unwrap();
     assert_eq!(
         reply.commands,
-        vec![Command::Unknown, Command::JobStop { job_id: "r".into() }]
+        vec![
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None
+            }
+        ]
     );
     for known in ["none", "allow-list", "open"] {
         body["network"] = json!(known);

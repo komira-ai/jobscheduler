@@ -382,6 +382,16 @@ pub struct HeartbeatReply {
     /// stops listing them. Absent means none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_acks: Vec<String>,
+    /// The ids of the heartbeat's `jobs` the server holds no record of for this host: no
+    /// placement of the job on it, no end, no cancel and no ended attempt there. The server does not stop
+    /// them for that (a server that came up on an empty or older table would otherwise stop
+    /// every job of the farm); it keeps them as orphans of the host and places nothing more
+    /// on it while it lists them. The agent keeps them running and tells its operator. At
+    /// most [`limits::MAX_HELD`] good job ids, none twice ([`ReplyCheck::unknown_jobs`]).
+    /// Absent means none, and from a server from before the field; an agent from before it
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_jobs: Vec<String>,
     /// The host's log credential ([`LogGrant`]), one for every job on the host, sent only to
     /// an agent that reported [`crate::LOG_UPLOAD_CAPABILITY`] and resent until the agent's
     /// `log_grant_state` names it; absent when there is nothing to send. A value that does not
@@ -608,6 +618,10 @@ pub struct ReplyCheck<'a> {
     /// none twice). When this is an error the agent ignores `retired_acks` and still acts
     /// on `commands`.
     pub retired_acks: Result<(), ValidationError>,
+    /// Whether `unknown_jobs` is acceptable (at most [`limits::MAX_HELD`] good job ids,
+    /// none twice). When this is an error the agent ignores `unknown_jobs` and still acts on
+    /// `commands`.
+    pub unknown_jobs: Result<(), ValidationError>,
     /// Whether `log_grant` is acceptable: `Ok` when there is none, and an error with
     /// [`refusal::INVALID_LOG_CREDENTIAL`] naming the field when a field is empty, over its
     /// cap ([`limits::MAX_LOG_CREDENTIAL_FIELD`], [`limits::MAX_LOG_SESSION_TOKEN`]) or holds a
@@ -655,6 +669,7 @@ impl HeartbeatReply {
             exclusive: check::opt_ident(at.field("exclusive"), self.exclusive.as_ref()),
             job_acks: per_job::check_job_acks(at, &self.job_acks),
             retired_acks: per_job::check_ids(at.field("retired_acks"), &self.retired_acks),
+            unknown_jobs: per_job::check_ids(at.field("unknown_jobs"), &self.unknown_jobs),
             log_grant: self.log_grant.as_ref().map_or(Ok(()), |grant| {
                 grant.check(At::new("log_grant", refusal::INVALID_LOG_CREDENTIAL))
             }),

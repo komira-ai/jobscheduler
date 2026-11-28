@@ -11,7 +11,10 @@ pub(super) fn stops(life: &Lifecycle) -> HeartbeatReply {
     let commands = life
         .held_jobs()
         .into_iter()
-        .map(|job| Command::JobStop { job_id: job.job_id })
+        .map(|job| Command::JobStop {
+            job_id: job.job_id,
+            reason: None,
+        })
         .collect();
     HeartbeatReply {
         commands,

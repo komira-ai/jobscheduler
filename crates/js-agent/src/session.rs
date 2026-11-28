@@ -20,10 +20,12 @@
 //! than the newest it applied. The session reads no clock for it; it is a counter.
 //!
 //! Every hello carries `agent_process` when the session was given one
-//! ([`Session::with_agent_process`]): an id the agent draws once per process
-//! ([`agent_process`](crate::agent_process)) and sends in every hello of that process, the
-//! first and each one after a lost session. A server that knows the field takes the hello of
-//! the process that holds the host live over at once, instead of refusing it `host-live`.
+//! ([`Session::with_agent_process`]): an id the agent draws when the process starts, or takes
+//! over from the process that handed its runs to it ([`agent_process`](crate::agent_process)),
+//! and sends in every hello of that process, the first and each one after a lost session. A
+//! server that knows the field takes the hello of the process that holds the host live over at
+//! once, instead of refusing it `host-live`. A stop of a session with jobs leaves the id in the
+//! state root for the next process (`Session::leave_process`).
 //!
 //! # What an answer does
 //!
@@ -201,6 +203,11 @@ use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
 use crate::worker::{Delivery, Parked, Snapshot, Worker};
 
+/// The cap of the wait while the worker is full, which the heartbeat interval bounds too: a
+/// full worker is not a server out of reach, so its wait keeps the minute it always had and
+/// not the few seconds of [`crate::backoff::CAP`].
+const BUSY_CAP: Duration = Duration::from_secs(60);
+
 mod fatal;
 mod note;
 mod reason;
@@ -223,6 +230,9 @@ struct Live {
     epoch: u64,
     secret: Secret,
     interval: Duration,
+    /// The grace the welcome named: the server holds the session live that long after it last
+    /// heard the host.
+    grace: Duration,
 }
 
 /// What one [`Session::tick`] decided.
@@ -372,7 +382,7 @@ impl<'a> Session<'a> {
             hello,
             live: None,
             backoff: Backoff::default(),
-            busy: Backoff::default(),
+            busy: Backoff::up_to(BUSY_CAP),
             proven: false,
             lost_young: false,
             hold: None,
@@ -411,6 +421,22 @@ impl<'a> Session<'a> {
         let owner = rustix::process::geteuid().as_raw();
         let read = |root: &&Path| handover::read(root, owner);
         self.handover.as_ref().map_or(Handover::Absent, read)
+    }
+
+    /// Leaves this session's agent process id and its grace in the state root it looks in for a
+    /// handover, for the next process to say hello as (see [`crate::lifecycle::handover`]);
+    /// nothing for a session given no state root or no id, or that holds no session.
+    ///
+    /// # Errors
+    ///
+    /// The process file cannot be written.
+    pub(crate) fn leave_process(&self) -> std::io::Result<()> {
+        let grace = self.live.as_ref().map(|live| live.grace);
+        let left = self.handover.zip(self.hello.agent_process.as_deref());
+        let left = left.zip(grace);
+        left.map_or(Ok(()), |((root, id), grace)| {
+            handover::leave_process(root, id, grace)
+        })
     }
 
     /// Asks the worker to park for a handover, waiting at most `wait` ([`Worker::park`]);
@@ -765,6 +791,7 @@ impl<'a> Session<'a> {
             epoch: welcome.epoch,
             secret: Secret(welcome.session.clone()),
             interval,
+            grace: Duration::from_millis(welcome.grace_ms),
         });
         self.proven = false;
         self.seq = 0;

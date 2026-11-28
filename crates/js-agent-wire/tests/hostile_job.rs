@@ -393,9 +393,11 @@ fn commands_are_validated() {
         },
         Command::JobStop {
             job_id: String::new(),
+            reason: None,
         },
         Command::JobStop {
             job_id: long(MAX_ID_LEN + 1),
+            reason: None,
         },
     ] {
         let err = command.validate().unwrap_err();
@@ -407,7 +409,8 @@ fn commands_are_validated() {
     assert_eq!(Command::Unknown.validate(), Ok(()));
     assert_eq!(
         Command::JobStop {
-            job_id: "j1".into()
+            job_id: "j1".into(),
+            reason: None
         }
         .validate(),
         Ok(())

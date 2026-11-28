@@ -33,7 +33,9 @@
 //!   `JobStop` for a held job asks it to stop (the stop grace, then the kill) and it ends
 //!   `killed`, once however often it comes; for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
-//!   `retired_acks` names it, the answer that the job is stopped and gone.
+//!   `retired_acks` names it, the answer that the job is stopped and gone. A stop's optional
+//!   `reason` is reported once ([`Event::StopReasoned`]) and a reply's `unknown_jobs` when it
+//!   changes ([`Event::UnknownToServer`]); neither changes what is stopped.
 //! - **A job start whose fence is retired runs never.** The fence is the job id with the
 //!   allocation id (`js_agent_wire::START_FENCE_CAPABILITY`, which the hello reports). The
 //!   fence of a job that ended is retired when the job leaves the listing; that of a job
@@ -353,7 +355,7 @@ pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, OutputsReport,
     Prepared, Removal, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
-    Whereabouts, check_run_env, label,
+    UnreadLease, Whereabouts, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use settle::{DEFAULT_SETTLE, MAX_SETTLE_MS, settle};

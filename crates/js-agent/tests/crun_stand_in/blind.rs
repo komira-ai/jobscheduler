@@ -147,6 +147,7 @@ fn past_the_wait(name: &str, proc_read: ProcRead) -> (Option<Taint>, Vec<String>
     life.apply(&HeartbeatReply {
         commands: vec![Command::JobStop {
             job_id: "r1-hold".to_owned(),
+            reason: None,
         }],
         ..HeartbeatReply::default()
     });

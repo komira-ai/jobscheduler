@@ -206,7 +206,13 @@ fn an_unknown_confinement_value_reads_as_an_unknown_command() {
             serde_json::from_value(json!({"commands": [one, stop.clone()]})).unwrap();
         assert_eq!(
             reply.commands,
-            vec![Command::Unknown, Command::JobStop { job_id: "r".into() }]
+            vec![
+                Command::Unknown,
+                Command::JobStop {
+                    job_id: "r".into(),
+                    reason: None
+                }
+            ]
         );
     }
     let mut known = start.clone();

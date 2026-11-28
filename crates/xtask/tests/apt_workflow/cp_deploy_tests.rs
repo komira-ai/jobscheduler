@@ -40,9 +40,16 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "cp-deploy-digest",
+        "needs: [plan, publish, deploy-tool, blackbox]",
+        "needs: [plan, deploy-tool, blackbox]",
+        "cp-deploy-digest: needs are not [\"blackbox\", \"deploy-tool\", \"plan\", \"publish\"]",
+    ),
+    // It deploys without the black-box tests' verdict.
+    (
+        "cp-deploy-digest",
+        "needs: [plan, publish, deploy-tool, blackbox]",
         "needs: [plan, publish, deploy-tool]",
-        "needs: [plan, deploy-tool]",
-        "cp-deploy-digest: needs are not [\"deploy-tool\", \"plan\", \"publish\"]",
+        "cp-deploy-digest: needs are not [\"blackbox\", \"deploy-tool\", \"plan\", \"publish\"]",
     ),
     (
         "cp-deploy-digest",
@@ -59,6 +66,55 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "cp-deploy-digest",
         " && vars.CP_DEPLOY_TAILSCALE_TAGS != ''",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
+    // It runs below a skipped or red gate, or leaves it to the implied `success()`.
+    (
+        "cp-deploy-digest",
+        "!cancelled() && !failure() && ",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        "!cancelled() && !failure() && ",
+        "always() && ",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        "!failure() && ",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        " && needs.blackbox.result == 'success'",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        " && needs.blackbox.result == 'success'",
+        " && needs.blackbox.result != 'failure'",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        " && needs.publish.result == 'success'",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        " && needs.deploy-tool.result == 'success'",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
+    (
+        "cp-deploy-digest",
+        " && needs.plan.result == 'success'",
         "",
         "cp-deploy-digest: `if` is not",
     ),
@@ -182,6 +238,26 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "cp-deploy",
         " && vars.CP_DEPLOY_TAILSCALE_TAGS != ''",
+        "",
+        "cp-deploy: `if` is not",
+    ),
+    // It runs after a skipped or failed digest, or leaves it to the implied `success()`.
+    (
+        "cp-deploy",
+        "!cancelled() && !failure() && ",
+        "",
+        "cp-deploy: `if` is not",
+    ),
+    ("cp-deploy", "!failure() && ", "", "cp-deploy: `if` is not"),
+    (
+        "cp-deploy",
+        " && needs.cp-deploy-digest.result == 'success'",
+        "",
+        "cp-deploy: `if` is not",
+    ),
+    (
+        "cp-deploy",
+        " && needs.plan.result == 'success'",
         "",
         "cp-deploy: `if` is not",
     ),

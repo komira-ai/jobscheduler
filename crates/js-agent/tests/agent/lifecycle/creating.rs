@@ -164,6 +164,7 @@ fn a_job_stop_asked_while_the_create_is_under_way_kills_the_job_once_created() {
     h.apply(vec![job_start(start("j1"))]);
     h.apply(vec![Command::JobStop {
         job_id: "j1".to_owned(),
+        reason: None,
     }]);
     assert!(h.life.step().is_empty());
     let job = listing(&h, "j1");

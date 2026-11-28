@@ -387,6 +387,7 @@ fn a_tree_start_reads_as_unknown_to_the_previous_release() {
         Command::JobStart(tree_start),
         Command::JobStop {
             job_id: "job-0".into(),
+            reason: None,
         },
         Command::JobStart(staged),
     ];

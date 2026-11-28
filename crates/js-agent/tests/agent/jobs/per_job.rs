@@ -82,6 +82,7 @@ fn a_closed_worker_takes_no_job_start() {
     let mut reply = starts(&["j2"]);
     reply.commands.push(Command::JobStop {
         job_id: "j3".to_owned(),
+        reason: None,
     });
     assert_eq!(worker.try_deliver(reply), Delivery::Delivered);
     assert!(worker.handle().settle());
@@ -110,6 +111,7 @@ fn the_heartbeat_carries_the_jobs_and_the_retired_ids() {
     let mut reply_in = starts(&["j1"]);
     reply_in.commands.push(Command::JobStop {
         job_id: "j9".to_owned(),
+        reason: None,
     });
     assert_eq!(worker.try_deliver(reply_in), Delivery::Delivered);
     assert!(worker.handle().settle());

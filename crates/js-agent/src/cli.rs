@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
@@ -34,6 +34,14 @@ pub struct Cli {
     /// clear.
     #[arg(long, value_name = "URL")]
     pub server: String,
+    /// The IP address of the `--server` host, given beside its name (`--server-address=192.0.2.10`;
+    /// the port is `--server`'s), so that the agent needs no lookup of the name to start. The
+    /// certificate is still checked against the name. Whether given or learned, the agent sends
+    /// to the address its last new connection completed a handshake on, with no lookup, until
+    /// a connection to it fails or a later lookup gives an address a handshake completes on.
+    /// For an `https://` server only.
+    #[arg(long, value_name = "IP")]
+    pub server_address: Option<IpAddr>,
     /// A file of more flags, one argument word per line (`--server=https://leases.example:7300`;
     /// empty lines and lines that start with `#` are skipped), read in place of this flag
     /// before the other flags are parsed. A regular file owned by the user running the agent

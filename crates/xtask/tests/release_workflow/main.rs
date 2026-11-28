@@ -6,19 +6,23 @@
 //! and no concurrency group, `id-token: write` and `contents: write`
 //! only where they are meant, every attestation signed by artifacts.yml, the apt jobs'
 //! permissions, and the gamma step's shape. The fast lane's jobs (`unit-tests`, `turn`,
-//! `desired`, `deployed`, `release-red`, `release-green`) are held by `fast_lane`; the shape of
-//! each apt job by `tests/apt_workflow`.
+//! `desired`, `deployed`, `release-red`, `release-green`) are held by `fast_lane`; the gate
+//! before the farm (`blackbox`) by `blackbox`; what GitHub does with the needs graph and the job
+//! conditions, run over release scenarios, by `skip_rule`; the shape of each apt job by
+//! `tests/apt_workflow`.
 
 use std::path::Path;
 
 mod apt;
 mod artifacts;
+mod blackbox;
 mod calls;
 mod debs;
 mod fast_lane;
 mod images;
 mod macos_farm;
 mod secrets;
+mod skip_rule;
 mod smoke;
 
 use calls::{ARTIFACTS_CALLS, CALLERS, calls};
@@ -197,6 +201,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "beta-macos-isolation",
         "promote-macos",
         "pkg-upload",
+        "blackbox",
         "smoke-bundle-pack",
         "smoke-bundle-push",
         "smoke-bundle-check",
@@ -219,9 +224,13 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
 }
 
 /// Asserts that publish, deploy-tool, gamma and the control-plane deploy run only on the plan's
-/// word that a release is made, and never with a status function that would run them after a
-/// failed or skipped job, and that publish needs the call of artifacts.yml (so a failed attest
-/// or verify there stops it), the unit tests and the turn (`fast_lane`).
+/// word that a release is made, and never with `always()`; that publish, deploy-tool and gamma
+/// have no status function that would run them after a failed or skipped job, while the two
+/// control-plane deploy jobs, which sit below the apt jobs' retry slots (skipped on a release with
+/// no apt conflict), start with `!cancelled() && !failure()` and name the results they wait for
+/// (`tests/apt_workflow`'s `cp_deploy` holds their whole condition, `skip_rule` what GitHub does
+/// with it); and that publish needs the call of artifacts.yml (so a failed attest or verify there
+/// stops it), the unit tests and the turn (`fast_lane`).
 #[test]
 fn the_release_jobs_need_the_plans_release_and_no_status_function() {
     let text = workflow();
@@ -248,11 +257,16 @@ fn the_release_jobs_need_the_plans_release_and_no_status_function() {
             "{name}: {}",
             ifs[0]
         );
-        assert!(
-            !ifs[0].contains("!cancelled()") && !ifs[0].contains("always()"),
-            "{name}: {}",
-            ifs[0]
-        );
+        assert!(!ifs[0].contains("always()"), "{name}: {}", ifs[0]);
+        if name.starts_with("cp-deploy") {
+            assert!(
+                ifs[0].starts_with("    if: ${{ !cancelled() && !failure() && "),
+                "{name}: {}",
+                ifs[0]
+            );
+        } else {
+            assert!(!ifs[0].contains("!cancelled()"), "{name}: {}", ifs[0]);
+        }
     }
 }
 

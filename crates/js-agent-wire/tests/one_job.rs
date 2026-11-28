@@ -418,7 +418,8 @@ fn an_unknown_platform_reads_as_an_unknown_command() {
             [
                 Command::Unknown,
                 Command::JobStop {
-                    job_id: "r2".into()
+                    job_id: "r2".into(),
+                    reason: None
                 }
             ],
             "{key}={value}"
@@ -594,11 +595,13 @@ fn a_run_body_decodes_its_defaults_and_refuses_what_it_cannot_read() {
             reply.commands,
             [
                 Command::JobStop {
-                    job_id: "r0".into()
+                    job_id: "r0".into(),
+                    reason: None
                 },
                 Command::Unknown,
                 Command::JobStop {
-                    job_id: "r2".into()
+                    job_id: "r2".into(),
+                    reason: None
                 }
             ],
             "{why}"

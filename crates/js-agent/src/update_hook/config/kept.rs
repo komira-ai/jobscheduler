@@ -26,6 +26,14 @@
 //! directory moved and replaced by a link after the check redirects none of it. The paths in an
 //! error are only the names the copy is reported by.
 //!
+//! A copy that a `prepare` finds and keeps as it is (it is of an earlier update that did not
+//! finish) is marked so, by an empty file `kept/earlier`: the files it holds are from before that
+//! update, not from before this one, so they say nothing of what the agent runs on now.
+//!
+//! `cutover` asks [`unchanged`] whether every path of the copy holds what was kept, after the
+//! installer has placed the new files: when it does, the update placed the files that were
+//! already there. A copy marked as an earlier update's is never unchanged.
+//!
 //! A file is put back by writing a file beside it (`.<name>.js-agent-config-restore`), giving it
 //! its owner, group and mode, syncing it and renaming it over the path, then syncing the
 //! directory, so the path holds the file that was there or the kept one and never a part of
@@ -36,7 +44,7 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, lchown};
 use std::path::{Path, PathBuf};
@@ -61,6 +69,9 @@ const INDEX_SCHEMA: u32 = 1;
 
 /// The package's files in its staged release directory.
 const TREE: &str = "tree";
+
+/// The mark of a copy kept from an earlier update, in the copy's directory.
+const EARLIER: &str = "earlier";
 
 /// The end of the name a file or link is written under before it is renamed over its path.
 const RESTORE_SUFFIX: &str = ".js-agent-config-restore";
@@ -116,6 +127,13 @@ const READ_FLAGS: OFlags = OFlags::RDONLY
 const NEW_FLAGS: OFlags = OFlags::WRONLY
     .union(OFlags::CREATE)
     .union(OFlags::EXCL)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// How the mark of an earlier update's copy is made: made when it is not there, opened when it
+/// is, never through a link, not inherited by a child.
+const MARK_FLAGS: OFlags = OFlags::WRONLY
+    .union(OFlags::CREATE)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
@@ -513,9 +531,8 @@ fn put_one(path: &Path, kept: &Kept, bytes: &Bytes<'_>) -> Result<bool, KeptErro
     Ok(true)
 }
 
-/// Puts the copy in `state` back, path by path; `None` when there is no copy. The copy is left
-/// where it is.
-pub(super) fn put_back(state: StateDir<'_>) -> Result<Option<PutBack>, KeptError> {
+/// The copy in `state`, opened, and its index; `None` when there is no copy.
+fn open_copy(state: StateDir<'_>) -> Result<Option<(OwnedFd, Index)>, KeptError> {
     if !exists(state)? {
         return Ok(None);
     }
@@ -536,6 +553,60 @@ pub(super) fn put_back(state: StateDir<'_>) -> Result<Option<PutBack>, KeptError
             what: "is of a schema this hook does not read",
         });
     }
+    Ok(Some((kept, index)))
+}
+
+/// Marks the copy in `state`, which is there, as an earlier update's (see the module
+/// documentation); nothing when it is marked already.
+pub(super) fn mark_earlier(state: StateDir<'_>) -> Result<(), KeptError> {
+    let kept_path = state.path.join(KEPT);
+    let kept = openat(state.fd, KEPT, DIR_FLAGS, Mode::empty()).map_err(errno_at(&kept_path))?;
+    let mark_path = kept_path.join(EARLIER);
+    // Made, or opened when a rerun made it already: a link is not followed.
+    openat(&kept, EARLIER, MARK_FLAGS, Mode::RUSR | Mode::WUSR).map_err(errno_at(&mark_path))?;
+    fsync(&kept).map_err(errno_at(&kept_path))
+}
+
+/// Whether every path of the copy in `state` holds what was kept: a file with the same bytes,
+/// mode, owner and group, a link with the same target, owner and group, and nothing where
+/// nothing was. `false` when there is no copy or it is marked as an earlier update's.
+pub(super) fn unchanged(state: StateDir<'_>) -> Result<bool, KeptError> {
+    let Some((kept, index)) = open_copy(state)? else {
+        return Ok(false);
+    };
+    let kept_path = state.path.join(KEPT);
+    match statat(&kept, EARLIER, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => {}
+        seen => {
+            seen.map_err(errno_at(&kept_path.join(EARLIER)))?;
+            return Ok(false);
+        }
+    }
+    for (n, entry) in index.entries.iter().enumerate() {
+        let now = meta_at(&entry.path).map_err(at(&entry.path))?;
+        let same = match (&entry.was, &now) {
+            (None, None) => true,
+            (Some(was), Some(now)) => {
+                let bytes = Bytes::new(kept.as_fd(), &kept_path, n.to_string());
+                was.is_at(&entry.path, now, &bytes)
+                    .map_err(at(&entry.path))?
+            }
+            _ => false,
+        };
+        if !same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Puts the copy in `state` back, path by path; `None` when there is no copy. The copy is left
+/// where it is.
+pub(super) fn put_back(state: StateDir<'_>) -> Result<Option<PutBack>, KeptError> {
+    let Some((kept, index)) = open_copy(state)? else {
+        return Ok(None);
+    };
+    let kept_path = state.path.join(KEPT);
     let mut done = PutBack::default();
     for (n, entry) in index.entries.iter().enumerate() {
         let list = match &entry.was {

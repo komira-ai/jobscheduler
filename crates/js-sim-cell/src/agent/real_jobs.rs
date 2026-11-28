@@ -164,7 +164,7 @@ impl RealJobs {
                         noted.unaccounted.insert(spec.job_id.clone());
                     }
                 },
-                Command::JobStop { job_id } => match JobId::parse(job_id) {
+                Command::JobStop { job_id, .. } => match JobId::parse(job_id) {
                     Ok(job) => {
                         noted.read.stops.insert(job.clone());
                         let handed = self.handed.contains(&job);

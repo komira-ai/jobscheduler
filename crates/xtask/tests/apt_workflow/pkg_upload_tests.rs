@@ -45,7 +45,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         " && ",
         "pkg-upload: `if` is not",
     ),
-    // Without `!cancelled()` a failed package job would skip the upload and `desired`'s wait.
+    // The status check is written out, `!cancelled()` and each result it needs: any other
+    // condition is refused.
     (
         "pkg-upload",
         "${{ !cancelled() && ",
@@ -62,6 +63,14 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "pkg-upload",
         " && needs.deploy-tool.result == 'success'",
+        "",
+        "pkg-upload: `if` is not",
+    ),
+    // A package job that failed may have signed its package before a later job of it failed;
+    // waiting only for its end would upload that package.
+    (
+        "pkg-upload",
+        " && needs.beta-macos-pkg.result == 'success'",
         "",
         "pkg-upload: `if` is not",
     ),

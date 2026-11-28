@@ -23,7 +23,11 @@
 //!   section 4), and how long each phase of each `SubmitJob` call took
 //!   (`js_submit_phase_seconds`, by `phase`, [`SubmitPhase`]), and each hello or heartbeat
 //!   refused 413 `body-too-large` for a body over the cap (`js_agent_bodies_too_large_total`,
-//!   by `route`, [`AgentRoute`]). A start failure or a loss is
+//!   by `route`, [`AgentRoute`]), and, by host, each job a heartbeat listed that the store
+//!   holds no record of, once, at the beat that first listed it
+//!   (`js_unknown_jobs_found_total`), and each heartbeat whose listing was mostly such jobs,
+//!   so that the host was told to stop nothing (`js_unknown_listing_guarded_total`,
+//!   [`crate::orphans`]). A start failure or a loss is
 //!   counted as the end of a job, so an attempt that
 //!   retries counts as a retry and not as a start failure or a loss. Each is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
@@ -33,12 +37,20 @@
 //!   read ([`scrape`]): the jobs by state, the age of the oldest queued job, the completion
 //!   callbacks still pending, and for each host
 //!   the CPU and memory booked and free and its whole-host mark, and under
-//!   `--placement-curves on` the classes booking by curve and flat and each curve host's fullest
-//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]),
-//!   and under `shadow` and `on` the memory shadow: the placements by how a booking that follows
-//!   the classes' memory curves would have placed them, and each host's projected memory, its
-//!   last reading and how often a reading showed more than the projection
-//!   ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]); nothing in it is booked.
+//!   `--placement-curves shadow` and `on` the classes booking by curve and flat and, under `on`,
+//!   each curve host's fullest booked slot, read from the placer
+//!   ([`js_sched_placer::place::SchedPlacer::curve_view`]); under `shadow` and `on` the memory
+//!   shadow: the placements by how a booking that follows the classes' memory curves would have
+//!   placed them, and each host's projected memory, its last reading and how often a reading
+//!   showed more than the projection ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]);
+//!   nothing in it is booked; and the placement by load, read from
+//!   the placer with the registry's hosts ([`js_sched_placer::place::SchedPlacer::telemetry`]):
+//!   what admission has done (`js_placement_admissions_total` and its kin, `js_placement_decided_total`
+//!   by `key`, `js_load_readings_total` by `result`), how each host is charged, each host's CPU
+//!   pressure and OOM events and the hosts kept empty, the ratios of the runs freed while serving
+//!   against what they booked (`js_run_*`, histograms with the buckets of
+//!   [`js_sched_placer::telemetry::FIT_BOUNDS_PERMILLE`]) and the checks of those runs
+//!   (`js_curve_checks_total` by `resource` and `status`).
 //!   A scrape holds no lock of the
 //!   server's while it renders: the registry's is taken and dropped as `GET /v1/hosts`
 //!   takes it, and the job tables are read on the pool for blocking
@@ -46,13 +58,17 @@
 //!   two reads can show as queued while its booking already counts.
 //!
 //! The text names no job, lease, run or token: its labels are a job state, a start failure
-//! code, a host's id, a pool's name, a host's mark, a callback's result and a phase of a
-//! submit, and nothing else. The route takes no
+//! code, a host's id, a pool's name, a host's mark, a callback's result, a phase of a
+//! submit, a decision key, a reading's result, a resource, a check's status, a memory-shadow
+//! verdict, an agent's route and a bucket bound,
+//! and nothing else. The route takes no
 //! token, so it is served only on a private address ([`crate::is_private_address`]), and
 //! only to a private peer, as `/status` is.
 
+mod placement;
 mod render;
 mod scrape;
+mod work;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -97,6 +113,9 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// A queued job of a curve class waited past the wait bound with no host fitting its
     /// curve, and is tested with its flat number from then on; by default, nothing is counted.
     fn curve_wait_expired(&self) {}
+    /// A pass wrote the queue status of a job it did not place, in a commit of its own; by
+    /// default, nothing is counted.
+    fn queue_status_written(&self) {}
     /// A try of a job's completion callback was answered `answer`, and the answer recorded;
     /// by default, nothing is counted.
     fn callback_answered(&self, _answer: &CallbackAnswer) {}
@@ -111,6 +130,14 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// An agent's request on `route` was refused 413 `body-too-large`, its body over the cap;
     /// by default, nothing is counted.
     fn agent_body_too_large(&self, _route: AgentRoute) {}
+    /// A beat of `host` listed `count` jobs the store holds no record of that its row did not
+    /// hold as orphans yet (each counted once, at the beat that first listed it); by default,
+    /// nothing is counted.
+    fn unknown_jobs_found(&self, _host: &HostId, _count: usize) {}
+    /// A beat of `host` listed more jobs the store holds no record of than it knows, so the
+    /// host was told to stop nothing but an operator's orphans ([`crate::orphans`]); by
+    /// default, nothing is counted.
+    fn unknown_listing_guarded(&self, _host: &HostId) {}
 }
 
 /// An agent route whose body is read whole and held to the cap: the label of
@@ -247,6 +274,10 @@ impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
 
     fn curve_wait_expired(&self) {
         self.0.curve_wait_expired();
+    }
+
+    fn queue_status_written(&self) {
+        self.0.queue_status_written();
     }
 }
 
@@ -599,6 +630,11 @@ pub(crate) struct Recorder {
     callbacks: [AtomicU64; 4],
     submit_phases: [Histogram; 6],
     bodies_too_large: [AtomicU64; 2],
+    unknown_found: Mutex<BTreeMap<String, u64>>,
+    unknown_guarded: Mutex<BTreeMap<String, u64>>,
+    /// The queue statuses of unplaced jobs the passes wrote, served with the server's own work
+    /// ([`work`]).
+    queue_status_writes: AtomicU64,
 }
 
 impl Default for Recorder {
@@ -620,6 +656,9 @@ impl Default for Recorder {
             callbacks: Default::default(),
             submit_phases: std::array::from_fn(|_| Histogram::new(SUBMIT_PHASE)),
             bodies_too_large: Default::default(),
+            unknown_found: Mutex::default(),
+            unknown_guarded: Mutex::default(),
+            queue_status_writes: AtomicU64::new(0),
         }
     }
 }
@@ -680,6 +719,10 @@ impl MetricsSink for Recorder {
         self.curve_wait_expiries.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn queue_status_written(&self) {
+        self.queue_status_writes.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn job_retried(&self, outcome: RetryOutcome) {
         self.retries[retry_slot(outcome)].fetch_add(1, Ordering::Relaxed);
     }
@@ -699,6 +742,23 @@ impl MetricsSink for Recorder {
     fn agent_body_too_large(&self, route: AgentRoute) {
         self.bodies_too_large[route_slot(route)].fetch_add(1, Ordering::Relaxed);
     }
+
+    fn unknown_jobs_found(&self, host: &HostId, count: usize) {
+        let mut found = self
+            .unknown_found
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let seen = found.entry(host.as_str().to_owned()).or_default();
+        *seen = seen.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
+    fn unknown_listing_guarded(&self, host: &HostId) {
+        let mut guarded = self
+            .unknown_guarded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guarded.entry(host.as_str().to_owned()).or_default() += 1;
+    }
 }
 
 /// The text a scrape of no job tables and no hosts answers, with the events `recorder` counted.
@@ -708,6 +768,7 @@ pub(crate) fn rendered(recorder: &Recorder) -> String {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     render::render(&seen, recorder)
@@ -728,6 +789,18 @@ impl Recorder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The jobs unknown to the store first listed, and the beats the guard held, each by
+    /// host.
+    fn unknown(&self) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+        let read = |counts: &Mutex<BTreeMap<String, u64>>| {
+            counts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        };
+        (read(&self.unknown_found), read(&self.unknown_guarded))
     }
 
     /// The refusals counted, by host and reason.
@@ -758,3 +831,11 @@ mod events_tests;
 #[cfg(test)]
 #[path = "metrics/retry_tests.rs"]
 mod retry_tests;
+
+#[cfg(test)]
+#[path = "metrics/telemetry_tests.rs"]
+mod telemetry_tests;
+
+#[cfg(test)]
+#[path = "metrics/orphan_tests.rs"]
+mod orphan_tests;

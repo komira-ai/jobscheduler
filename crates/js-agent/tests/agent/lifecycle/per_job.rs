@@ -7,7 +7,7 @@
 use js_agent::lifecycle::{Clock, RETIRED_LISTED, label};
 use js_agent_wire::{
     BookedResources, Command, HeartbeatReply, HeldJob, HeldState, Isolation, JobStartSpec,
-    JobUsage, Outcome, refusal,
+    JobUsage, Outcome, StopReason, refusal,
 };
 use serde_json::json;
 
@@ -56,6 +56,7 @@ pub(super) fn job_start(spec: JobStartSpec) -> Command {
 fn job_stop(job_id: &str) -> Command {
     Command::JobStop {
         job_id: job_id.to_owned(),
+        reason: None,
     }
 }
 
@@ -161,6 +162,81 @@ fn a_stop_for_a_held_job_ends_it_killed_once() {
     assert_eq!(result.exit_code, None);
     assert_eq!(result.allocation_id, "alloc-j1");
     assert!(h.life.retired_jobs().is_empty());
+}
+
+fn stop_for(job_id: &str, reason: StopReason) -> Command {
+    Command::JobStop {
+        job_id: job_id.to_owned(),
+        reason: Some(reason),
+    }
+}
+
+/// The events of `names` that report a stop's reason or the jobs unknown to the server.
+fn told(events: &[String]) -> Vec<String> {
+    let kinds = ["stopped ", "unknown"];
+    let reported = |event: &&String| kinds.iter().any(|kind| event.starts_with(kind));
+    events.iter().filter(reported).cloned().collect()
+}
+
+/// Asserts that a stop that names its reason stops a held job as any stop does (one stop
+/// call, a `killed` result) and is reported once, at the stop that asked the job to stop,
+/// not at its repeats; that the first stop of a job the agent does not hold is reported
+/// once too and retires the id as before; and that a stop with no reason is not reported.
+/// It catches a reason that changes what is stopped, and one reported on every resent stop.
+#[test]
+fn a_stop_that_names_its_reason_is_reported_once_and_stops_as_any_stop() {
+    let mut h = Harness::new("job-stop-reason");
+    h.fake.stop_exits(false);
+    h.apply(vec![job_start(start("j1")), job_start(start("j2"))]);
+    let first = names(&h.apply(vec![
+        stop_for("j1", StopReason::Replaced),
+        stop_for("j1", StopReason::Replaced),
+    ]));
+    assert_eq!(told(&first), ["stopped j1 Replaced"]);
+    h.life.step();
+    let again = names(&h.apply(vec![stop_for("j1", StopReason::Replaced)]));
+    assert!(told(&again).is_empty(), "{again:?}");
+    let plain = names(&h.apply(vec![job_stop("j2")]));
+    assert!(told(&plain).is_empty(), "{plain:?}");
+    h.life.step();
+    assert_eq!(h.fake.stops().len(), 2);
+    h.fake.exit("j1", 143);
+    h.life.step();
+    assert_eq!(
+        listing(&h, "j1").result.map(|r| r.outcome),
+        Some(Outcome::Killed)
+    );
+
+    let unheld = names(&h.apply(vec![stop_for("j9", StopReason::Cancelled)]));
+    assert_eq!(told(&unheld), ["stopped j9 Cancelled"]);
+    let unheld_again = names(&h.apply(vec![stop_for("j9", StopReason::Cancelled)]));
+    assert!(told(&unheld_again).is_empty(), "{unheld_again:?}");
+    assert_eq!(h.life.retired_jobs(), ["j9"]);
+}
+
+/// Asserts that a job a reply names unknown to the server keeps running (no stop call, still
+/// listed running, no retired id), that the list is reported when it changes and not when a
+/// reply repeats it, that a reply that names none reports the empty list once, and that a bad
+/// list is ignored. It catches an agent that stops, or forgets, a job its server holds no
+/// record of, and a line on every heartbeat.
+#[test]
+fn a_job_the_server_does_not_know_keeps_running_and_is_reported_when_the_list_changes() {
+    let mut h = Harness::new("job-unknown-here");
+    h.fake.stop_exits(false);
+    h.apply(vec![job_start(start("j1"))]);
+    let unknown = reply_json(&json!({ "unknown_jobs": ["j1"] }));
+    assert_eq!(told(&names(&h.life.apply(&unknown))), ["unknown j1"]);
+    assert!(told(&names(&h.life.apply(&unknown))).is_empty());
+    let bad = reply_json(&json!({ "unknown_jobs": ["-x"] }));
+    assert!(told(&names(&h.life.apply(&bad))).is_empty());
+    h.life.step();
+    assert!(h.fake.stops().is_empty());
+    assert_eq!(listing(&h, "j1").state, HeldState::Running);
+    assert!(h.life.retired_jobs().is_empty());
+    let known = reply_json(&json!({ "taint_ack": false }));
+    assert_eq!(told(&names(&h.life.apply(&known))), ["unknown "]);
+    assert!(told(&names(&h.life.apply(&known))).is_empty());
+    assert!(h.fake.stops().is_empty());
 }
 
 /// Asserts that a finished job's result is in its listing at every heartbeat across five

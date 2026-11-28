@@ -283,6 +283,7 @@ fn heartbeat_reply_wire_form() {
         commands: vec![
             Command::JobStop {
                 job_id: "j1".into(),
+                reason: None,
             },
             Command::Unknown,
         ],
@@ -296,6 +297,7 @@ fn heartbeat_reply_wire_form() {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        unknown_jobs: Vec::new(),
         log_grant: None,
         beat_now: false,
     };

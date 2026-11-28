@@ -15,6 +15,7 @@ use super::{GRACE, Harness, Options, cleanup, job, names, reply_json};
 fn job_stop(job_id: &str) -> Command {
     Command::JobStop {
         job_id: job_id.to_owned(),
+        reason: None,
     }
 }
 

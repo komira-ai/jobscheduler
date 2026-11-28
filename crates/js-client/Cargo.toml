@@ -13,6 +13,10 @@ rustix = { workspace = true, features = ["fs", "process"] }
 rustls.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# The lines of src/address.rs: lookups of the server's name failing while a remembered
+# address is used, answering again, and a move to a new address. The agent writes them to
+# its journal (js-agent's src/warnings.rs).
+tracing.workspace = true
 ureq.workspace = true
 # The job client (src/jobs), behind the `jobs` feature: the job service's messages and
 # generated gRPC client, the HTTP/2 channel they run on (`channel`, without tonic's own TLS:
@@ -42,6 +46,8 @@ rcgen.workspace = true
 # `test-util`: the job client's deadline tests run on a paused clock.
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
 tonic = { workspace = true, features = ["transport"] }
+# The subscriber the address tests read the client's lines with (src/address_tests.rs).
+tracing-subscriber.workspace = true
 webpki-roots.workspace = true
 
 [lints]

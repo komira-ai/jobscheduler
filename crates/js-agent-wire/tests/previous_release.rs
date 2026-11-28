@@ -390,6 +390,7 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
             job_start("job-1"),
             Command::JobStop {
                 job_id: "job-2".into(),
+                reason: None,
             },
         ],
         result_acks: vec![ResultAck {
@@ -487,6 +488,7 @@ fn an_old_agent_ignores_log_sink() {
             Command::JobStart(spec),
             Command::JobStop {
                 job_id: "build-41".into(),
+                reason: None,
             },
         ],
         job_acks: vec![JobResultAck {
@@ -649,6 +651,7 @@ fn an_old_agent_skips_the_kind_of_a_vm_start() {
             Command::JobStart(spec),
             Command::JobStop {
                 job_id: "vm-41".into(),
+                reason: None,
             },
         ],
         ..HeartbeatReply::default()
@@ -684,6 +687,7 @@ fn an_old_agent_skips_the_isolation_of_a_host_start() {
             Command::JobStart(spec),
             Command::JobStop {
                 job_id: "host-41".into(),
+                reason: None,
             },
         ],
         ..HeartbeatReply::default()
@@ -719,6 +723,7 @@ fn an_old_agent_skips_the_fuse_of_a_fuse_start() {
             Command::JobStart(spec),
             Command::JobStop {
                 job_id: "fuse-41".into(),
+                reason: None,
             },
         ],
         ..HeartbeatReply::default()
@@ -754,6 +759,7 @@ fn an_old_agent_skips_the_xcode_of_an_xcode_start() {
             Command::JobStart(spec),
             Command::JobStop {
                 job_id: "xcode-41".into(),
+                reason: None,
             },
         ],
         ..HeartbeatReply::default()
@@ -876,6 +882,7 @@ fn an_old_agent_ignores_the_os_and_arch_of_a_container_start() {
             Command::JobStart(spec),
             Command::JobStop {
                 job_id: "build-41".into(),
+                reason: None,
             },
         ],
         ..HeartbeatReply::default()

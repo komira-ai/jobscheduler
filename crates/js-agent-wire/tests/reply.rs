@@ -11,7 +11,10 @@ use js_agent_wire::{
 };
 
 fn stop(job: &str) -> Command {
-    Command::JobStop { job_id: job.into() }
+    Command::JobStop {
+        job_id: job.into(),
+        reason: None,
+    }
 }
 
 fn start(job: &str, gpus: &[u32]) -> Command {
@@ -31,6 +34,7 @@ fn reply(commands: Vec<Command>) -> HeartbeatReply {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        unknown_jobs: Vec::new(),
         log_grant: None,
         beat_now: false,
     }

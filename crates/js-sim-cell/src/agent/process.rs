@@ -460,7 +460,7 @@ fn hand_over(
 ) -> Vec<String> {
     reply.commands.retain(|command| match command {
         Command::JobStart(job) => !unaccounted.contains(&job.job_id),
-        Command::JobStop { job_id } => !unaccounted.contains(job_id),
+        Command::JobStop { job_id, .. } => !unaccounted.contains(job_id),
         _ => true,
     });
     real.apply(reply)
