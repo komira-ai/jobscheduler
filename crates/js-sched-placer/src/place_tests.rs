@@ -71,12 +71,10 @@ fn calls_kept_while_a_pass_holds_the_engine_reach_it_in_their_order() {
     placer.host_gone(&host("h1"));
     drop(pass);
     assert_eq!(placer.hosts_kept(), 0);
-    assert!(placer.gone().contains_key(&host("h1")));
     let pass = placer.engine();
     placer.host_up(&host("h1"), &shape());
     drop(pass);
     assert_eq!(placer.hosts_kept(), 1);
-    assert!(placer.gone().is_empty());
 }
 
 /// Asserts the edge of what the placer holds: while a pass holds the engine it answers that it

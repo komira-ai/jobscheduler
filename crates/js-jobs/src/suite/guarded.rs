@@ -1,5 +1,6 @@
-//! The guarded view of a job store ([`crate::JobStore::guarded`]) and [`crate::JobStore::settle_node`]:
-//! writes conditional on a host's node row staying at a version, and the row's state written at
+//! The guarded views of a job store ([`crate::JobStore::guarded`],
+//! [`crate::JobStore::guarded_absent`]) and [`crate::JobStore::settle_node`]: writes conditional
+//! on a host's node row staying at a version or staying absent, and the row's state written at
 //! that version.
 
 use js_agent_wire::Phase;
@@ -103,6 +104,52 @@ pub fn a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved<B: B
             .expect("commits")
             .created,
         "{name}: an unguarded write needed a node row"
+    );
+}
+
+/// A view guarded on a host's absence ([`JobStore::guarded_absent`]) writes while the host has
+/// no node row, and a write after a hello wrote the row is [`JobStoreError::NodeMoved`] that
+/// writes nothing; once the row is forgotten again the view writes again. Catches an absence
+/// guard that is not checked (the settlement of a removed host still loses its jobs after the
+/// host came back), and one that refuses with no row there.
+pub fn a_view_guarded_on_absence_writes_only_while_the_host_has_no_row<B: Backend>(backend: &B) {
+    let name = "a_view_guarded_on_absence_writes_only_while_the_host_has_no_row";
+    let rig = rig(backend);
+    let node = host("host-a");
+    let guarded = rig.jobs.guarded_absent(&node);
+
+    let inserted = guarded.insert_queued(new_job("a-one")).expect("commits");
+    assert!(inserted.created, "{name}: a write with no row was not made");
+
+    rig.tick();
+    let said = rig.jobs.hello_node(&node, &hello()).expect("a hello");
+    let before = rig.snapshot();
+    assert_eq!(
+        guarded.insert_queued(new_job("a-two")).map(drop),
+        Err(JobStoreError::NodeMoved { host: node.clone() }),
+        "{name}: a write after the hello was not refused"
+    );
+    assert_eq!(
+        rig.snapshot().0,
+        before.0,
+        "{name}: a refused write changed the store"
+    );
+    assert!(
+        rig.raw(&keys::job(&job_id("a-two"))).is_none(),
+        "{name}: the refused job was recorded"
+    );
+
+    assert_eq!(
+        rig.jobs.forget_node(&node, said.version),
+        Ok(true),
+        "{name}: the row was not forgotten"
+    );
+    assert!(
+        guarded
+            .insert_queued(new_job("a-three"))
+            .expect("commits")
+            .created,
+        "{name}: a write with the row gone again was not made"
     );
 }
 

@@ -124,6 +124,9 @@ fn remove(rig: &Rig, host: &str) {
     registry.drain(&host).unwrap();
     registry.release_host(&host).unwrap();
     registry.remove(&host).unwrap();
+    // The scaler's removal deletes the host's row too: what the job pass reads absent.
+    let row = rig.jobs.read_node(&host).unwrap().unwrap();
+    assert_eq!(rig.jobs.forget_node(&host, row.version), Ok(true));
 }
 
 /// The host `host` says hello again, past the grace, and its first listing, from a fresh agent,

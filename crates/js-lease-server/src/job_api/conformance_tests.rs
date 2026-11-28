@@ -35,7 +35,7 @@ use crate::agent_api::job_rig::{BOOKED, OneClock, START_MS, tables_on};
 use crate::clock::SharedClock;
 use crate::config::{Clients, Entry, LiveClients, Role, parse_token};
 use crate::job_alloc::{self, Freed};
-use crate::job_loss::{self, Observe, Seen};
+use crate::job_loss::{self, Observe, RowRead, Seen};
 use crate::job_retry::{self, Settled};
 use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
@@ -79,7 +79,7 @@ impl Service<Request<Body>> for Presenting {
 struct Gone;
 
 impl Observe for Gone {
-    fn observe(&self, _: &HostId) -> Result<Seen, String> {
+    fn observe(&self, _: &HostId, _: &RowRead) -> Result<Seen, String> {
         Ok(Seen::Absent)
     }
 }
