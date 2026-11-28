@@ -3,11 +3,12 @@
 //! the run's file system is taken apart, on every path a run can end by, and a release that
 //! fails never taints the host or holds the run's slot.
 
-use js_agent::lifecycle::{Event, ProviderAnswer};
-use js_agent_wire::{Command, HeldState, MountMode, Outcome};
+use js_agent::lifecycle::{Event, FsPrepared, NativeRefusal, ProviderAnswer};
+use js_agent_wire::{Command, HeldState, MountMode, MountSource, Outcome, refusal};
 
 use super::fake_providers::{
     IMAGE, mount, prepare, release, rig, run_one, tree, with_layer, with_layer_and_mount,
+    with_mount,
 };
 use super::per_job::{job_start, listing};
 use super::{Harness, names};
@@ -241,4 +242,85 @@ fn a_run_releases_its_sources_one_by_one_and_keeps_its_record_until_the_last() {
         ],
         "source 0 was released once"
     );
+}
+
+/// Asserts that a start the runtime refuses after its provider answered the directory is
+/// released, once, and leaves the provider holding nothing of it (the fake provider counts
+/// zero sources alive afterwards, one while the start waited): when the runtime refuses the
+/// lookups of the file system that holds the provider's directory (the Mac's native runtime
+/// refuses there a tree its rule does not take) and when it refuses the assembly (where a
+/// Linux runtime refuses). Each start fails with a `start-failed` finding that carries the
+/// runtime's reason, and makes no container. Catches a refused start whose source stays alive
+/// at the provider until the provider's own collection, which on a host whose starts are all
+/// refused fills the provider's placements.
+#[test]
+fn a_start_refused_after_its_provider_answered_releases_its_source() {
+    let why = "not a tree the provider answered for the run";
+    let refused = FsPrepared::Refused(NativeRefusal {
+        code: refusal::INPUT_NOT_ALLOWED,
+        why: why.to_owned(),
+    });
+    for at in ["lookup", "assembly"] {
+        let (mut h, providers) = rig(&format!("prov-refused-at-{at}"), |p| p.keep_sources());
+        let dir = tree(&h, "ro", "t");
+        providers.mounts_at("tier", "j1", 0, &dir);
+        let mut events = Vec::new();
+        match at {
+            "lookup" => {
+                // The first `Mount` is out, so the lookups made before its answer leave the
+                // source out and pass; the refusal is of the lookups that open the directory.
+                providers.then("tier", &mount("j1", 0), ProviderAnswer::Pending);
+                events.extend(h.apply(vec![job_start(with_mount("j1", MountMode::ReadOnly))]));
+                for _ in 0..4 {
+                    if !providers.sent("mount").is_empty() {
+                        break;
+                    }
+                    events.extend(h.life.step());
+                }
+                assert_eq!(providers.sent("mount"), ["provider mount tier j1#0"]);
+                assert_eq!(listing(&h, "j1").state, HeldState::Starting);
+                assert_eq!(providers.alive(), 1, "prepared and not released yet");
+                h.fake.resolve_answers("j1", refused.clone());
+            }
+            _ => {
+                h.fake.assembly_answers("j1", refused.clone());
+                events.extend(h.apply(vec![job_start(with_mount("j1", MountMode::ReadOnly))]));
+            }
+        }
+        for _ in 0..6 {
+            events.extend(h.life.step());
+        }
+        let named = names(&events);
+        assert!(named.contains(&"freed j1".to_owned()), "{at}: {named:?}");
+        assert!(!named.contains(&"started j1".to_owned()), "{at}: {named:?}");
+        let looked_up = h.fake.looked_up("j1").expect("looked up");
+        assert_eq!(
+            looked_up
+                .mounts
+                .iter()
+                .map(|m| &m.source)
+                .collect::<Vec<_>>(),
+            [&MountSource::HostPath { path: dir.clone() }],
+            "{at}: the provider's directory was in the file system"
+        );
+        let failed: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Finding(found) if found.code == "start-failed" => {
+                    Some(found.message.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failed, [why], "{at}");
+        assert!(h.fake.created().is_empty(), "{at}: no container");
+        assert_eq!(
+            providers.sent("release"),
+            ["provider release tier j1#0"],
+            "{at}: released once"
+        );
+        assert_eq!(providers.alive(), 0, "{at}: nothing alive at the provider");
+        assert!(!h.dir.path("state/providers/j1.json").exists(), "{at}");
+        assert!(h.life.busy_slots().is_empty(), "{at}");
+    }
 }

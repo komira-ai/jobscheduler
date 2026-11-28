@@ -272,21 +272,34 @@ fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
 
 /// Asserts that the lookup holds a run's mounts to the trees root's rules, refused
 /// `input-not-allowed` naming the path by exact equality, and that no plan is kept: a tree
-/// without `no_exec`, the trees root itself, and another run's tree named as a host path (the
-/// holding case and the escapes are the Linux tests of `native_fs::tree_rules`). Catches a
-/// tree a job could run, a mount that opens every run's trees, a job that reads another run's
-/// tree, and a refusal found only when the profile is built at the start.
+/// without `no_exec`, the trees root itself, another run's tree named as a host path,
+/// unnumbered or of a numbered attempt, and a path one level below the run's own tree of a
+/// numbered attempt (the holding case and the escapes are the Linux tests of
+/// `native_fs::tree_rules`). Catches a tree a job could run, a mount that opens every run's
+/// trees, a job that reads another run's tree, a rule widened past the provider's two shapes
+/// when it took the numbered one, and a refusal found only when the profile is built at the
+/// start.
 #[test]
 fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
     let mut rig = trees_rig("mounts-tree-rules");
     let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
     let tree = root.join("mount-provider/aa/6a732e7231/0");
-    // Run r2's tree, which run r1 names as a host path.
+    // Run r2's trees, which run r1 names as host paths.
     let other = root.join("mount-provider/aa/6a732e7232/0");
-    for dir in [&tree, &other] {
+    let other_numbered = root.join("mount-provider/aa/6a732e7232/a3/0");
+    let deeper = root.join("mount-provider/aa/6a732e7231/a3/0/sub");
+    for dir in [&tree, &other, &other_numbered, &deeper] {
         fs::create_dir_all(dir).unwrap();
     }
     let shown = root.display();
+    let not_its_own = |dir: &Path| {
+        format!(
+            "{}: below the trees root {shown}, a job mounts only a tree the provider \
+             answered for its own run (mount-provider/<provider>/<run>/<index> or \
+             mount-provider/<provider>/<run>/a<attempt>/<index>)",
+            dir.display()
+        )
+    };
     let cases = [
         (
             mount(&tree, "/work/t", MountMode::ReadOnly, false),
@@ -302,11 +315,15 @@ fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
         ),
         (
             mount(&other, "/work/t", MountMode::ReadOnly, true),
-            format!(
-                "{}: below the trees root {shown}, a job mounts only a tree the provider \
-                 answered for its own run (mount-provider/<provider>/<run>/<index>)",
-                other.display()
-            ),
+            not_its_own(&other),
+        ),
+        (
+            mount(&other_numbered, "/work/t", MountMode::ReadOnly, true),
+            not_its_own(&other_numbered),
+        ),
+        (
+            mount(&deeper, "/work/t", MountMode::ReadOnly, true),
+            not_its_own(&deeper),
         ),
     ];
     for (one, why) in cases {
