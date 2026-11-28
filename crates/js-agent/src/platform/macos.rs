@@ -733,7 +733,10 @@ pub(crate) fn runtime(
         Some(store) => runtime.with_bundles(Arc::clone(store)),
         None => runtime,
     };
+    // The trees of the agent's runs are the provider's answers to its calls, which name the
+    // agent by its host id: only that id's folder below the trees root holds them.
     let runtime = runtime
+        .with_provider_agent(build.host_id)
         .with_xcodes(native.xcodes().to_vec())
         .with_live_logs(native.logs().live())
         .with_put(native.put().cloned())

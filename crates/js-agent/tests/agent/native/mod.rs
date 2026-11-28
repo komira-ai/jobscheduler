@@ -141,6 +141,10 @@ pub fn reopen_pool(dir: &Scratch, settings: &Settings, host: &Arc<FakeAccounts>)
     open_pool_adopting(dir, settings, host, &adopted)
 }
 
+/// The name a rig's agent gives itself in its provider calls (its host id): the provider's
+/// folder of its trees below the trees root is the hex of it, `mount-provider/6a7a`.
+pub const PROVIDER_AGENT: &str = "jz";
+
 /// The configuration of the runtimes made here, in `dir`: a loopback cap, the tool roots
 /// `/usr/bin` and `/bin`, one path no run may read, the pool's homes, and Full Disk Access
 /// held.
@@ -215,6 +219,7 @@ impl Rig {
         // that finds none, so no test reads (or waits on) every process of the user.
         let rt = NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM)
             .unwrap()
+            .with_provider_agent(PROVIDER_AGENT)
             .with_process_table(end::GroupTable::new(launcher.clone()))
             .with_process_usage(Arc::new(usage::Fixed::none()));
         let rt = match slots {

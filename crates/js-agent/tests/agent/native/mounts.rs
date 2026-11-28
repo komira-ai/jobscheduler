@@ -215,7 +215,7 @@ fn trees_rig(name: &str) -> Rig {
 fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
     let mut rig = trees_rig("mounts-trees");
     let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
-    let tree = root.join("mount-provider/aa/6a732e7231/0");
+    let tree = root.join("mount-provider/6a7a/6a732e7231/0");
     fs::create_dir_all(&tree).unwrap();
     let input = dir_in(&rig, "ro", "input");
     let mounts = fs_of(vec![
@@ -273,22 +273,27 @@ fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
 /// Asserts that the lookup holds a run's mounts to the trees root's rules, refused
 /// `input-not-allowed` naming the path by exact equality, and that no plan is kept: a tree
 /// without `no_exec`, the trees root itself, another run's tree named as a host path,
-/// unnumbered or of a numbered attempt, and a path one level below the run's own tree of a
-/// numbered attempt (the holding case and the escapes are the Linux tests of
-/// `native_fs::tree_rules`). Catches a tree a job could run, a mount that opens every run's
-/// trees, a job that reads another run's tree, a rule widened past the provider's two shapes
-/// when it took the numbered one, and a refusal found only when the profile is built at the
-/// start.
+/// unnumbered or of a numbered attempt, a path one level below the run's own tree of a
+/// numbered attempt, and the run's own name in another agent's folder (the runtime holds the
+/// trees to the folder of the agent it was told, [`super::PROVIDER_AGENT`]; the holding case
+/// and the escapes are the Linux tests of `native_fs::tree_rules`). Catches a tree a job could
+/// run, a mount that opens every run's trees, a job that reads another run's tree or another
+/// agent's, a rule widened past the provider's two shapes when it took the numbered one, a
+/// runtime the agent's name does not reach, and a refusal found only when the profile is
+/// built at the start.
 #[test]
 fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
     let mut rig = trees_rig("mounts-tree-rules");
     let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
-    let tree = root.join("mount-provider/aa/6a732e7231/0");
+    let tree = root.join("mount-provider/6a7a/6a732e7231/0");
     // Run r2's trees, which run r1 names as host paths.
-    let other = root.join("mount-provider/aa/6a732e7232/0");
-    let other_numbered = root.join("mount-provider/aa/6a732e7232/a3/0");
-    let deeper = root.join("mount-provider/aa/6a732e7231/a3/0/sub");
-    for dir in [&tree, &other, &other_numbered, &deeper] {
+    let other = root.join("mount-provider/6a7a/6a732e7232/0");
+    let other_numbered = root.join("mount-provider/6a7a/6a732e7232/a3/0");
+    let deeper = root.join("mount-provider/6a7a/6a732e7231/a3/0/sub");
+    // Run r1's own name in the folder of another agent (`jy`), which the provider keeps for
+    // that agent's calls.
+    let other_agents = root.join("mount-provider/6a79/6a732e7231/a3/0");
+    for dir in [&tree, &other, &other_numbered, &deeper, &other_agents] {
         fs::create_dir_all(dir).unwrap();
     }
     let shown = root.display();
@@ -324,6 +329,14 @@ fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
         (
             mount(&deeper, "/work/t", MountMode::ReadOnly, true),
             not_its_own(&deeper),
+        ),
+        (
+            mount(&other_agents, "/work/t", MountMode::ReadOnly, true),
+            format!(
+                "{}: below the trees root {shown}, mount-provider/6a79 is not this agent's \
+                 folder: the provider answers this agent's trees in mount-provider/6a7a",
+                other_agents.display()
+            ),
         ),
     ];
     for (one, why) in cases {

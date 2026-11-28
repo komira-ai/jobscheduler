@@ -17,8 +17,10 @@
 //!   this run, `<root>/mount-provider/<provider>/<run>/<index>`, or
 //!   `<root>/mount-provider/<provider>/<run>/a<attempt>/<index>` for a source whose calls
 //!   named an attempt (the agent names one, from 1, in every call of a start's sources)
-//!   ([`PROVIDER_DIR`], [`is_runs_tree`]); never another run's, a folder above one or a path
-//!   below one. A mount above the root is refused, since its grant would open every run's
+//!   ([`PROVIDER_DIR`], [`check_runs_tree`]), where `<provider>` is the folder the provider
+//!   keeps for this agent, the hex of the name the agent gives itself in its provider calls
+//!   (its host id); never another agent's folder, another run's tree, a folder above one or a
+//!   path below one. A mount above the root is refused, since its grant would open every run's
 //!   trees. With a trees root, every run's profile carries the root's rules, with no tree
 //!   when the run mounts none, so a run without a tree reads nothing below the root.
 
@@ -35,9 +37,9 @@ use crate::lifecycle::{MountRoots, NativeRefusal};
 pub const TREES_ROOT_FLAG: &str = "--native-trees-root";
 
 /// The folder below the trees root in which the provider makes each run's trees:
-/// `<root>/mount-provider/<provider, hex>/<run, hex>/<index>`, or
-/// `<root>/mount-provider/<provider, hex>/<run, hex>/a<attempt>/<index>` for a numbered
-/// attempt.
+/// `<root>/mount-provider/<agent, hex>/<run, hex>/<index>`, or
+/// `<root>/mount-provider/<agent, hex>/<run, hex>/a<attempt>/<index>` for a numbered
+/// attempt, where `<agent>` is the name the agent gives itself in its provider calls.
 pub const PROVIDER_DIR: &str = "mount-provider";
 
 /// Refuses a mount of a provider's tree whose mode is not read-only, `input-not-allowed`. A
@@ -207,34 +209,98 @@ impl TreeRules {
     }
 }
 
-/// Whether `dir` (canonical) is a tree the provider answered for the run `run_id` below the
+/// Why a directory below the trees root is not a tree the provider answered for the run
+/// ([`check_runs_tree`]). Each reads after `below the trees root <root>, `.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NotRunsTree {
+    /// A component of the path below the root is not UTF-8 (shown lossily): the provider
+    /// names every folder of a tree's path in ASCII (hex, `a` and decimal digits), so no such
+    /// path is one of its trees.
+    #[error(
+        "the path component {0:?} is not UTF-8: the provider names every folder of a tree in \
+         ASCII"
+    )]
+    NotUtf8(String),
+    /// The runtime was not told the name the agent gives itself in its provider calls, so no
+    /// folder below the root is this agent's (an agent with a trees root always tells it:
+    /// `platform/macos.rs`).
+    #[error(
+        "this runtime knows no name the agent calls its mount provider by, so no tree is its \
+         own"
+    )]
+    NoAgent,
+    /// The provider's folder is not the one it keeps for this agent: `found` is the folder the
+    /// path names, `own` the hex of the name this agent gives itself in its provider calls.
+    #[error(
+        "mount-provider/{found} is not this agent's folder: the provider answers this agent's \
+         trees in mount-provider/{own}"
+    )]
+    OtherAgent {
+        /// The folder the path names below `mount-provider`.
+        found: String,
+        /// The folder of this agent.
+        own: String,
+    },
+    /// Not one of the two shapes of a tree of the run in this agent's folder.
+    #[error(
+        "a job mounts only a tree the provider answered for its own run \
+         (mount-provider/<provider>/<run>/<index> or \
+         mount-provider/<provider>/<run>/a<attempt>/<index>)"
+    )]
+    NotTheRunsShape,
+}
+
+/// Checks that `dir` (canonical) is a tree the provider answered for the run `run_id` of the
+/// agent named `agent` in its provider calls (`None`: a runtime told no name), below the
 /// trees root `root`, in one of the provider's two shapes:
 /// `<root>/mount-provider/<provider>/<run>/<index>` for a source that names no attempt, and
-/// `<root>/mount-provider/<provider>/<run>/a<attempt>/<index>` for one that names attempt 1 or
-/// more. `<provider>` is lowercase hex, `<run>` is the hex of the name the agent gives the run
-/// in its provider calls (`js.<run_id>`), `<attempt>` is a number above 0 in decimal as the
-/// provider writes it (no leading zero) and `<index>` is a number.
-#[must_use]
-pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
-    let Ok(below) = dir.strip_prefix(root) else {
-        return false;
-    };
-    let parts: Vec<&str> = below
+/// `<root>/mount-provider/<provider>/<run>/a<attempt>/<index>` for one that names attempt 1
+/// or more. `<provider>` is the folder the provider keeps for this agent,
+/// the lowercase hex of `agent` (the provider places every source a call names in the folder
+/// of the call's `Source.agent`); `<run>` is the hex of the name the agent gives the run in its
+/// provider calls (`js.<run_id>`); `<attempt>` is a number above 0 and `<index>` a number of
+/// the wire's `u32`, each in decimal as the provider writes it: no sign, no leading zero, and
+/// ASCII digits only.
+///
+/// # Errors
+///
+/// A path with a component that is not UTF-8 ([`NotRunsTree::NotUtf8`]), any other path
+/// when `agent` is `None` ([`NotRunsTree::NoAgent`]), one in another agent's folder
+/// ([`NotRunsTree::OtherAgent`]), and any other path that is not one of the two shapes for
+/// this run ([`NotRunsTree::NotTheRunsShape`]), a path outside `root` included.
+pub fn check_runs_tree(
+    root: &Path,
+    agent: Option<&str>,
+    run_id: &str,
+    dir: &Path,
+) -> Result<(), NotRunsTree> {
+    let below = dir
+        .strip_prefix(root)
+        .map_err(|_| NotRunsTree::NotTheRunsShape)?;
+    let parts = below
         .components()
-        .map(|part| part.as_os_str().to_str().unwrap_or_default())
-        .collect();
-    let run: String = crate::provider::run_name(run_id)
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    // A path's components are never empty, so `all` alone says it.
-    let hex = |text: &str| {
-        text.bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    };
-    let number = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+        .map(|part| {
+            let name = part.as_os_str();
+            name.to_str()
+                .ok_or_else(|| NotRunsTree::NotUtf8(name.to_string_lossy().into_owned()))
+        })
+        .collect::<Result<Vec<&str>, _>>()?;
+    let own = hex::encode(agent.ok_or(NotRunsTree::NoAgent)?);
+    if let [PROVIDER_DIR, found, ..] = parts.as_slice()
+        && *found != own
+    {
+        return Err(NotRunsTree::OtherAgent {
+            found: (*found).to_owned(),
+            own,
+        });
+    }
+    let run = hex::encode(crate::provider::run_name(run_id));
+    // A number as the provider writes it: the parse takes ASCII digits alone and bounds the
+    // number to the wire's `u32`, and `n.to_string()` being the text rules out a sign and a
+    // leading zero.
+    let index = |text: &str| text.parse::<u32>().is_ok_and(|n| n.to_string() == text);
     // `a` and the attempt as the provider names it: `a1`, `a2`, ..., never `a0` (attempt 0
-    // names no folder) nor a number with a leading zero.
+    // names no folder).
     let attempt = |text: &str| {
         text.strip_prefix('a').is_some_and(|digits| {
             digits
@@ -242,34 +308,36 @@ pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
                 .is_ok_and(|n| n > 0 && n.to_string() == digits)
         })
     };
-    let runs = |dir: &str, provider: &str, named: &str| {
-        dir == PROVIDER_DIR && hex(provider) && named == run
-    };
-    match parts.as_slice() {
-        [dir, provider, named, index] => runs(dir, provider, named) && number(index),
-        [dir, provider, named, numbered, index] => {
-            runs(dir, provider, named) && attempt(numbered) && number(index)
-        }
+    let ours = match parts.as_slice() {
+        [PROVIDER_DIR, _, named, at] => *named == run && index(at),
+        [PROVIDER_DIR, _, named, numbered, at] => *named == run && attempt(numbered) && index(at),
         _ => false,
+    };
+    if ours {
+        Ok(())
+    } else {
+        Err(NotRunsTree::NotTheRunsShape)
     }
 }
 
-/// The trees of the run `run_id`'s mounts below the trees root `root` (canonical): every
-/// tree of the run, none when it mounts none (its profile then reads nothing below the root).
-/// Each plan is `(dir, read_only, no_exec)`; `dir` is resolved first. A plan whose directory
-/// is below or at the root, as given or once resolved, is a tree, and must be strictly below
-/// the root once resolved, the run's own ([`is_runs_tree`]), read-only and `no_exec`. Any
-/// other plan is not a tree, and is refused when it holds the root.
+/// The trees of the run `run_id`'s mounts below the trees root `root` (canonical), for the
+/// agent named `agent` in its provider calls (`None`: no tree is its own): every tree of the
+/// run, none when it mounts none (its profile then reads nothing below the root). Each plan
+/// is `(dir, read_only, no_exec)`; `dir` is resolved first. A plan whose directory is below
+/// or at the root, as given or once resolved, is a tree, and must be strictly below the root
+/// once resolved, the run's own in this agent's folder ([`check_runs_tree`]), read-only and
+/// `no_exec`. Any other plan is not a tree, and is refused when it holds the root.
 ///
 /// # Errors
 ///
 /// `input-unavailable` for a directory that cannot be resolved (one outside the root that
-/// is not there is passed over: it is no tree); `input-not-allowed` for a
-/// tree that is the root, one that resolves outside it, one that is not a tree the provider
-/// answered for this run, one mounted read-write or without `no_exec`, and a mount that holds
-/// the root. The text names the directory as given.
+/// is not there is passed over: it is no tree); `input-not-allowed` for a tree that is the
+/// root, one that resolves outside it, one that is not a tree the provider answered for this
+/// run of this agent (the text says which, [`NotRunsTree`]), one mounted read-write or
+/// without `no_exec`, and a mount that holds the root. The text names the directory as given.
 pub fn tree_rules(
     root: &Path,
+    agent: Option<&str>,
     run_id: &str,
     plans: &[(PathBuf, bool, bool)],
 ) -> Result<TreeRules, NativeRefusal> {
@@ -316,15 +384,10 @@ pub fn tree_rules(
                 TreesError::NotBelow { tree, root }.to_string(),
             ));
         }
-        if !is_runs_tree(root, run_id, &canonical) {
+        if let Err(why) = check_runs_tree(root, agent, run_id, &canonical) {
             return Err(refused(
                 dir,
-                format!(
-                    "below the trees root {}, a job mounts only a tree the provider answered \
-                     for its own run ({PROVIDER_DIR}/<provider>/<run>/<index> or \
-                     {PROVIDER_DIR}/<provider>/<run>/a<attempt>/<index>)",
-                    root.display()
-                ),
+                format!("below the trees root {}, {why}", root.display()),
             ));
         }
         if !read_only {
