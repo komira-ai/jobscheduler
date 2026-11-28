@@ -1,12 +1,13 @@
-//! Starts, stops and listings keyed by job id: the job start runs once on the run start's
-//! path with the allocation's booked resources and the job's own wall limit, a stop for a
-//! job the agent does not hold is answered with the retired id, and nothing of the job
-//! keying shows in the lease and run listing or the other way round.
+//! Starts, stops and listings keyed by job id: the job start runs once with the
+//! allocation's booked resources and the job's own wall limit, a stop for a job the agent
+//! does not hold is answered with the retired id, a reply that carries an older server's
+//! run start, stop and cancel acts only on the commands it still reads, and every
+//! container the agent makes carries the job keying.
 
 use js_agent::lifecycle::{Clock, RETIRED_LISTED, label};
 use js_agent_wire::{
-    BookedResources, Command, HeldJob, HeldState, Isolation, JobStartSpec, JobUsage, Outcome,
-    StopReason, refusal,
+    BookedResources, Command, HeartbeatReply, HeldJob, HeldState, Isolation, JobStartSpec,
+    JobUsage, Outcome, StopReason, refusal,
 };
 use serde_json::json;
 
@@ -134,8 +135,8 @@ fn a_stop_for_an_unlisted_job_retires_the_id() {
 }
 
 /// Asserts that two stops for a running job, and a third after the next step, make one
-/// stop call to the runtime and one `killed` result, in the job's listing and not in the
-/// run results, and that the id is not answered as retired (the job was held). It catches
+/// stop call to the runtime and one `killed` result, in the job's listing, and that the id
+/// is not answered as retired (the job was held). It catches
 /// a stop that signals the container on every repeat, a second result, and a held job
 /// answered as gone.
 #[test]
@@ -160,7 +161,6 @@ fn a_stop_for_a_held_job_ends_it_killed_once() {
     assert_eq!(result.outcome, Outcome::Killed);
     assert_eq!(result.exit_code, None);
     assert_eq!(result.allocation_id, "alloc-j1");
-    assert!(h.life.results().is_empty());
     assert!(h.life.retired_jobs().is_empty());
 }
 
@@ -242,7 +242,7 @@ fn a_job_the_server_does_not_know_keeps_running_and_is_reported_when_the_list_ch
 /// Asserts that a finished job's result is in its listing at every heartbeat across five
 /// heartbeats with no acknowledgement for it (only for a stranger), that an acknowledgement
 /// of a verdict this version does not know keeps it, and that an `ACCEPTED` one takes the job
-/// out of the listing; the slot is free once the cleanup passed, as for a run. It catches a
+/// out of the listing; the slot is free once the cleanup passed. It catches a
 /// result sent once, and one dropped on an unknown verdict.
 #[test]
 fn a_result_is_resent_until_acknowledged() {
@@ -277,8 +277,8 @@ fn a_result_is_resent_until_acknowledged() {
 /// keying; that the start is applied although the clock moved between the reply's arrival
 /// and its application; and that the job is stopped `timed_out` when the wall limit has
 /// passed counted from the container's creation (one millisecond earlier it is left alone).
-/// It catches `valid_for_ms` applied to a job start, a wall clock started at the reply's
-/// arrival, and limits taken from anywhere but the allocation.
+/// It catches a wall clock started at the reply's arrival, and limits taken from anywhere
+/// but the allocation.
 #[test]
 fn a_job_start_uses_the_booked_resources_and_wall_limit() {
     let mut h = Harness::new("job-booked");
@@ -320,69 +320,49 @@ fn a_job_start_uses_the_booked_resources_and_wall_limit() {
     assert_eq!(result.outcome, Outcome::TimedOut);
 }
 
-/// Asserts that after a job start and a run start the run listing has only the run and the
-/// job listing only the job, with each result only in its own keying; that a `Stop`,
-/// `Cancel` or `result_acks` entry naming the job, and a `JobStop` or `job_acks` entry naming
-/// the run, leave the other alone. It catches the two keyings leaking into each other (a
-/// lease server would see an unknown run id and answer `Cancel`).
+/// Asserts that a reply whose commands are an older server's run start, stop and cancel
+/// (decoded from the server's text) decodes those three as unknown commands and acts on
+/// none of them: no container is made for the start, the stop and the cancel stop nothing
+/// the agent holds and retire no id, and the events are those of the job start beside them,
+/// which runs. It catches an agent that still runs, stops or cancels work by a lease and
+/// run id, and one that drops the commands beside a command it cannot read.
 #[test]
-fn job_keyed_jobs_do_not_appear_in_the_run_listing() {
-    let mut h = Harness::new("job-keyings");
-    h.apply(vec![
-        job_start(start("j1")),
-        Command::Start(Box::new(job("r1"))),
-    ]);
-    assert_eq!(h.held(), ["r1"]);
-    assert_eq!(listed(&h), ["j1"]);
-    assert!(
-        !h.fake.created()[1].labels.contains_key(label::KEYING),
-        "a run start's container is not labelled as a job's"
-    );
-    h.stop("j1");
-    h.cancel("j1");
-    h.apply(vec![job_stop("r1")]);
+fn an_older_servers_run_commands_are_unknown_and_a_job_start_beside_them_runs() {
+    let mut h = Harness::new("older-commands");
+    h.start(job("o2"));
+    h.start(job("o3"));
+    let text = json!({
+        "commands": [
+            {
+                "type": "start", "run_id": "o1", "lease_id": "lease-o1", "image": IMAGE,
+                "limits": { "cpu_millis": 100, "memory_bytes": 1048576, "wall_ms": 1000 },
+                "valid_for_ms": 5000
+            },
+            { "type": "stop", "run_id": "o2" },
+            { "type": "cancel", "run_id": "o3" },
+            serde_json::to_value(job_start(start("j1"))).unwrap(),
+        ]
+    })
+    .to_string();
+    let reply: HeartbeatReply = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply.commands.len(), 4);
+    assert!(reply.commands[..3].iter().all(|c| *c == Command::Unknown));
+    let events = h.life.apply(&reply);
+    assert_eq!(names(&events), ["started j1"]);
     h.life.step();
-    assert!(h.fake.stops().is_empty(), "neither stop crossed over");
-    h.fake.exit("j1", 0);
-    h.fake.exit("r1", 0);
-    h.life.step();
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.results()[0].run_id, "r1");
-    assert_eq!(
-        listing(&h, "j1").result.map(|r| r.outcome),
-        Some(Outcome::Succeeded)
-    );
-    h.ack("j1", "ACCEPTED");
-    ack_job(&mut h, "r1", "ACCEPTED");
-    assert_eq!(h.held(), ["r1"]);
-    assert_eq!(listed(&h), ["j1"]);
-    ack_job(&mut h, "j1", "ACCEPTED");
-    h.ack("r1", "ACCEPTED");
-    assert!(h.held().is_empty());
-    assert!(listed(&h).is_empty());
-}
-
-/// Asserts that a job start whose id is the run id of a held run, and a run start whose id
-/// is the job id of a held job, are not taken: each is skipped as a clash and creates
-/// nothing, and the work already held runs on. It catches two pieces of work sharing one
-/// scratch directory and one set of labels.
-#[test]
-fn a_start_that_names_work_of_the_other_keying_is_not_taken() {
-    let mut h = Harness::new("job-clash");
-    h.apply(vec![Command::Start(Box::new(job("x")))]);
-    let events = h.apply(vec![job_start(start("x"))]);
-    assert_eq!(names(&events), ["skipped x Clash"]);
-    h.apply(vec![job_start(start("y"))]);
-    let events = h.apply(vec![Command::Start(Box::new(job("y")))]);
-    assert_eq!(names(&events), ["skipped y Clash"]);
-    assert_eq!(h.fake.created().len(), 2);
-    assert_eq!(h.held(), ["x"]);
-    assert_eq!(listed(&h), ["y"]);
+    let created: Vec<String> = h.fake.created().into_iter().map(|run| run.run_id).collect();
+    assert_eq!(created, ["o2", "o3", "j1"]);
+    assert!(h.fake.stops().is_empty(), "neither stop nor cancel acted");
+    assert_eq!(listed(&h), ["o2", "o3", "j1"]);
+    assert_eq!(listing(&h, "o2").state, HeldState::Running);
+    assert_eq!(listing(&h, "o3").state, HeldState::Running);
+    assert!(h.life.retired_jobs().is_empty());
+    assert!(!h.scratch_of("o1").exists());
 }
 
 /// Asserts that a job start the agent cannot honour creates nothing and is answered with a
-/// `failed_to_start` result carrying the refusal code, in the job's listing and not in the
-/// run results. It catches a refused job start reported where a lease server reads it.
+/// `failed_to_start` result carrying the refusal code, in the job's listing. It catches a
+/// refused job start dropped without an answer.
 #[test]
 fn a_refused_job_start_is_answered_in_the_job_listing() {
     let mut h = Harness::new("job-refused");
@@ -394,44 +374,39 @@ fn a_refused_job_start_is_answered_in_the_job_listing() {
         [format!("refused j1 {}", refusal::LIMITS_EXCEED_SHAPE)]
     );
     assert!(h.fake.created().is_empty());
-    assert!(h.life.results().is_empty());
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::LIMITS_EXCEED_SHAPE));
 }
 
-/// Asserts that a job start whose image is still being fetched is listed as a starting job
-/// (and not as a run), and that the container made when the image is here is labelled as a
-/// job's and listed running. It catches a job that loses its keying while it waits.
+/// Asserts that a job start whose image is still being fetched is listed as a starting job,
+/// and that the container made when the image is here is labelled as a job's and listed
+/// running. It catches a job that loses its keying while it waits.
 #[test]
 fn a_job_waiting_for_its_image_stays_a_job() {
     let mut h = Harness::new("job-pull");
     h.fake.pull_pending(IMAGE);
     h.apply(vec![job_start(start("j1"))]);
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
-    assert!(h.held().is_empty());
     assert!(h.fake.created().is_empty());
     h.fake.pull_done(IMAGE);
     h.life.step();
     assert_eq!(listing(&h, "j1").state, HeldState::Running);
     assert_eq!(h.fake.created()[0].labels[label::KEYING], "job");
-    assert!(h.held().is_empty());
 }
 
-/// Asserts that a restarted agent that adopts the container of a job start lists it as a
-/// job again, not as a run, and that a container without the label is adopted as a run as
-/// before. It catches an adopted job that a lease server would see as an unknown run.
+/// Asserts that a restarted agent that adopts the containers of a job start and of a start
+/// [`Harness::start`] made lists both as jobs again, running. It catches an adopted job
+/// that is dropped from the listing the server reads.
 #[test]
 fn a_restart_lists_an_adopted_job_as_a_job() {
     let mut h = Harness::new("job-adopt");
-    h.apply(vec![
-        job_start(start("j1")),
-        Command::Start(Box::new(job("r1"))),
-    ]);
+    h.apply(vec![job_start(start("j1"))]);
+    h.start(job("r1"));
     h.restart().unwrap();
-    assert_eq!(h.held(), ["r1"]);
-    assert_eq!(listed(&h), ["j1"]);
+    assert_eq!(listed(&h), ["j1", "r1"]);
     assert_eq!(listing(&h, "j1").state, HeldState::Running);
+    assert_eq!(listing(&h, "r1").state, HeldState::Running);
 }
 
 /// Asserts that `job_acks` and `retired_acks` that do not validate (an id twice) are
@@ -488,9 +463,9 @@ const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543
 /// Asserts that a job start that names an environment runs: its container is created once
 /// and carries the environment by name in order, and no `failed_to_start` result is
 /// listed; a job start that first waits for its image to be pulled carries it as well when
-/// its container is made; a run start beside them carries none. It catches the
+/// its container is made; a start [`Harness::start`] made carries none. It catches the
 /// `env-unsupported` refusal left in the lifecycle, an environment dropped on the way to
-/// the runtime (at once, or kept for a start that waits), and one put on a run start.
+/// the runtime (at once, or kept for a start that waits), and one put on a start that names none.
 #[test]
 fn a_job_start_with_env_no_longer_fails_to_start_with_env_unsupported() {
     let mut h = Harness::new("job-env");
@@ -531,7 +506,7 @@ fn a_job_start_with_env_no_longer_fails_to_start_with_env_unsupported() {
         assert_eq!(held.state, HeldState::Running, "{job_id}");
         assert_eq!(held.result, None, "{job_id}");
     }
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
 }
 
 /// Asserts that on a runtime that carries no job start's environment (as the Mac one) a
@@ -567,7 +542,7 @@ fn a_runtime_that_cannot_carry_env_refuses_the_job_start_and_creates_nothing() {
 }
 
 /// Asserts that a job start with a `run` body is answered `failed_to_start` with
-/// `run-unsupported` in the job's listing and creates nothing, as a run start with one is:
+/// `run-unsupported` in the job's listing and creates nothing, as a start by [`Harness::start`] with one is:
 /// this agent runs an image's own command and no run body yet. It catches a run body
 /// dropped and the image's own command run instead.
 #[test]
@@ -594,7 +569,7 @@ fn a_job_start_with_a_run_body_is_refused_and_runs_nothing() {
     assert_eq!(result.detail.as_deref(), Some(refusal::RUN_UNSUPPORTED));
 }
 
-/// Proves a job start is held to the runtime's network ceiling as a run start is: under the
+/// Proves a job start is held to the runtime's network ceiling: under the
 /// ceiling `none` a job start that asks for `allow-list` is answered `failed_to_start` with
 /// `network-above-ceiling` and a text naming both levels, one that declares a port is refused
 /// `ports-not-supported` (the ceiling `none` forwards no port), neither creates anything, and
@@ -924,8 +899,8 @@ fn a_job_stopped_while_its_image_is_pulled_is_logged_with_its_sizing() {
 /// already judged: on the 4-core, 8 GiB harness, two job starts that each book 3 cores and
 /// 6 GiB both start (their bookings sum past the machine: the job service packs by measured
 /// load within its slack and books peaks), while a job start larger than the machine is still
-/// refused `limits-exceed-shape`, and a run start that does not fit what is free is still
-/// refused `no-capacity` (`rules::overcommit_refused`). Catches the agent refusing
+/// refused `limits-exceed-shape`, and a start that wants a GPU that is booked is still
+/// refused `no-capacity` (`rules::cpu_and_memory_are_not_summed_but_gpus_and_the_machine_shape_are_checked`). Catches the agent refusing
 /// `no-capacity` what the job service placed, which fails the build that sent it.
 #[test]
 fn a_job_start_is_not_refused_for_cpu_or_memory_the_job_service_placed() {

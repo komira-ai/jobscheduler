@@ -36,6 +36,7 @@ fn labels(run: &str, broken: bool) -> Vec<(&'static str, &str)> {
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
+        (label::KEYING, "job"),
     ]
 }
 

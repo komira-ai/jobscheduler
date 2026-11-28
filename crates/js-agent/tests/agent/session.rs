@@ -667,15 +667,15 @@ fn an_unusable_welcome_is_not_trusted() {
 
 /// Asserts that a heartbeat answer that is not a reply is a failed exchange, that the
 /// session survives it, and that commands (which this agent does not act on yet) are
-/// counted in a note instead of silently dropped: a stop, a command of an unknown kind and
-/// a stop with a bad run id make three.
+/// counted in a note instead of silently dropped: a job stop, a command of an unknown kind and
+/// a job stop with a bad job id make three.
 #[test]
 fn heartbeat_answers_are_checked_and_commands_are_counted() {
     let commands = json!({
         "commands": [
-            { "type": "stop", "run_id": "r1" },
+            { "type": "job_stop", "job_id": "r1" },
             { "type": "bogus" },
-            { "type": "stop", "run_id": "bad id" },
+            { "type": "job_stop", "job_id": "bad id" },
         ]
     });
     let (mut transport, sent) = script(vec![

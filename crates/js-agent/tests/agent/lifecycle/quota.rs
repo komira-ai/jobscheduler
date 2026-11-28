@@ -375,7 +375,7 @@ fn a_failed_apply_refuses_the_run_and_creates_nothing() {
     assert!(h.fake.created().is_empty(), "no container");
     let files = h.config.files.as_ref().unwrap();
     assert!(!files.of("r1").exists(), "no run files were written");
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("scratch-failed"));
 
@@ -498,7 +498,7 @@ fn a_run_is_refused_when_eight_free_slots_in_a_row_are_in_use() {
     assert!(!h.scratch_of("r1").exists());
     assert!(applies(&spy).is_empty());
     assert_eq!(h.life.parked_slots(), [0, 1, 2, 3, 4, 5, 6, 7]);
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("no-capacity"));
 }

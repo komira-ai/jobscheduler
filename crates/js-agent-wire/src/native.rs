@@ -5,8 +5,7 @@
 //! body reads the empty `image` of a native start as `invalid-image` and runs nothing, so a
 //! native job cannot run as a container anywhere. The body is read and checked as before
 //! for this release, by the checks it shares with [`crate::RunSpec`]; a later release removes
-//! it, and a server sends it only to a host that did not report the `one-job` capability
-//! ([`crate::JobSpec::downgrade_for`]). Every enum here decodes only the values this version
+//! it. Every enum here decodes only the values this version
 //! knows: an unknown one is a decode error, which inside a reply reads as
 //! [`crate::Command::Unknown`], so an agent never runs a job whose confinement it cannot
 //! read.

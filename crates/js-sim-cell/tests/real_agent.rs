@@ -7,7 +7,7 @@
 //! welcomed at 10, and the agent has one call in flight at a time and sends its next
 //! heartbeat an interval after the answer to the last, so heartbeat `n` of that session
 //! leaves at `n * 1010`, reaches the stand-in 5 ms later, and its answer is read 5 ms after
-//! that. A start in the answer to heartbeat 1 is launched at 1 020.
+//! that. A job start in the answer to heartbeat 1 is launched at 1 020.
 //!
 //! Each test gives its agent a directory of its own, under which the agent makes its
 //! scratch and state roots.
@@ -16,14 +16,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
 
-use js_agent_wire::{HeldState, Outcome, Phase};
+use js_agent_wire::{HeldState, Outcome, PER_JOB_CAPABILITY};
 use js_sim::Sim;
-use js_sim_cell::{
-    AgentKind, AgentSpec, Counter, Ledger, Prepare, RunId, SIM_RUN_IMAGE, StopCommand, Verdict,
-};
+use js_sim_cell::{AgentKind, AgentSpec, Counter, Ledger, SIM_RUN_IMAGE};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
-use js_types::{HostId, LeaseId, Resources};
+use js_types::{HostId, Resources};
 use serde_json::{Value, json};
 
 #[path = "agent/standin.rs"]
@@ -41,11 +39,19 @@ const INTERVAL: Duration = Duration::from_millis(1_000);
 /// The join token of every agent here.
 const JOIN: &str = "join-token-sim-0123456789-abcdefghij";
 
-/// How long a run that should outlast the test runs.
+/// How long a job that should outlast the test runs.
 const LONG_RUN_MS: u64 = 60_000;
 
-/// How long a run that ends inside the test runs.
+/// How long a job that ends inside the test runs.
 const SHORT_RUN_MS: u64 = 1_500;
+
+/// The allocation every job start here names.
+const ALLOCATION: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
+
+/// The jobs the tests start.
+const JOB0: &str = "sim-job-0";
+const JOB1: &str = "sim-job-1";
+const JOB2: &str = "sim-job-2";
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -67,7 +73,10 @@ fn spec(root: &TestDir) -> AgentSpec {
         join_token: JOIN.to_owned(),
         capacity: Resources::new(8_000, 16 * GIB, 1, Some("nvidia-a100".to_owned()))
             .expect("capacity"),
-        capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
+        capabilities: BTreeMap::from([
+            ("isa".to_owned(), "x86-64-v3".to_owned()),
+            (PER_JOB_CAPABILITY.to_owned(), "true".to_owned()),
+        ]),
         labels: BTreeMap::new(),
         hello_interval: INTERVAL,
         kind: AgentKind::Real(root.path().to_path_buf()),
@@ -76,27 +85,26 @@ fn spec(root: &TestDir) -> AgentSpec {
     }
 }
 
-/// A start of `run` in lease `1-1` that runs `millis` by itself, naming heartbeat `seq`.
-fn start(run: &str, millis: u64, seq: u64) -> Value {
+/// A start of `job` under [`ALLOCATION`] that runs `millis` by itself.
+fn start(job: &str, millis: u64) -> Value {
     json!({
-        "type": "start",
-        "run_id": run,
-        "lease_id": "1-1",
+        "type": "job_start",
+        "job_id": job,
+        "allocation_id": ALLOCATION,
         "image": SIM_RUN_IMAGE,
-        "args": [millis.to_string()],
-        "limits": { "cpu_millis": 1000, "memory_bytes": MIB, "wall_ms": 600_000 },
-        "heartbeat_seq": seq,
-        "valid_for_ms": 0,
+        "command": [millis.to_string()],
+        "booked": { "cpu_millis": 1000, "memory_bytes": MIB },
+        "wall_ms": 600_000,
     })
 }
 
-/// A reply acknowledging each run with its verdict.
+/// A reply acknowledging each job with its verdict.
 fn acks(pairs: &[(&str, &str)]) -> BeatAnswer {
     let acks: Vec<Value> = pairs
         .iter()
-        .map(|(run, ack)| json!({ "run_id": run, "ack": ack }))
+        .map(|(job, ack)| json!({ "job_id": job, "ack": ack }))
         .collect();
-    BeatAnswer::Reply(json!({ "result_acks": acks }))
+    BeatAnswer::Reply(json!({ "job_acks": acks }))
 }
 
 /// The cell `script` plays against the real agent of `root`, run to `until` ms.
@@ -115,17 +123,16 @@ fn launches(ledger: &Ledger) -> Vec<(String, u64)> {
     ledger.launches().iter().map(each).collect()
 }
 
-/// Each completion in the ledger as its run and time.
-fn completions(ledger: &Ledger) -> Vec<(String, u64)> {
-    let each = |done: &js_sim_cell::Completion| (done.run.as_str().to_owned(), done.at.as_millis());
-    ledger.completions().iter().map(each).collect()
+/// The name a launch of `job` has in the ledger.
+fn named(job: &str) -> String {
+    format!("{job}/{ALLOCATION}")
 }
 
 fn count(sim: &Sim<Cell>, counter: Counter) -> u64 {
     agent(sim).counters().get(counter)
 }
 
-fn runs(names: &[&str]) -> Vec<String> {
+fn jobs(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
@@ -146,30 +153,34 @@ fn entries(dir: &TestDir) -> Vec<String> {
 }
 
 /// The real agent says hello at once with the host's shape and nothing held, is welcomed,
-/// and beats on the interval the welcome names. The start in the answer to heartbeat 1 is
-/// launched at 1 020 and the ground truth shows it running in its lease with the
-/// resources its start names; heartbeat 2 lists it running; it ends by itself at 2 520;
-/// heartbeat 3 lists it exited and carries its result (lease `1-1`, succeeded, status 0);
-/// the answer acknowledges it, and from heartbeat 4 nothing is held or reported. The
-/// lifecycle's scratch and state roots are two directories under the agent's root.
-/// Catches a real node that builds no body from the lifecycle, hands it no reply, never
-/// tells the runtime a run ended, or reads the ground truth from anywhere but the runtime.
+/// and beats on the interval the welcome names. The job start in the answer to heartbeat 1
+/// is launched at 1 020 and the ground truth shows it running in its allocation with the
+/// resources its start books; heartbeat 2 lists it running; it ends by itself at 2 520;
+/// heartbeat 3 lists it exited and carries its result (allocation `0a0a...`, succeeded,
+/// status 0); the answer acknowledges it, and from heartbeat 4 nothing is held or reported.
+/// No heartbeat lists a run or sends a run result. The lifecycle's scratch and state roots
+/// are two directories under the agent's root. Catches a real node that builds no body from
+/// the lifecycle, hands it no reply, never tells the runtime a job ended, or reads the
+/// ground truth from anywhere but the runtime.
 #[test]
 fn a_real_agent_registers_heartbeats_and_runs_a_start() {
     let dir = root("real-agent-runs");
     let script = Script::plain()
-        .commands(1, json!([start("r1", SHORT_RUN_MS, 1)]))
-        .beat(3, acks(&[("r1", "ACCEPTED")]));
+        .commands(1, json!([start(JOB0, SHORT_RUN_MS)]))
+        .beat(3, acks(&[(JOB0, "ACCEPTED")]));
     let (mut sim, ledger) = cell(spec(&dir), script, INTERVAL);
     sim.run_until(ms(1_500));
     let truth = agent(&sim).truth().expect("the agent runs");
-    let holds = Resources::new(1_000, MIB, 0, None).expect("r1");
-    let held: Vec<(&str, LeaseId, Resources)> = truth
-        .running
+    let holds = Resources::new(1_000, MIB, 0, None).expect("job");
+    let held: Vec<(String, String, Resources)> = truth
+        .jobs
         .iter()
-        .map(|(run, running)| (run.as_str(), running.lease, running.resources.clone()))
+        .map(|(job, running)| {
+            let allocation = running.allocation.to_string();
+            (job.to_string(), allocation, running.resources.clone())
+        })
         .collect();
-    assert_eq!(held, [("r1", LeaseId::new(1, 1), holds)]);
+    assert_eq!(held, [(JOB0.to_owned(), ALLOCATION.to_owned(), holds)]);
     assert_eq!(truth.capacity, spec(&dir).capacity);
     let roots = entries(&dir);
     assert_eq!(roots.len(), 2, "{roots:?}");
@@ -186,90 +197,84 @@ fn a_real_agent_registers_heartbeats_and_runs_a_start() {
     assert_eq!(hello.shape.gpus, 1);
     assert!(server.received.iter().all(|call| call.bearer == JOIN));
     assert_eq!(server.beat_times(), [1_015, 2_025, 3_035, 4_045, 5_055]);
-    let none = runs(&[]);
-    let r1 = runs(&["r1"]);
-    let carried = [&none, &none, &r1, &none, &none].map(Clone::clone);
+    let none = jobs(&[]);
+    let one = jobs(&[JOB0]);
+    let carried = [&none, &none, &one, &none, &none].map(Clone::clone);
     assert_eq!(server.results(), carried);
     let beats = server.beats();
-    assert!(beats[0].1.held.is_empty());
-    assert_eq!(beats[1].1.held[0].state, HeldState::Running);
-    assert_eq!(beats[2].1.held[0].state, HeldState::ExitedUnacked);
-    assert!(beats[3].1.held.is_empty());
-    let result = &beats[2].1.results[0];
-    assert_eq!(result.lease_id, "1-1");
+    assert!(beats[0].1.jobs.is_empty());
+    assert_eq!(beats[1].1.jobs[0].state, HeldState::Running);
+    assert_eq!(beats[2].1.jobs[0].state, HeldState::ExitedUnacked);
+    assert!(beats[3].1.jobs.is_empty());
+    let result = beats[2].1.jobs[0].result.as_ref().expect("a result");
+    assert_eq!(result.allocation_id, ALLOCATION);
     assert_eq!(result.outcome, Outcome::Succeeded);
     assert_eq!(result.exit_code, Some(0));
+    for (_, beat) in &beats {
+        assert!(beat.held.is_empty());
+        assert!(beat.results.is_empty());
+    }
 
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 1_020)]);
-    assert_eq!(completions(&ledger), [("r1".to_owned(), 2_520)]);
+    assert_eq!(launches(&ledger), [(named(JOB0), 1_020)]);
     let truth = agent(&sim).truth().expect("the agent runs");
-    assert!(truth.running.is_empty());
-    let ended = BTreeMap::from([(RunId::new("r1"), ms(2_520))]);
-    assert_eq!(truth.completed, ended);
-    let accepted = BTreeMap::from([(RunId::new("r1"), Verdict::Accepted)]);
-    assert_eq!(truth.acknowledged, accepted);
+    assert!(truth.jobs.is_empty());
     assert_eq!(count(&sim, Counter::ResultResent), 0);
 }
 
-/// `r1` ends at 2 520 and its result rides in heartbeat 3, whose answer is lost; in
-/// heartbeat 4, answered with a verdict this version cannot read and an acknowledgement of
-/// a run the agent does not hold; and in heartbeat 5, answered `STALE`, which ends it.
-/// Heartbeat 6 carries nothing. The two sends after the first are counted, and the ground
-/// truth records the verdict that ended it. Catches a real node that drops a result whose
-/// acknowledgement was lost, records a verdict the lifecycle did not act on, or records
-/// one for a run it does not hold.
+/// The job ends at 2 520 and its result rides in heartbeat 3, whose answer is lost; in
+/// heartbeat 4, answered with a verdict this version cannot read and an acknowledgement of a
+/// job the agent does not hold; and in heartbeat 5, answered `STALE`, which ends it.
+/// Heartbeat 6 carries nothing. The two sends after the first are counted. Catches a real
+/// node that drops a result whose acknowledgement was lost, or one that ends a result on a
+/// verdict it cannot read or on an acknowledgement of a job it does not hold.
 #[test]
 fn a_real_agent_resends_an_unacknowledged_result_until_acknowledged() {
     let dir = root("real-agent-resends");
     let script = Script::plain()
-        .commands(1, json!([start("r1", SHORT_RUN_MS, 1)]))
+        .commands(1, json!([start(JOB0, SHORT_RUN_MS)]))
         .beat(3, BeatAnswer::Silent)
-        .beat(4, acks(&[("r1", "SOMETHING_NEWER"), ("zz", "ACCEPTED")]))
-        .beat(5, acks(&[("r1", "STALE")]));
+        .beat(4, acks(&[(JOB0, "SOMETHING_NEWER"), (JOB2, "ACCEPTED")]))
+        .beat(5, acks(&[(JOB0, "STALE")]));
     let (sim, _) = run(&dir, script, 17_000);
-    let none = runs(&[]);
-    let r1 = runs(&["r1"]);
-    let carried = [&none, &none, &r1, &r1, &r1, &none].map(Clone::clone);
+    let none = jobs(&[]);
+    let one = jobs(&[JOB0]);
+    let carried = [&none, &none, &one, &one, &one, &none].map(Clone::clone);
     assert_eq!(stand_in(&sim).results(), carried);
     assert_eq!(count(&sim, Counter::ResultResent), 2);
-    let truth = agent(&sim).truth().expect("the agent runs");
-    let stale = BTreeMap::from([(RunId::new("r1"), Verdict::Stale)]);
-    assert_eq!(truth.acknowledged, stale);
 }
 
-/// The start of `r1` (3 s) arrives in the answers to heartbeats 1 and 2: the real agent
-/// launches it once, at 1 020, and the node counts the repeat. A stop in the answer to
+/// The start of `sim-job-0` (3 s) arrives in the answers to heartbeats 1 and 2: the real
+/// agent launches it once, at 1 020, and the node counts the repeat. A stop in the answer to
 /// heartbeat 3 ends it; the real agent reports it killed; the start that arrives after the
-/// stop is counted and runs nothing, and `r1`'s own end at 4 020 finds it no longer
-/// running, so it is never completed. Catches a real node that launches what the
-/// lifecycle did not, misses a repeated or stale start, or completes a stopped run.
+/// stop is counted and runs nothing, and the job's own end at 4 020 finds it no longer
+/// running. Catches a real node that launches what the lifecycle did not, misses a repeated
+/// or stale start, or reports a stopped job as succeeded.
 #[test]
-fn a_real_agent_ignores_a_repeated_start_for_a_run_it_holds() {
+fn a_real_agent_ignores_a_repeated_start_for_a_job_it_holds() {
     let dir = root("real-agent-repeat");
     let script = Script::plain()
-        .commands(1, json!([start("r1", 3_000, 1)]))
-        .commands(2, json!([start("r1", 3_000, 1)]))
-        .commands(3, json!([{ "type": "stop", "run_id": "r1" }]))
-        .commands(4, json!([start("r1", 3_000, 4)]));
+        .commands(1, json!([start(JOB0, 3_000)]))
+        .commands(2, json!([start(JOB0, 3_000)]))
+        .commands(3, json!([{ "type": "job_stop", "job_id": JOB0 }]))
+        .commands(4, json!([start(JOB0, 3_000)]));
     let (sim, ledger) = run(&dir, script, 5_500);
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 1_020)]);
+    assert_eq!(launches(&ledger), [(named(JOB0), 1_020)]);
     assert_eq!(count(&sim, Counter::StartRepeated), 1);
     assert_eq!(count(&sim, Counter::StartAfterStop), 1);
-    assert!(completions(&ledger).is_empty());
     let beats = stand_in(&sim).beats();
     let reported: Vec<Outcome> = beats
         .iter()
-        .flat_map(|(_, beat)| beat.results.iter())
+        .flat_map(|(_, beat)| beat.jobs.iter())
+        .filter_map(|job| job.result.as_ref())
         .map(|result| result.outcome)
         .collect();
     assert!(!reported.is_empty());
     assert!(reported.iter().all(|outcome| *outcome == Outcome::Killed));
     let truth = agent(&sim).truth().expect("the agent runs");
-    assert!(truth.running.is_empty());
-    assert!(truth.completed.is_empty());
+    assert!(truth.jobs.is_empty());
 }
 
-/// Two runs launch at 1 020. The process is killed at 2 012 and replaced at 4 500. The
+/// Two jobs launch at 1 020. The process is killed at 2 012 and replaced at 4 500. The
 /// replacement has new roots (the killed process's are gone), holds nothing, says hello
 /// again at the node's next tick (5 020) with nothing held, is welcomed into a new session
 /// and beats with nothing to report; the end timers the dead process armed do nothing.
@@ -278,10 +283,10 @@ fn a_real_agent_ignores_a_repeated_start_for_a_run_it_holds() {
 #[test]
 fn a_real_agent_killed_and_replaced_lists_nothing_and_says_hello_again() {
     let dir = root("real-agent-replaced");
-    let script = Script::plain().commands(1, json!([start("a", 2_000, 1), start("b", 9_000, 1)]));
+    let script = Script::plain().commands(1, json!([start(JOB0, 2_000), start(JOB1, 9_000)]));
     let (mut sim, ledger) = cell(spec(&dir), script, INTERVAL);
     sim.run_until(ms(2_012));
-    assert_eq!(agent(&sim).truth().expect("alive").running.len(), 2);
+    assert_eq!(agent(&sim).truth().expect("alive").jobs.len(), 2);
     let first = entries(&dir);
     agent_mut(&mut sim).kill();
     assert!(agent(&sim).truth().is_none());
@@ -292,7 +297,7 @@ fn a_real_agent_killed_and_replaced_lists_nothing_and_says_hello_again() {
     sim.run_until(ms(4_500));
     agent_mut(&mut sim).replace();
     let fresh = agent(&sim).truth().expect("replaced");
-    assert!(fresh.running.is_empty());
+    assert!(fresh.jobs.is_empty());
     let second = entries(&dir);
     assert_eq!(second.len(), 2);
     assert!(
@@ -315,20 +320,19 @@ fn a_real_agent_killed_and_replaced_lists_nothing_and_says_hello_again() {
         assert_eq!(beat.epoch, 2);
         assert!(beat.held.is_empty());
         assert!(beat.results.is_empty());
+        assert!(beat.jobs.is_empty());
     }
     let truth = agent(&sim).truth().expect("replaced");
-    assert!(truth.running.is_empty());
-    assert!(truth.completed.is_empty());
-    let both = [("a".to_owned(), 1_020), ("b".to_owned(), 1_020)];
+    assert!(truth.jobs.is_empty());
+    let both = [(named(JOB0), 1_020), (named(JOB1), 1_020)];
     assert_eq!(launches(&ledger), both);
-    assert!(completions(&ledger).is_empty());
 }
 
 /// A 409 `unknown-host` to heartbeat 2, after heartbeat 1 was accepted, ends the session:
-/// the real agent says hello again at once (it reaches the stand-in at 2 035), listing the
-/// run it holds, and beats in the new session one interval after its welcome. Catches a
-/// real node that keeps beating into a session the server lost, or a hello that does not
-/// list what the lifecycle holds.
+/// the real agent says hello again at once (it reaches the stand-in at 2 035) with nothing
+/// held (a hello lists no run, and no job), and beats in the new session one interval after
+/// its welcome, listing the job it holds. Catches a real node that keeps beating into a
+/// session the server lost, or a heartbeat that does not list what the lifecycle holds.
 #[test]
 fn a_real_agent_follows_unknown_host_with_a_hello() {
     let dir = root("real-agent-unknown-host");
@@ -337,7 +341,7 @@ fn a_real_agent_follows_unknown_host_with_a_hello() {
         code: "unknown-host",
     };
     let script = Script::plain()
-        .commands(1, json!([start("r1", LONG_RUN_MS, 1)]))
+        .commands(1, json!([start(JOB0, LONG_RUN_MS)]))
         .beat(2, refuse);
     let (sim, ledger) = run(&dir, script, 4_500);
     let server = stand_in(&sim);
@@ -350,16 +354,17 @@ fn a_real_agent_follows_unknown_host_with_a_hello() {
         .collect();
     let session = |epoch: u64| (epoch, format!("{SESSION_PREFIX}{epoch}"));
     assert_eq!(sessions, [session(1), session(1), session(2), session(2)]);
-    let held = &server.hellos()[1].held;
-    assert_eq!(held.len(), 1);
+    assert!(server.hellos()[1].held.is_empty());
+    let listed = &server.beats()[2].1.jobs;
+    assert_eq!(listed.len(), 1);
     assert_eq!(
-        (held[0].run_id.as_str(), held[0].state),
-        ("r1", HeldState::Running)
+        (listed[0].job_id.as_str(), listed[0].state),
+        (JOB0, HeldState::Running)
     );
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 1_020)]);
+    assert_eq!(launches(&ledger), [(named(JOB0), 1_020)]);
 }
 
-/// The answer to heartbeat 1 carries a start whose lease the cell's server would never
+/// The answer to heartbeat 1 carries a start whose allocation the cell's server would never
 /// write, a command this version does not know, and a good start: the real agent is handed
 /// the good start alone and launches it, and the node counts the reply once as invalid.
 /// A reply that does not decode is counted and changes nothing. Catches a real node that
@@ -368,83 +373,34 @@ fn a_real_agent_follows_unknown_host_with_a_hello() {
 #[test]
 fn a_real_agent_is_handed_only_the_starts_the_cell_can_account_for() {
     let dir = root("real-agent-unaccounted");
-    let mut odd = start("odd", LONG_RUN_MS, 1);
-    odd["lease_id"] = json!("lease");
-    let newer = json!({ "type": "reboot", "run_id": "r3" });
+    let mut odd = start(JOB2, LONG_RUN_MS);
+    odd["allocation_id"] = json!("allocation");
+    let newer = json!({ "type": "reboot", "job_id": "sim-job-3" });
     let script = Script::plain()
-        .commands(1, json!([odd, newer, start("r1", LONG_RUN_MS, 1)]))
+        .commands(1, json!([odd, newer, start(JOB0, LONG_RUN_MS)]))
         .beat(2, BeatAnswer::Raw("not json"));
     let (sim, ledger) = run(&dir, script, 3_500);
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 1_020)]);
+    assert_eq!(launches(&ledger), [(named(JOB0), 1_020)]);
     assert_eq!(count(&sim, Counter::ReplyInvalid), 2);
     let truth = agent(&sim).truth().expect("the agent runs");
-    let running: Vec<&str> = truth.running.keys().map(RunId::as_str).collect();
-    assert_eq!(running, ["r1"]);
+    let running: Vec<String> = truth.jobs.keys().map(ToString::to_string).collect();
+    assert_eq!(running, [JOB0]);
     let last = stand_in(&sim).beats().pop().expect("a heartbeat").1;
-    let held: Vec<&str> = last.held.iter().map(|run| run.run_id.as_str()).collect();
-    assert_eq!(held, ["r1"]);
+    let held: Vec<&str> = last.jobs.iter().map(|job| job.job_id.as_str()).collect();
+    assert_eq!(held, [JOB0]);
 }
 
 /// The answer to heartbeat 1 carries a stop of a job the agent does not hold: the real
-/// agent takes it without complaint (the reply is not counted invalid, and no run is
+/// agent takes it without complaint (the reply is not counted invalid, and nothing is
 /// launched), and the heartbeats go on. Catches a real node that lets a job stop in a reply
 /// break the session.
 #[test]
 fn a_real_agent_takes_a_job_stop_for_a_job_it_does_not_hold() {
     let dir = root("real-agent-job-stop");
-    let stop = json!({ "type": "job_stop", "job_id": "sim-job-1" });
+    let stop = json!({ "type": "job_stop", "job_id": JOB1 });
     let script = Script::plain().commands(1, json!([stop]));
     let (sim, ledger) = run(&dir, script, 3_500);
     assert!(launches(&ledger).is_empty());
     assert_eq!(count(&sim, Counter::ReplyInvalid), 0);
     assert_eq!(stand_in(&sim).beat_times(), [1_015, 2_025, 3_035]);
-}
-
-/// A real agent, silent on a prepare, goes through the whole-host handshake of the
-/// session as the fake does: answer 1 names lease `1-1` and carries a start of it, which
-/// is written into the ledger and not handed to the lifecycle (a cancel beside it is
-/// handed over) (heartbeat 2 says
-/// `preparing`, and nothing is launched or counted invalid); answer 2 names no lease
-/// (heartbeat 3 says `restoring`); answer 3 carries a start, which the serving agent's
-/// lifecycle launches at 3 020; answer 4 stops it, and the ledger holds the stop of the
-/// running run. Catches a real agent that launches a start while it prepares, one whose
-/// withheld start is counted as one the cell cannot account for, and a stop of a real
-/// agent's run left out of the ledger.
-#[test]
-fn a_real_agent_launches_no_start_while_it_prepares_and_its_stops_reach_the_ledger() {
-    let root = root("real-exclusive");
-    let script = Script::plain()
-        .beat(
-            1,
-            BeatAnswer::Reply(json!({
-                "exclusive": "1-1",
-                "commands": [start("r1", LONG_RUN_MS, 1), { "type": "cancel", "run_id": "r8" }],
-            })),
-        )
-        .commands(3, json!([start("r2", LONG_RUN_MS, 3)]))
-        .commands(4, json!([{ "type": "stop", "run_id": "r2" }]));
-    let (mut sim, ledger) = cell(spec(&root), script, INTERVAL);
-    agent_mut(&mut sim).set_prepare(Prepare::Silent);
-    sim.run_until(ms(4_500));
-    let phases: Vec<Phase> = stand_in(&sim)
-        .beats()
-        .iter()
-        .map(|(_, b)| b.phase)
-        .collect();
-    let wanted = [
-        Phase::Serving,
-        Phase::Preparing,
-        Phase::Restoring,
-        Phase::Serving,
-    ];
-    assert_eq!(phases, wanted);
-    let started: Vec<RunId> = ledger.starts().into_iter().map(|s| s.run).collect();
-    assert_eq!(started, [RunId::new("r1"), RunId::new("r2")]);
-    assert_eq!(launches(&ledger), [("r2".to_owned(), 3_040)]);
-    assert_eq!(count(&sim, Counter::ReplyInvalid), 0);
-    let stops = ledger.stops();
-    assert_eq!(stops.len(), 1);
-    assert_eq!(stops[0].run, RunId::new("r2"));
-    assert_eq!(stops[0].command, StopCommand::Stop);
-    assert_eq!(stops[0].at, ms(4_050));
 }

@@ -9,7 +9,7 @@
 //! and the update hook's `drain` puts a note of its own after it, which `resume` reads back.
 //! While it is there the agent
 //!
-//! - starts no run and no job: every `Start` and every job start is answered
+//! - starts no job: every job start is answered
 //!   `failed_to_start` with the code `host-held` (`js_agent_wire::refusal::HOST_HELD`),
 //!   which, unlike `host-tainted`, does not taint the host. The file is looked at for each
 //!   start, so a hold written while the agent runs refuses the next start, and one removed

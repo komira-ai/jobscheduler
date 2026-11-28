@@ -66,7 +66,7 @@ fn a_committed_removal_is_noted_with_its_key_digest_and_size() {
     let parsed: Value = serde_json::from_str(&said[0]).unwrap();
     let want = json!({"key": "cas/b/r-build/n1/pack", "sha256": "ab".repeat(32), "bytes": 10_240});
     assert_eq!(parsed, want);
-    assert_eq!(h.life.results()[0].exit_code, Some(0));
+    assert_eq!(super::results(&h.life)[0].exit_code, Some(0));
     assert!(!h.life.is_tainted());
 }
 

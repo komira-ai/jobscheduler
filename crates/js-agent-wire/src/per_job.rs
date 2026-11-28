@@ -2,7 +2,7 @@
 //! go down in a reply, the [`HeldJob`]s and their [`JobResult`]s that go up in a heartbeat,
 //! and the [`JobResultAck`] that answers one.
 //!
-//! They ride in protocol major 1 beside the lease and run messages and are announced by the
+//! They are the work messages of protocol major 1 and are announced by the
 //! hello capability [`PER_JOB_CAPABILITY`] (see [`crate::protocol`]): a server sends a
 //! `job_start` or `job_stop` only to an agent that reported it. A job start names no lease
 //! and carries no time left in one: the wall limit is the job's own, counted by the agent
@@ -11,8 +11,9 @@
 //! job; the allocation id is new at every placement.
 //!
 //! A job the agent started from a `job_start` is listed in `jobs` alone and its result in
-//! `jobs[].result` alone, never in the `held` runs or the `results` of the same heartbeat, so
-//! a lease server that knows no job ids never sees one.
+//! `jobs[].result` alone. The `held` and `results` lists of a heartbeat stay on the wire
+//! because every previous release sends and reads them; an agent of this release sends them
+//! empty.
 
 use std::collections::BTreeMap;
 

@@ -16,13 +16,11 @@ use super::{Harness, job, names, reply_json};
 const IMAGE: &str = "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Every verdict the agent knows.
-const VERDICTS: [&str; 5] = [
-    "ACCEPTED",
-    "DUPLICATE",
-    "STALE",
-    "UNKNOWN_LEASE",
-    "MISMATCH",
-];
+const VERDICTS: [&str; 4] = ["ACCEPTED", "DUPLICATE", "STALE", "MISMATCH"];
+
+/// Verdicts the agent does not know: one from a later release and the text an older server
+/// gave for a lease it did not hold, which this release no longer reads.
+const UNKNOWN_VERDICTS: [&str; 2] = ["A_VERDICT_FROM_THE_FUTURE", "UNKNOWN_LEASE"];
 
 /// A valid job start for `job_id`: one CPU, 1 GiB, a minute, no GPU.
 fn start(job_id: &str) -> JobStartSpec {
@@ -82,8 +80,8 @@ fn json_of(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// A harness with the run `r1` (exit 7) and the job `j1` (exit 0) ended and stepped: both
-/// results are held and written down.
+/// A harness with the jobs `r1` (exit 7) and `j1` (exit 0) ended and stepped, `r1` started
+/// by [`Harness::start`] and `j1` by a job start: both results are held and written down.
 fn ended(name: &str) -> Harness {
     let mut h = Harness::new(name);
     h.start(job("r1"));
@@ -97,8 +95,10 @@ fn ended(name: &str) -> Harness {
 /// A reply that gives `verdict` to the results of `r1` and `j1`.
 fn ack_both(h: &mut Harness, verdict: &str) -> Vec<String> {
     let reply = reply_json(&json!({
-        "result_acks": [{ "run_id": "r1", "ack": verdict }],
-        "job_acks": [{ "job_id": "j1", "ack": verdict }],
+        "job_acks": [
+            { "job_id": "r1", "ack": verdict },
+            { "job_id": "j1", "ack": verdict },
+        ],
     }));
     names(&h.life.apply(&reply))
 }
@@ -112,16 +112,16 @@ fn findings(events: &[String], code: &str) -> usize {
     found.count()
 }
 
-/// Asserts that a restart lists again the results the earlier process held, a run's and a
-/// job's, byte for byte as they were serialised before, with the log tail, in the same
-/// listings, and that the files are private (the directory `0700`, a file `0600`). It
-/// catches a result lost with the process that made it, which the server then never
-/// hears of.
+/// Asserts that a restart lists again the results the earlier process held, of a job that
+/// [`Harness::start`] made and one a job start made, byte for byte as they were serialised
+/// before, with the log tail, and that the files are private (the directory `0700`, a file
+/// `0600`). It catches a result lost with the process that made it, which the server then
+/// never hears of.
 #[test]
 fn results_not_yet_acknowledged_are_resent_after_restart() {
     let mut h = Harness::new("held-resend");
-    h.start(job("r1"));
     h.apply(vec![job_start("j1")]);
+    h.start(job("r1"));
     let tail = LogTail {
         stdout: "out\n".to_owned(),
         stderr: "err\n".to_owned(),
@@ -133,7 +133,7 @@ fn results_not_yet_acknowledged_are_resent_after_restart() {
     h.fake.exit("j1", 0);
     h.life.step();
     let sent = (
-        serde_json::to_string(&h.life.results()).unwrap(),
+        serde_json::to_string(&super::results(&h.life)).unwrap(),
         serde_json::to_string(&h.life.held_jobs()).unwrap(),
     );
     assert!(sent.0.contains("out\\n"), "the tail is in the result");
@@ -144,34 +144,42 @@ fn results_not_yet_acknowledged_are_resent_after_restart() {
     let events = h.restart().unwrap();
     assert!(names(&events).is_empty(), "{:?}", names(&events));
     let resent = (
-        serde_json::to_string(&h.life.results()).unwrap(),
+        serde_json::to_string(&super::results(&h.life)).unwrap(),
         serde_json::to_string(&h.life.held_jobs()).unwrap(),
     );
     assert_eq!(resent, sent);
     assert_eq!(
-        h.life.held(),
-        [HeldRun {
-            run_id: "r1".to_owned(),
-            state: HeldState::ExitedUnacked,
-        }]
+        super::held(&h.life),
+        [
+            HeldRun {
+                run_id: "j1".to_owned(),
+                state: HeldState::ExitedUnacked,
+            },
+            HeldRun {
+                run_id: "r1".to_owned(),
+                state: HeldState::ExitedUnacked,
+            },
+        ]
     );
-    assert_eq!(h.life.results()[0].outcome, Outcome::Failed);
-    assert_eq!(h.life.results()[0].exit_code, Some(7));
+    assert_eq!(super::results(&h.life)[1].outcome, Outcome::Failed);
+    assert_eq!(super::results(&h.life)[1].exit_code, Some(7));
     h.life.step();
     assert_eq!(
-        serde_json::to_string(&h.life.results()).unwrap(),
+        serde_json::to_string(&super::results(&h.life)).unwrap(),
         sent.0,
         "a step changes nothing"
     );
     assert_eq!(h.fake.created().len(), 2, "nothing runs again");
 }
 
-/// Asserts that each verdict the agent knows, given to a run's result and a job's, removes
+/// Asserts that each verdict the agent knows, given to the results of two jobs, removes
 /// their files and ends the wait, so that a further restart sends nothing; that a verdict
-/// it does not know keeps the files and the result is sent again; and that a start for the
-/// run or the job after the restart is skipped as retired and creates no container. It
-/// catches a result that comes back after the server took it, one that is lost on a verdict
-/// that keeps it, and a retired id forgotten with the process.
+/// it does not know (one from a later release, and `UNKNOWN_LEASE`, which an older server
+/// gave) keeps the files and the results are sent again; and that a start for either job
+/// after the restart is skipped as retired and creates no container. It catches a result
+/// that comes back after the server took it, one that is lost on a verdict that keeps it,
+/// `UNKNOWN_LEASE` read as a verdict that drops a result, and a retired id forgotten with
+/// the process.
 #[test]
 fn every_verdict_removes_the_files_and_a_further_restart_sends_nothing() {
     for (n, verdict) in VERDICTS.into_iter().enumerate() {
@@ -183,10 +191,10 @@ fn every_verdict_removes_the_files_and_a_further_restart_sends_nothing() {
         assert!(!held_file(&h, "j1").exists(), "{verdict}");
 
         h.restart().unwrap();
-        assert!(h.life.results().is_empty(), "{verdict}");
+        assert!(super::results(&h.life).is_empty(), "{verdict}");
         assert!(h.life.held_jobs().is_empty(), "{verdict}");
         assert!(h.held().is_empty(), "{verdict}");
-        assert_eq!(names(&h.start(job("r1"))), ["skipped r1 Retired"]);
+        assert_eq!(names(&h.start(job("r1"))), ["skipped r1 FenceRetired"]);
         assert_eq!(
             names(&h.apply(vec![job_start("j1")])),
             ["skipped j1 FenceRetired"]
@@ -194,12 +202,14 @@ fn every_verdict_removes_the_files_and_a_further_restart_sends_nothing() {
         assert_eq!(h.fake.created().len(), 2, "{verdict}: nothing runs again");
     }
 
-    let mut h = ended("held-ack-unknown");
-    ack_both(&mut h, "A_VERDICT_FROM_THE_FUTURE");
-    assert!(held_file(&h, "r1").exists() && held_file(&h, "j1").exists());
-    h.restart().unwrap();
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.held_jobs().len(), 1);
+    for (n, verdict) in UNKNOWN_VERDICTS.into_iter().enumerate() {
+        let mut h = ended(&format!("held-ack-unknown-{n}"));
+        ack_both(&mut h, verdict);
+        assert!(held_file(&h, "r1").exists() && held_file(&h, "j1").exists());
+        h.restart().unwrap();
+        assert_eq!(super::results(&h.life).len(), 2, "{verdict}");
+        assert_eq!(h.life.held_jobs().len(), 2, "{verdict}");
+    }
 }
 
 /// Asserts the retired list's file: the ids in order, a finished run or job with its lease
@@ -232,8 +242,14 @@ fn the_retired_list_is_written_with_the_allocations_and_read_back() {
         ] })
     );
     h.restart().unwrap();
-    for id in ["r1", "j1", "r9"] {
-        assert_eq!(names(&h.start(job(id))), [format!("skipped {id} Retired")]);
+    // Each start names the fence it was retired with: `j1` its allocation, `r9` any.
+    for (id, allocation) in [("r1", "lease-r1"), ("j1", "alloc-j1"), ("r9", "lease-r9")] {
+        let mut spec = job(id);
+        spec.lease_id = allocation.to_owned();
+        assert_eq!(
+            names(&h.start(spec)),
+            [format!("skipped {id} FenceRetired")]
+        );
     }
     assert_eq!(h.fake.created().len(), 2);
     h.stop("r8");
@@ -253,7 +269,7 @@ fn unusable_result_files_are_dropped_with_findings_and_the_agent_starts() {
     let dir = held_dir(&h);
     fs::create_dir(&dir).unwrap();
     let good = |id: &str, lease: &str| {
-        json!({ "keyed": "run", "result": {
+        json!({ "keyed": "job", "result": {
             "run_id": id, "lease_id": lease, "outcome": "killed" } })
         .to_string()
     };
@@ -266,12 +282,82 @@ fn unusable_result_files_are_dropped_with_findings_and_the_agent_starts() {
     let events = names(&h.restart().unwrap());
     assert_eq!(findings(&events, "held-record-unreadable"), 4, "{events:?}");
     assert_eq!(h.held(), ["good"]);
-    assert_eq!(h.life.results()[0].lease_id, "l-good");
+    assert_eq!(super::results(&h.life)[0].lease_id, "l-good");
     for gone in ["junk", "bad", "other"] {
         assert!(!dir.join(format!("{gone}.json")).exists(), "{gone}");
     }
     assert!(dir.join("good.json").exists());
     assert_eq!(names(&h.start(job("r1"))), ["started r1"]);
+}
+
+/// Asserts that a result file an older release left, whose keying is `run`, is removed at
+/// start with one `held-record-unreadable` finding and is listed nowhere (not among the
+/// held runs, the held jobs or the results), beside a job-keyed file that is held, and that
+/// the id of the removed file is not retired, so that its job can start. It catches an agent
+/// that lists a result of the run keying it no longer holds, which the server would then
+/// read as work of a lease it does not know.
+#[test]
+fn a_result_file_keyed_run_by_an_older_release_is_removed_and_listed_nowhere() {
+    let mut h = Harness::new("held-older-run");
+    let dir = held_dir(&h);
+    fs::create_dir(&dir).unwrap();
+    let record = |keyed: &str, id: &str| {
+        json!({ "keyed": keyed, "result": {
+            "run_id": id, "lease_id": "l", "outcome": "killed" } })
+        .to_string()
+    };
+    fs::write(dir.join("old.json"), record("run", "old")).unwrap();
+    fs::write(dir.join("new.json"), record("job", "new")).unwrap();
+
+    let events = names(&h.restart().unwrap());
+    assert_eq!(events, ["finding - held-record-unreadable"]);
+    assert!(!dir.join("old.json").exists(), "the file is removed");
+    assert!(dir.join("new.json").exists());
+    assert_eq!(h.held(), ["new"]);
+    assert_eq!(super::results(&h.life).len(), 1);
+    let jobs: Vec<String> = h.life.held_jobs().into_iter().map(|j| j.job_id).collect();
+    assert_eq!(jobs, ["new"]);
+    assert_eq!(names(&h.start(job("old"))), ["started old"]);
+}
+
+/// Asserts that the file this release writes for a held result says `"keyed":"job"` and
+/// holds the result with the job id as `run_id` and the allocation id as `lease_id`, and
+/// nothing else, written byte for byte as the previous release reads it. It catches a
+/// record whose keying the previous release cannot read after a rollback, and one whose
+/// ids are moved to other fields.
+#[test]
+fn the_record_this_release_writes_says_job_and_holds_the_run_result() {
+    let mut h = Harness::new("held-record-shape");
+    h.start(job("r1"));
+    h.fake.exit("r1", 7);
+    h.life.step();
+    assert_eq!(
+        json_of(&held_file(&h, "r1")),
+        json!({
+            "keyed": "job",
+            "result": {
+                "run_id": "r1",
+                "lease_id": "lease-r1",
+                "outcome": "failed",
+                "exit_code": 7
+            }
+        })
+    );
+    h.apply(vec![job_start("j1")]);
+    h.fake.exit("j1", 0);
+    h.life.step();
+    assert_eq!(
+        json_of(&held_file(&h, "j1")),
+        json!({
+            "keyed": "job",
+            "result": {
+                "run_id": "j1",
+                "lease_id": "alloc-j1",
+                "outcome": "succeeded",
+                "exit_code": 0
+            }
+        })
+    );
 }
 
 /// Asserts that a held directory that cannot be listed (a file stands where it should be)
@@ -307,7 +393,7 @@ fn an_unreadable_retired_list_is_a_finding_and_starts_empty() {
         json!({ "retired": [{ "job_id": "r5" }] })
     );
     assert_eq!(names(&h.restart().unwrap()), ["adopted r1"]);
-    assert_eq!(names(&h.start(job("r5"))), ["skipped r5 Retired"]);
+    assert_eq!(names(&h.start(job("r5"))), ["skipped r5 FenceRetired"]);
 }
 
 /// Asserts that a result that cannot be written is still held in memory and sent, is one
@@ -324,7 +410,7 @@ fn a_result_that_cannot_be_written_stays_held_and_is_written_later() {
     let events = names(&h.life.step());
     assert_eq!(findings(&events, "held-record-failed"), 1, "{events:?}");
     assert!(events.contains(&"finding r1 held-record-failed".to_owned()));
-    assert_eq!(h.life.results().len(), 1, "still held");
+    assert_eq!(super::results(&h.life).len(), 1, "still held");
     let events = names(&h.life.step());
     assert_eq!(findings(&events, "held-record-failed"), 0, "{events:?}");
 
@@ -360,7 +446,7 @@ fn a_file_that_cannot_be_removed_is_reported_and_tried_again() {
         events.contains(&"finding r1 held-record-failed".to_owned()),
         "{events:?}"
     );
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
     assert!(file.exists(), "it could not be removed");
     assert!(!held_file(&h, "j1").exists(), "the other one went");
     assert!(h.life.step().is_empty(), "told once");
@@ -368,7 +454,7 @@ fn a_file_that_cannot_be_removed_is_reported_and_tried_again() {
     fs::remove_dir_all(&file).unwrap();
     assert!(h.life.step().is_empty());
     h.restart().unwrap();
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
 
     let mut h = ended("held-remove-gone");
     fs::remove_file(held_file(&h, "r1")).unwrap();
@@ -405,7 +491,7 @@ fn an_adopted_job_with_a_stored_result_does_not_make_a_second_one() {
     h.fake.exit("r1", 7);
     h.fake.fail("remove", u32::MAX);
     h.life.step();
-    assert_eq!(h.life.results()[0].exit_code, Some(7));
+    assert_eq!(super::results(&h.life)[0].exit_code, Some(7));
     assert!(held_file(&h, "r1").exists());
 
     assert_eq!(names(&h.restart().unwrap()).last().unwrap(), "adopted r1");
@@ -417,10 +503,10 @@ fn an_adopted_job_with_a_stored_result_does_not_make_a_second_one() {
         "{events:?}"
     );
     assert!(events.contains(&"container removed r1".to_owned()));
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.results()[0].exit_code, Some(7));
+    assert_eq!(super::results(&h.life).len(), 1);
+    assert_eq!(super::results(&h.life)[0].exit_code, Some(7));
     h.ack("r1", "ACCEPTED");
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
     assert!(!held_file(&h, "r1").exists());
 }
 
@@ -441,11 +527,11 @@ fn a_result_is_written_again_when_its_log_tail_is_cut() {
     }
     h.life.step();
     h.life.fit_log_tails(1500, &mut Vec::new());
-    let cut = h.life.results();
+    let cut = super::results(&h.life);
     assert!(cut.iter().all(|r| r.log_tail.as_ref().unwrap().truncated));
     h.life.step();
     h.restart().unwrap();
-    assert_eq!(h.life.results(), cut);
+    assert_eq!(super::results(&h.life), cut);
 }
 
 /// The results `x0000`, `x0001`, ... read back before their entries reach what a heartbeat
@@ -466,7 +552,7 @@ fn more_results_than_a_heartbeat_can_list_are_not_all_read_back() {
     fs::create_dir(&dir).unwrap();
     for n in 0..=LISTABLE {
         let id = format!("x{n:04}");
-        let body = json!({ "keyed": "run", "result": {
+        let body = json!({ "keyed": "job", "result": {
             "run_id": id, "lease_id": "l", "outcome": "killed" } });
         fs::write(dir.join(format!("{id}.json")), body.to_string()).unwrap();
     }
@@ -475,23 +561,10 @@ fn more_results_than_a_heartbeat_can_list_are_not_all_read_back() {
     assert_eq!(findings(&events, "held-record-unreadable"), 1, "{events:?}");
     assert_eq!(h.held().len(), LISTABLE);
     assert!(!last.exists());
-    assert!(!h.life.results().is_empty(), "the oldest result goes out");
-}
-
-/// Asserts that a result stored for a run that is not a run the agent holds is held by a
-/// job keyed as the file says, listed in the listing of its keying alone. It catches a
-/// restored job listed under the wrong keying.
-#[test]
-fn a_restored_result_is_listed_under_its_own_keying() {
-    let mut h = ended("held-keying");
-    h.restart().unwrap();
-    assert_eq!(h.held(), ["r1"]);
-    let jobs = h.life.held_jobs();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].job_id, "j1");
-    let results = h.life.results();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].run_id, "r1");
+    assert!(
+        !super::results(&h.life).is_empty(),
+        "the oldest result goes out"
+    );
 }
 
 /// Asserts that a result file whose id is retired in the same call is removed only after
@@ -510,7 +583,7 @@ fn a_result_file_stays_until_the_retired_list_is_written() {
         "{events:?}"
     );
     assert_eq!(findings(&events, "held-record-failed"), 1, "{events:?}");
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
     assert!(held_file(&h, "r1").exists() && held_file(&h, "j1").exists());
     assert!(!retired_file(&h).exists());
     assert!(h.life.step().is_empty(), "told once");
@@ -539,8 +612,8 @@ fn an_unfinished_write_is_removed_without_a_finding() {
     let events = names(&h.restart().unwrap());
     assert_eq!(findings(&events, "held-record-unreadable"), 0, "{events:?}");
     assert!(!leftover.exists());
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.held_jobs().len(), 1);
+    assert_eq!(super::results(&h.life).len(), 2);
+    assert_eq!(h.life.held_jobs().len(), 2);
 }
 
 /// Asserts that a file for a job the agent has taken over does not count against the room
@@ -559,7 +632,7 @@ fn a_taken_over_jobs_file_does_not_use_up_room() {
     // [`LISTABLE`].
     for n in 0..LISTABLE {
         let id = format!("x{n:04}");
-        let body = json!({ "keyed": "run", "result": {
+        let body = json!({ "keyed": "job", "result": {
             "run_id": id, "lease_id": "l", "outcome": "killed" } });
         fs::write(dir.join(format!("{id}.json")), body.to_string()).unwrap();
     }
@@ -624,14 +697,17 @@ fn an_id_is_a_line_of_the_log_while_the_log_stays_within_a_sixteenth_of_the_list
     assert!(h.restart().unwrap().is_empty());
     for n in [0, 15, 16] {
         let id = sid(n);
-        assert_eq!(names(&h.start(job(&id))), [format!("skipped {id} Retired")]);
+        assert_eq!(
+            names(&h.start(job(&id))),
+            [format!("skipped {id} FenceRetired")]
+        );
     }
 
     h.stop(&sid(17));
     assert!(!retired_log(&h).exists(), "the log is folded into the list");
     assert_eq!(json_of(&retired_file(&h)), list_of((0..18).map(sid)));
     h.restart().unwrap();
-    assert_eq!(names(&h.start(job("s017"))), ["skipped s017 Retired"]);
+    assert_eq!(names(&h.start(job("s017"))), ["skipped s017 FenceRetired"]);
     assert_eq!(h.fake.created().len(), 0, "nothing retired runs");
 }
 
@@ -671,12 +747,12 @@ fn at_the_cap_an_id_costs_a_line_until_the_log_reaches_a_sixteenth_of_the_list()
     let last = format!("old{:05}", MAX_HELD - 1);
     assert_eq!(
         names(&h.start(job(&last))),
-        [format!("skipped {last} Retired")]
+        [format!("skipped {last} FenceRetired")]
     );
     let newest = sid(lines - 1);
     assert_eq!(
         names(&h.start(job(&newest))),
-        [format!("skipped {newest} Retired")]
+        [format!("skipped {newest} FenceRetired")]
     );
 
     h.stop(&sid(lines));
@@ -717,7 +793,7 @@ fn a_cut_or_damaged_log_keeps_its_good_lines_and_is_folded_into_the_list() {
         }
         assert_eq!(
             names(&h.start(job("s100"))),
-            ["skipped s100 Retired"],
+            ["skipped s100 FenceRetired"],
             "{n}"
         );
         assert_eq!(names(&h.start(job("s0"))), ["started s0"], "{n}");
@@ -740,7 +816,7 @@ fn a_cut_or_damaged_log_keeps_its_good_lines_and_is_folded_into_the_list() {
     log.extend(b"{\"job_id\":\"\xc3");
     fs::write(retired_log(&h), log).unwrap();
     assert!(h.restart().unwrap().is_empty());
-    assert_eq!(names(&h.start(job("s100"))), ["skipped s100 Retired"]);
+    assert_eq!(names(&h.start(job("s100"))), ["skipped s100 FenceRetired"]);
     h.stop("s200");
     assert!(!retired_log(&h).exists(), "a cut log is folded");
 

@@ -15,7 +15,7 @@ use js_agent::image::config_path;
 use js_agent::lifecycle::{
     Body, DirLayout, Event, FilesRoot, Lifecycle, RunHandle, RunSpec, Wake, label,
 };
-use js_agent_wire::{HeartbeatReply, HeldState};
+use js_agent_wire::{HeartbeatReply, HeldState, JobSpec};
 use js_contain::OciConfig;
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::subids::IdFiles;
@@ -531,7 +531,15 @@ impl Ringing {
         events
     }
 
-    /// Steps until no run or job is held as starting, each step after a ring of the
+    /// Starts `spec` through [`Lifecycle::start_spec`] and steps until no start waits for its
+    /// create: the events of all of it, in order.
+    pub fn start_spec_and_create(&mut self, spec: &JobSpec) -> Vec<Event> {
+        let mut events = self.life.start_spec(spec);
+        events.extend(self.until_created());
+        events
+    }
+
+    /// Steps until no job is held as starting, each step after a ring of the
     /// runtime: the events of the steps.
     pub fn until_created(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
@@ -555,9 +563,8 @@ impl Ringing {
     }
 
     fn starting(&self) -> bool {
-        let runs = self.life.held().into_iter().map(|run| run.state);
-        let jobs = self.life.held_jobs().into_iter().map(|job| job.state);
-        runs.chain(jobs).any(|state| state == HeldState::Starting)
+        let jobs = self.life.held_jobs();
+        jobs.iter().any(|job| job.state == HeldState::Starting)
     }
 }
 

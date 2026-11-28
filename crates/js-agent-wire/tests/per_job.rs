@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{broken, expect, heartbeat, job, long, map, refused};
+use common::{broken, expect, heartbeat, long, map, refused};
 use js_agent_wire::limits::{
     MAX_DETAIL_LEN, MAX_GPUS, MAX_HELD, MAX_ID_LEN, MAX_LOG_STREAM_LEN, MAX_RESULTS, MAX_WALL_MS,
 };
@@ -602,18 +602,11 @@ fn a_job_results_input_failure_is_bounded_as_its_detail() {
 }
 
 /// Asserts that a reply refuses a second job start of one job id, and a job start that
-/// names a GPU a run start of the same reply already named (or the other way round), while
-/// a run start and a job start of one id pass the reply's check (the agent tells them
-/// apart); and that bad `job_acks` and `retired_acks` are refused without costing a command.
-/// It catches two starts of one job in one reply, and one device given to two jobs.
+/// names a GPU an earlier job start of the same reply already named; and that bad
+/// `job_acks` and `retired_acks` are refused without costing a command. It catches two
+/// starts of one job in one reply, and one device given to two jobs.
 #[test]
 fn a_reply_names_each_job_and_each_gpu_once() {
-    let run = |id: &str, gpus: &[u32]| {
-        let mut spec = job();
-        spec.run_id = id.into();
-        spec.gpu_indices = gpus.to_vec();
-        Command::Start(Box::new(spec))
-    };
     let start_of = |id: &str, gpus: &[u32]| {
         let mut spec = start();
         spec.job_id = id.into();
@@ -638,14 +631,13 @@ fn a_reply_names_each_job_and_each_gpu_once() {
         [(1, refusal::INVALID_REPLY)]
     );
     assert_eq!(
-        refused_at(vec![run("r1", &[0]), start_of("j1", &[0])]),
+        refused_at(vec![start_of("j1", &[0]), start_of("j2", &[0])]),
         [(1, refusal::INVALID_REPLY)]
     );
     assert_eq!(
-        refused_at(vec![start_of("j1", &[1]), run("r1", &[1])]),
-        [(1, refusal::INVALID_REPLY)]
+        refused_at(vec![start_of("j1", &[0]), start_of("j2", &[1])]),
+        none
     );
-    assert_eq!(refused_at(vec![run("x", &[0]), start_of("x", &[1])]), none);
 
     let reply = HeartbeatReply {
         commands: vec![start_of("j1", &[])],

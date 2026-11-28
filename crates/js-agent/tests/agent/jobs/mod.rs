@@ -100,13 +100,11 @@ use js_agent::usage::Outbox;
 use js_agent::{Backend, Plan, Platform};
 #[cfg(target_os = "linux")]
 use js_agent_wire::Command;
-use js_agent_wire::HeartbeatReply;
+use js_agent_wire::{BookedResources, HeartbeatReply, JobStartSpec};
 #[cfg(target_os = "linux")]
 use serde_json::Value;
 use serde_json::json;
 
-#[cfg(target_os = "linux")]
-use crate::lifecycle::job;
 use crate::support::Scratch;
 use fake::FakeMachine;
 
@@ -258,12 +256,47 @@ pub fn start(dir: &Scratch, machine: &FakeMachine) -> Worker {
     }
 }
 
-/// A reply that starts these runs.
+/// A start of job `id`: allocation `alloc-<id>`, one CPU and 1 GiB booked, a minute's wall
+/// limit, the image of a job pinned by digest and nothing else asked of it.
+pub fn job_start(id: &str) -> JobStartSpec {
+    JobStartSpec {
+        job_id: id.to_owned(),
+        allocation_id: format!("alloc-{id}"),
+        image: "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        command: vec!["--go".to_owned()],
+        run: None,
+        os: None,
+        arch: None,
+        env: Default::default(),
+        files: Vec::new(),
+        booked: BookedResources {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 30,
+            disk_bytes: None,
+            gpu_indices: Vec::new(),
+        },
+        wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
+        log_sink: None,
+        kind: Default::default(),
+        isolation: Default::default(),
+        fuse: false,
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
+        placed_at_ms: None,
+        xcode: None,
+        sizing: None,
+    }
+}
+
+/// A reply that starts these jobs, keyed by job id.
 #[cfg(target_os = "linux")]
 pub fn starts(runs: &[&str]) -> HeartbeatReply {
     let commands = runs
         .iter()
-        .map(|run| Command::Start(Box::new(job(run))))
+        .map(|id| Command::JobStart(Box::new(job_start(id))))
         .collect();
     HeartbeatReply {
         commands,
@@ -271,20 +304,21 @@ pub fn starts(runs: &[&str]) -> HeartbeatReply {
     }
 }
 
-/// A reply that stops this run.
+/// A reply that stops this job.
 #[cfg(target_os = "linux")]
-pub fn stops(run: &str) -> HeartbeatReply {
+pub fn stops(id: &str) -> HeartbeatReply {
     HeartbeatReply {
-        commands: vec![Command::Stop {
-            run_id: run.to_owned(),
+        commands: vec![Command::JobStop {
+            job_id: id.to_owned(),
+            reason: None,
         }],
         ..HeartbeatReply::default()
     }
 }
 
-/// A reply that acknowledges this run's result.
-pub fn acks(run: &str, verdict: &str) -> HeartbeatReply {
-    let body = json!({ "commands": [], "result_acks": [{ "run_id": run, "ack": verdict }] });
+/// A reply that acknowledges this job's result.
+pub fn acks(id: &str, verdict: &str) -> HeartbeatReply {
+    let body = json!({ "commands": [], "job_acks": [{ "job_id": id, "ack": verdict }] });
     serde_json::from_value(body).unwrap()
 }
 

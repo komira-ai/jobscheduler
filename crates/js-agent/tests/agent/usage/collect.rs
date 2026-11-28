@@ -10,8 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::FileReader;
-use js_agent::lifecycle::RunningLease;
-use js_agent::usage::{Collector, MAX_UNSENT_AGE_USEC, Outbox, UsageClock};
+use js_agent::usage::{Collector, MAX_UNSENT_AGE_USEC, Outbox, RunningLease, UsageClock};
 use js_agent_wire::{LeaseMinute, NodeLoad};
 
 use crate::support::FakeFiles;

@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{broken, expect, job, long};
+use common::{broken, expect, job, job_start, long};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, Rule, RunFile, validate_files};
@@ -147,6 +147,8 @@ fn the_standalone_check_agrees_with_the_spec() {
 fn debug_never_shows_the_contents() {
     let secret = "https://store.example/put?sig=SECRET-VALUE-123";
     let spec = with(vec![file("put-url", secret)]);
+    let mut job_spec = job_start();
+    job_spec.files = spec.files.clone();
     let one = format!("{:?}", spec.files[0]);
     assert!(
         one.contains("put-url") && one.contains(&secret.len().to_string()),
@@ -156,11 +158,11 @@ fn debug_never_shows_the_contents() {
         one,
         format!("{spec:?}"),
         format!("{:#?}", spec),
-        format!("{:?}", Command::Start(Box::new(spec.clone()))),
+        format!("{:?}", Command::JobStart(Box::new(job_spec.clone()))),
         format!(
             "{:?}",
             HeartbeatReply {
-                commands: vec![Command::Start(Box::new(spec.clone()))],
+                commands: vec![Command::JobStart(Box::new(job_spec.clone()))],
                 ..HeartbeatReply::default()
             }
         ),
@@ -192,12 +194,13 @@ fn the_field_is_additive_on_the_wire() {
     assert_eq!(serde_json::from_value::<JobSpec>(value).unwrap(), spec);
 }
 
-/// A start carrying a bad file inside a reply is refused by the command's own validation,
-/// with the file code. Catches a validator reachable only through `JobSpec::validate` and
-/// skipped by the path the agent uses.
+/// A job start carrying a bad file inside a reply is refused by the command's own
+/// validation, with the file code. Catches a validator reachable only through
+/// `JobSpec::validate` and skipped by the path the agent uses.
 #[test]
 fn a_command_with_a_bad_file_is_refused() {
-    let spec = with(vec![file("../x", "x")]);
-    let err = Command::Start(Box::new(spec)).validate().unwrap_err();
+    let mut spec = job_start();
+    spec.files = vec![file("../x", "x")];
+    let err = Command::JobStart(Box::new(spec)).validate().unwrap_err();
     assert_eq!(err.code(), refusal::INVALID_FILE);
 }

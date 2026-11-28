@@ -29,13 +29,13 @@ fn result_sent_before_cleanup_and_slot_freed_after() {
         ],
         "the result is ready in the step that saw the exit, and the cleanup stopped there"
     );
-    let results = h.life.results();
+    let results = super::results(&h.life);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].outcome, Outcome::Succeeded);
     assert_eq!(results[0].exit_code, Some(0));
     assert_eq!(h.life.free().cpu_millis, 3000, "the slot is still booked");
     assert_eq!(
-        h.life.held(),
+        super::held(&h.life),
         [HeldRun {
             run_id: "r1".to_owned(),
             state: HeldState::ExitedUnacked
@@ -45,7 +45,7 @@ fn result_sent_before_cleanup_and_slot_freed_after() {
     assert_eq!(events, cleanup("r1"), "the next step finishes it, in order");
     assert_eq!(h.life.free().cpu_millis, 4000, "now the slot is free");
     assert_eq!(
-        h.life.results().len(),
+        super::results(&h.life).len(),
         1,
         "and the result waits for its ack"
     );
@@ -77,12 +77,12 @@ fn cleanup_order_container_scratch_check_free() {
 }
 
 /// Asserts that no outcome leaves a scratch directory behind: a success, a failure, an
-/// out-of-memory kill, a stop, a cancel, a wall-time kill and a container that never
+/// out-of-memory kill, a stop, a wall-time kill and a container that never
 /// started. It catches a cleanup that runs on the happy path only.
 #[test]
 fn scratch_removed_after_every_outcome() {
     let mut h = Harness::new("every-outcome");
-    for run in ["ok", "bad", "oom", "stopped", "cancelled", "slow"] {
+    for run in ["ok", "bad", "oom", "stopped", "slow"] {
         let mut spec = job(run);
         spec.limits.cpu_millis = 500;
         h.start(spec);
@@ -95,20 +95,18 @@ fn scratch_removed_after_every_outcome() {
     h.fake.exit("bad", 3);
     h.fake.exit_oom("oom");
     h.stop("stopped");
-    h.cancel("cancelled");
     h.life.step();
     h.clock.advance(60_000);
     h.life.step();
     h.fake.fail("create", 1);
     h.start(job("never"));
     h.life.step();
-    for run in ["ok", "bad", "oom", "stopped", "cancelled", "slow", "never"] {
+    for run in ["ok", "bad", "oom", "stopped", "slow", "never"] {
         assert!(!h.scratch_of(run).exists(), "{run} left its scratch behind");
         assert!(h.fake.gone(run), "{run} left its container behind");
     }
     let by_run = |run: &str| {
-        h.life
-            .results()
+        super::results(&h.life)
             .into_iter()
             .find(|result| result.run_id == run)
             .map(|result| (result.outcome, result.exit_code))
@@ -117,7 +115,6 @@ fn scratch_removed_after_every_outcome() {
     assert_eq!(by_run("bad"), Some((Outcome::Failed, Some(3))));
     assert_eq!(by_run("oom"), Some((Outcome::OutOfMemory, Some(137))));
     assert_eq!(by_run("stopped"), Some((Outcome::Killed, None)));
-    assert_eq!(by_run("cancelled"), None, "a cancel reports nothing");
     assert_eq!(by_run("slow"), Some((Outcome::TimedOut, None)));
     assert_eq!(by_run("never"), Some((Outcome::FailedToStart, None)));
     assert_eq!(h.life.free().cpu_millis, 4000, "every slot came back");
@@ -326,7 +323,7 @@ fn a_failed_start_reports_cleans_and_frees() {
     h.fake.fail("create", 1);
     let events = names(&h.start(job("r1")));
     assert_eq!(events, ["finding r1 start-failed", "result r1"]);
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.exit_code, None);
     assert_eq!(result.detail.as_deref(), Some("runtime-failed"));
@@ -351,7 +348,7 @@ fn a_scratch_directory_that_cannot_be_made_fails_the_start() {
     let events = names(&h.start(job("r1")));
     assert_eq!(events, ["finding r1 scratch-failed", "result r1"]);
     assert_eq!(
-        h.life.results()[0].detail.as_deref(),
+        super::results(&h.life)[0].detail.as_deref(),
         Some("scratch-failed")
     );
     assert!(h.log.borrow().is_empty(), "no container was created");

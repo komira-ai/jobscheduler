@@ -17,7 +17,7 @@ use js_agent::lifecycle::{
     Capacity, Clock, Config, DirLayout, Event, Lifecycle, MountRoots, NoChecks, Prepared, Runtime,
     ScratchRoot, StateRoot, Status,
 };
-use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, NetworkCeiling};
+use js_agent_wire::{Isolation, JobSpec, Limits, NetworkCeiling};
 use js_types::{JobNetwork, PortMap};
 
 use crate::egress_port::{Seen, port};
@@ -152,7 +152,6 @@ fn start(life: &mut Ringing, node: &Node, run_id: &str) -> Vec<String> {
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: 0,
         bundle: None,
         native: None,
         network: JobNetwork::AllowList,
@@ -161,11 +160,7 @@ fn start(life: &mut Ringing, node: &Node, run_id: &str) -> Vec<String> {
         os: None,
         arch: None,
     };
-    let reply = HeartbeatReply {
-        commands: vec![Command::Start(Box::new(spec))],
-        ..HeartbeatReply::default()
-    };
-    life.apply_and_create(&reply)
+    life.start_spec_and_create(&spec)
         .iter()
         .map(|event| match event {
             Event::Started { run_id, .. } => format!("started {run_id}"),
@@ -779,8 +774,12 @@ fn a_failed_wiring_is_a_failed_start_of_the_lifecycle() {
                 && e.contains("wire the container's network")
         });
         assert!(finding, "{events:?}");
-        let results = life.results();
-        let result = results.iter().find(|r| r.run_id == run).expect("a result");
+        let held = life.held_jobs();
+        let result = held
+            .iter()
+            .filter_map(|job| job.result.as_ref())
+            .find(|r| r.job_id == run)
+            .expect("a result");
         assert_eq!(result.outcome, js_agent_wire::Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some("runtime-failed"));
         assert!(nothing_left(&node, run), "{run}");

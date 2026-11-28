@@ -2,17 +2,27 @@
 //! `Lifecycle` over the in-memory runtime (`js_conformance::agent::memory`) and a clock the
 //! suite moves, and stamps the agent's `Contact` where the session would: a message the
 //! harness delivers is a reply the session accepted, and `contact` is an answered heartbeat.
-//! A `start` is a run start (it carries the validity bound), a `start_fenced` a job start
-//! whose fence is the job with its allocation. The fence window is the agent's default
-//! silence bound (`--silence-stop`).
+//! A `start` is the start the agent makes of a run spec (`Lifecycle::start_spec`), a
+//! `start_fenced` a job start whose fence is the job with its allocation; both are keyed by
+//! job. The fence window is the agent's default silence bound (`--silence-stop`).
 //!
 //! The runtime fails the removal of the runs the suite names (`remove_fails`) and reads a
 //! usage for every job that exited; the post-job check finds what the suite names
 //! (`check_finds`) and nothing else. A restart builds a new lifecycle over the same runtime,
 //! state and scratch directories (`Lifecycle::adopt`, as the agent's process does when it
-//! starts); the operator's consent to host jobs is a restart with `allow_host_jobs`. The
+//! starts), which takes over the containers the agent made (each is labelled as keyed by
+//! job); the operator's consent to host jobs is a restart with `allow_host_jobs`. The
 //! whole-node lease is the `exclusive` of every reply after `hold_whole`, and its readiness
 //! is the lifecycle's answer to `prepare`, which the session asks on each heartbeat.
+//!
+//! A flawed start goes where the agent refuses it. Four rules are the wire's check of a job
+//! start (no wall time, a fence with no allocation, a VM, which the agent has no backend
+//! for) or the agent's admission of one (a GPU on a shape that has none), and are sent as
+//! `JobStart`. The rules only a `JobSpec` carries are sent through `Lifecycle::start_spec`:
+//! a mount outside the agent's roots is refused by the agent's admission, and a label under
+//! the reserved prefix by the wire's check of the spec (`JobSpec::validate`), which
+//! `start_spec` does not run, so the adapter runs it first and starts nothing the check
+//! refuses.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,11 +35,11 @@ use js_agent::integrity::code::{PROCESS_AS_JOB_USER, PROCESSES_UNREADABLE};
 use js_agent::lifecycle::{
     Capacity, CheckFinding, CheckHook, Config, Contact, DEFAULT_SILENCE_STOP, Event, Finished,
     Found, Lifecycle, MountRoots, Quiet, RunHandle, RunSpec, Runtime, RuntimeError, ScratchRoot,
-    Skip, StateRoot, Status, detail,
+    StateRoot, Status, detail,
 };
 use js_agent_wire::{
     Ack, BookedResources, Command, HeartbeatReply, HeldState, Isolation, JobResultAck, JobSpec,
-    JobStartSpec, JobUsage, Limits, Mount, ResultAck, StartKind,
+    JobStartSpec, JobUsage, Limits, Mount, StartKind,
 };
 use js_conformance::Verdict;
 use js_conformance::agent::memory::{Memory, Time};
@@ -41,8 +51,7 @@ use js_testkit::dir::TestDir;
 const IMAGE: &str =
     "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// Where the suite's clock starts on the lifecycle's, so that a start may be backdated by
-/// any wait the scenarios name: the suite reads the clock from 0.
+/// Where the suite's clock starts on the lifecycle's: the suite reads the clock from 0.
 const BASE: u64 = 1 << 40;
 
 /// How many steps the adapter lets the lifecycle take after each message or exit, as the
@@ -154,13 +163,10 @@ struct JsAgent {
     clock: Rc<Cell<u64>>,
     contact: Contact,
     connected: bool,
-    /// The names started by a job start: their results and acknowledgements are the job's.
-    jobs: BTreeSet<String>,
     /// The lease the host is held whole for, which every reply names.
     whole: Option<String>,
     /// How many commands the lifecycle refused as malformed.
     invalid: usize,
-    never_started: BTreeSet<String>,
     refused: BTreeSet<String>,
     findings: BTreeSet<String>,
     cleanup: Vec<(String, Cleanup)>,
@@ -220,10 +226,8 @@ impl JsAgent {
             clock,
             contact,
             connected: true,
-            jobs: BTreeSet::new(),
             whole: None,
             invalid: 0,
-            never_started: BTreeSet::new(),
             refused: BTreeSet::new(),
             findings: BTreeSet::new(),
             cleanup: Vec::new(),
@@ -233,17 +237,11 @@ impl JsAgent {
         }
     }
 
-    /// Notes what the lifecycle reported: the starts dropped as late, the starts refused,
-    /// the commands refused as malformed, the steps of each cleanup and the findings.
+    /// Notes what the lifecycle reported: the starts refused, the commands refused as
+    /// malformed, the steps of each cleanup and the findings.
     fn record(&mut self, events: &[Event]) {
         for event in events {
             match event {
-                Event::Skipped {
-                    run_id,
-                    why: Skip::Stale,
-                } => {
-                    self.never_started.insert(run_id.clone());
-                }
                 Event::Refused { run_id, .. } => {
                     self.refused.insert(run_id.clone());
                 }
@@ -273,36 +271,28 @@ impl JsAgent {
         }
     }
 
-    /// Delivers `reply`, naming the lease the host is held whole for, as one that arrived
-    /// `waited` ms ago, then lets the lifecycle settle, as the agent's worker steps after
-    /// every order.
-    fn deliver(&mut self, reply: HeartbeatReply, waited: u64) -> Delivery {
+    /// Lets the agent act on a message the session accepted: it counts as contact, then
+    /// `act` hands the lifecycle the message, then the lifecycle settles, as the agent's
+    /// worker steps after every order.
+    fn deliver(&mut self, act: impl FnOnce(&mut Lifecycle) -> Vec<Event>) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
         }
-        let reply = HeartbeatReply {
-            exclusive: self.whole.clone(),
-            ..reply
-        };
-        let now = self.clock.get();
-        self.contact.heard(now);
-        let events = self.life.apply_at(&reply, now.saturating_sub(waited));
+        self.contact.heard(self.clock.get());
+        let events = act(&mut self.life);
         self.record(&events);
         self.settle();
         Delivery::Delivered
     }
 
-    /// The run ids and job ids of the results the lifecycle holds, with their details.
+    /// The job ids of the results the lifecycle holds, with their details.
     fn results(&self) -> Vec<(String, Option<String>)> {
-        let runs = self.life.results().into_iter();
-        let runs = runs.map(|result| (result.run_id, result.detail));
         let jobs = self
             .life
             .held_jobs()
             .into_iter()
             .filter_map(|job| job.result);
-        runs.chain(jobs.map(|result| (result.job_id, result.detail)))
-            .collect()
+        jobs.map(|result| (result.job_id, result.detail)).collect()
     }
 
     /// The running container of `run` exits with `code`, and the agent reports it.
@@ -312,20 +302,45 @@ impl JsAgent {
         self.heartbeat();
     }
 
-    /// Delivers `command` alone, and notes `lease` refused when the lifecycle refused the
-    /// command as malformed.
-    fn deliver_one(&mut self, lease: &str, command: Command) -> Delivery {
+    /// Delivers `reply`, naming the lease the host is held whole for, as one the session
+    /// accepted.
+    fn reply(&mut self, reply: HeartbeatReply) -> Delivery {
+        let reply = HeartbeatReply {
+            exclusive: self.whole.clone(),
+            ..reply
+        };
+        self.deliver(|life| life.apply(&reply))
+    }
+
+    /// Delivers the job start `job` alone, and notes `lease` refused when the lifecycle
+    /// refused the command as malformed.
+    fn deliver_job(&mut self, lease: &str, job: JobStartSpec) -> Delivery {
         let before = self.invalid;
-        let delivered = self.deliver(of(vec![command]), 0);
+        let delivered = self.reply(of(vec![Command::JobStart(Box::new(job))]));
         if self.invalid > before {
+            self.refused.insert(lease.to_owned());
+        }
+        delivered
+    }
+
+    /// Starts `spec` as [`Lifecycle::start_spec`] does, after the wire's check of it
+    /// (`JobSpec::validate`), which `start_spec` does not run: a spec the check refuses is
+    /// started nowhere, and `lease` is noted refused.
+    fn deliver_spec(&mut self, lease: &str, spec: &JobSpec) -> Delivery {
+        let refused = spec.validate().is_err();
+        let delivered = self.deliver(|life| match refused {
+            true => Vec::new(),
+            false => life.start_spec(spec),
+        });
+        if refused && delivered == Delivery::Delivered {
             self.refused.insert(lease.to_owned());
         }
         delivered
     }
 }
 
-/// A run start for `run`, valid for `valid_for` ms (0 is unbounded).
-fn run_start(run: &str, valid_for: u64) -> JobSpec {
+/// A run spec for `run`, under the allocation `lease-<run>`.
+fn run_spec(run: &str) -> JobSpec {
     JobSpec {
         run_id: run.into(),
         lease_id: format!("lease-{run}"),
@@ -344,7 +359,6 @@ fn run_start(run: &str, valid_for: u64) -> JobSpec {
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: valid_for,
         bundle: None,
         native: None,
         network: Default::default(),
@@ -411,31 +425,22 @@ impl AgentHarness for JsAgent {
         self.record(&events);
     }
 
-    fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery {
-        let start = Command::Start(Box::new(run_start(lease, valid_for)));
-        self.deliver(of(vec![start]), waited)
+    fn start(&mut self, lease: &str) -> Delivery {
+        let spec = run_spec(lease);
+        self.deliver(|life| life.start_spec(&spec))
     }
 
     fn start_fenced(&mut self, job: &str, allocation: &str) -> Delivery {
         let start = Command::JobStart(Box::new(job_start(job, allocation)));
-        let delivered = self.deliver(of(vec![start]), 0);
-        if delivered == Delivery::Delivered {
-            self.jobs.insert(job.to_owned());
-        }
-        delivered
+        self.reply(of(vec![start]))
     }
 
     fn cancel(&mut self, lease: &str) -> Delivery {
-        let command = match self.jobs.contains(lease) {
-            true => Command::JobStop {
-                job_id: lease.to_owned(),
-                reason: None,
-            },
-            false => Command::Cancel {
-                run_id: lease.to_owned(),
-            },
+        let command = Command::JobStop {
+            job_id: lease.to_owned(),
+            reason: None,
         };
-        self.deliver(of(vec![command]), 0)
+        self.reply(of(vec![command]))
     }
 
     fn answer(&mut self, lease: &str, answer: Answer) -> Delivery {
@@ -443,27 +448,17 @@ impl AgentHarness for JsAgent {
             Answer::Accepted => Ack::Accepted,
             Answer::Duplicate => Ack::Duplicate,
             Answer::Stale => Ack::Stale,
-            Answer::UnknownLease => Ack::UnknownLease,
             Answer::Mismatch => Ack::Mismatch,
             Answer::Unrecognised => Ack::Unknown,
         };
-        let reply = match self.jobs.contains(lease) {
-            true => HeartbeatReply {
-                job_acks: vec![JobResultAck {
-                    job_id: lease.to_owned(),
-                    ack,
-                }],
-                ..HeartbeatReply::default()
-            },
-            false => HeartbeatReply {
-                result_acks: vec![ResultAck {
-                    run_id: lease.to_owned(),
-                    ack,
-                }],
-                ..HeartbeatReply::default()
-            },
+        let reply = HeartbeatReply {
+            job_acks: vec![JobResultAck {
+                job_id: lease.to_owned(),
+                ack,
+            }],
+            ..HeartbeatReply::default()
         };
-        self.deliver(reply, 0)
+        self.reply(reply)
     }
 
     fn complete(&mut self, lease: &str) {
@@ -475,41 +470,43 @@ impl AgentHarness for JsAgent {
     }
 
     fn start_flawed(&mut self, lease: &str, flaw: Flaw) -> Delivery {
-        let mut run = run_start(lease, 0);
-        let command = match flaw {
+        match flaw {
             Flaw::NoWallTime => {
-                run.limits.wall_ms = 0;
-                Command::Start(Box::new(run))
-            }
-            Flaw::ReservedLabel => {
-                let key = format!("{}flaw", js_types::RESERVED_PREFIX);
-                run.labels.insert(key, "set".to_owned());
-                Command::Start(Box::new(run))
-            }
-            Flaw::MountOutsideRoots => {
-                run.mounts.push(Mount {
-                    root_name: "data".to_owned(),
-                    rel: "input".to_owned(),
-                    ro: true,
-                });
-                Command::Start(Box::new(run))
-            }
-            Flaw::GpuOnGpulessShape => {
-                run.gpu_indices.push(0);
-                Command::Start(Box::new(run))
+                let mut job = job_start(lease, "first");
+                job.wall_ms = 0;
+                self.deliver_job(lease, job)
             }
             Flaw::UnstatedFence => {
                 let mut job = job_start(lease, "first");
                 job.allocation_id = String::new();
-                Command::JobStart(Box::new(job))
+                self.deliver_job(lease, job)
             }
             Flaw::VmWithoutBackend => {
                 let mut job = job_start(lease, "first");
                 job.kind = StartKind::Vm;
-                Command::JobStart(Box::new(job))
+                self.deliver_job(lease, job)
             }
-        };
-        self.deliver_one(lease, command)
+            Flaw::GpuOnGpulessShape => {
+                let mut job = job_start(lease, "first");
+                job.booked.gpu_indices.push(0);
+                self.deliver_job(lease, job)
+            }
+            Flaw::MountOutsideRoots => {
+                let mut spec = run_spec(lease);
+                spec.mounts.push(Mount {
+                    root_name: "data".to_owned(),
+                    rel: "input".to_owned(),
+                    ro: true,
+                });
+                self.deliver(|life| life.start_spec(&spec))
+            }
+            Flaw::ReservedLabel => {
+                let mut spec = run_spec(lease);
+                let key = format!("{}flaw", js_types::RESERVED_PREFIX);
+                spec.labels.insert(key, "set".to_owned());
+                self.deliver_spec(lease, &spec)
+            }
+        }
     }
 
     fn remove_fails(&mut self, lease: &str) {
@@ -526,9 +523,9 @@ impl AgentHarness for JsAgent {
     }
 
     fn start_host(&mut self, lease: &str) -> Delivery {
-        let mut run = run_start(lease, 0);
-        run.isolation = Isolation::Host;
-        self.deliver_one(lease, Command::Start(Box::new(run)))
+        let mut spec = run_spec(lease);
+        spec.isolation = Isolation::Host;
+        self.deliver(|life| life.start_spec(&spec))
     }
 
     fn ack_taint(&mut self) -> Delivery {
@@ -536,7 +533,7 @@ impl AgentHarness for JsAgent {
             taint_ack: true,
             ..HeartbeatReply::default()
         };
-        self.deliver(reply, 0)
+        self.reply(reply)
     }
 
     fn restart(&mut self) {
@@ -551,7 +548,7 @@ impl AgentHarness for JsAgent {
         self.connected = true;
         self.settle();
         self.heartbeat();
-        self.deliver(HeartbeatReply::default(), 0);
+        self.reply(HeartbeatReply::default());
     }
 
     fn hold_whole(&mut self, lease: &str) -> Delivery {
@@ -559,7 +556,7 @@ impl AgentHarness for JsAgent {
             return Delivery::Lost;
         }
         self.whole = Some(lease.to_owned());
-        self.deliver(HeartbeatReply::default(), 0)
+        self.reply(HeartbeatReply::default())
     }
 
     fn whole_ready(&mut self) -> bool {
@@ -573,9 +570,9 @@ impl AgentHarness for JsAgent {
     }
 
     fn start_whole(&mut self, lease: &str) -> Delivery {
-        let mut run = run_start(lease, 0);
-        run.lease_id = self.whole.clone().unwrap_or_default();
-        self.deliver_one(lease, Command::Start(Box::new(run)))
+        let mut spec = run_spec(lease);
+        spec.lease_id = self.whole.clone().unwrap_or_default();
+        self.deliver(|life| life.start_spec(&spec))
     }
 
     fn heartbeat(&mut self) {
@@ -602,14 +599,9 @@ impl AgentHarness for JsAgent {
     }
 
     fn observed(&self) -> Observed {
-        let runs = self.life.held().into_iter();
-        let runs = runs.filter(|run| run.state == HeldState::Running);
         let jobs = self.life.held_jobs().into_iter();
         let jobs = jobs.filter(|job| job.state == HeldState::Running);
-        let running = runs
-            .map(|run| run.run_id)
-            .chain(jobs.map(|job| job.job_id))
-            .collect();
+        let running = jobs.map(|job| job.job_id).collect();
         let silenced = Some(detail::SILENCE_STOP.to_owned());
         let fenced = self.results().into_iter();
         let fenced = fenced.filter(|(_, detail)| *detail == silenced);
@@ -618,7 +610,6 @@ impl AgentHarness for JsAgent {
         Observed {
             running,
             fenced: fenced.map(|(id, _)| id).collect(),
-            never_started: self.never_started.clone(),
             launches: self.fake.launches(),
             results_sent: self.sent.clone(),
             refused: self.refused.clone(),

@@ -88,9 +88,12 @@ fn grant() -> LogGrant {
 /// One refused grant: the edit that breaks it, the field named and the rule broken.
 type GrantCase = (fn(&mut LogGrant), &'static str, Rule);
 
-/// A stop of the run `run`.
-fn stop(run: &str) -> Command {
-    Command::Stop { run_id: run.into() }
+/// A stop of the job `job`.
+fn stop(job: &str) -> Command {
+    Command::JobStop {
+        job_id: job.into(),
+        reason: None,
+    }
 }
 
 /// What `log_sink_checked` says of the start of `build-42` with the sink `edit` makes.
@@ -169,7 +172,21 @@ fn a_job_start_without_log_sink_encodes_as_before() {
     assert_eq!(serde_json::to_value(&beat).unwrap(), file(HEARTBEAT));
     let reply: HeartbeatReply = serde_json::from_str(REPLY).unwrap();
     assert_eq!(reply.log_grant, None);
-    assert_eq!(serde_json::to_value(&reply).unwrap(), file(REPLY));
+    // That release's reply carries the run commands and an `UNKNOWN_LEASE` verdict, which
+    // this release reads as unknown: everything else encodes as the file holds it.
+    let mut expected = file(REPLY);
+    for command in expected["commands"].as_array_mut().unwrap() {
+        if matches!(command["type"].as_str(), Some("start" | "stop" | "cancel")) {
+            *command = json!({"type": "unknown"});
+        }
+    }
+    for ack in expected["result_acks"].as_array_mut().unwrap() {
+        if ack["ack"] == "UNKNOWN_LEASE" {
+            ack["ack"] = json!("UNKNOWN");
+        }
+    }
+    assert_ne!(expected, file(REPLY));
+    assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
 }
 
 /// Asserts the exact JSON of a start with a sink, that it decodes to the same start (inside
@@ -809,7 +826,7 @@ fn a_malformed_log_field_reads_as_absent() {
         json!([]),
     ];
     for grant in grants {
-        let wire = json!({"commands": [{"type": "stop", "run_id": "r1"}], "log_grant": grant});
+        let wire = json!({"commands": [{"type": "job_stop", "job_id": "r1"}], "log_grant": grant});
         let reply: HeartbeatReply = serde_json::from_value(wire).unwrap();
         assert_eq!(reply.log_grant, None);
         assert_eq!(reply.validate().commands, [&stop("r1")]);

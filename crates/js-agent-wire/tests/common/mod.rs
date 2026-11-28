@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use js_agent_wire::{
-    GpuDevice, Heartbeat, HeldRun, HeldState, Hello, Isolation, JobSpec, LeaseClock, LeaseMinute,
-    Limits, Mount, NodeLoad, Outcome, Phase, ProtocolRange, RunResult, Taint, ValidationError,
-    Welcome, WireShape,
+    BookedResources, GpuDevice, Heartbeat, HeldRun, HeldState, Hello, Isolation, JobSpec,
+    JobStartSpec, LeaseClock, LeaseMinute, Limits, Mount, NodeLoad, Outcome, Phase, ProtocolRange,
+    RunResult, Taint, ValidationError, Welcome, WireShape,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -80,7 +80,6 @@ pub fn job() -> JobSpec {
         labels: map(&[("team", "infra")]),
         heartbeat_seq: 7,
         files: Vec::new(),
-        valid_for_ms: 10_000,
         bundle: None,
         native: None,
         network: Default::default(),
@@ -88,6 +87,42 @@ pub fn job() -> JobSpec {
         run: None,
         os: None,
         arch: None,
+    }
+}
+
+/// A job start with a pinned image and booked resources, every optional field unset.
+pub fn job_start() -> JobStartSpec {
+    JobStartSpec {
+        job_id: "job-1".into(),
+        allocation_id: "0123456789abcdef0123456789abcdef".into(),
+        image:
+            "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
+        command: vec!["make".into(), "all".into()],
+        run: None,
+        os: None,
+        arch: None,
+        env: BTreeMap::new(),
+        files: Vec::new(),
+        booked: BookedResources {
+            cpu_millis: 2000,
+            memory_bytes: 1 << 30,
+            disk_bytes: None,
+            gpu_indices: vec![0],
+        },
+        wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
+        log_sink: None,
+        kind: Default::default(),
+        isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
+        placed_at_ms: None,
+        fuse: false,
+        xcode: None,
+        sizing: None,
     }
 }
 

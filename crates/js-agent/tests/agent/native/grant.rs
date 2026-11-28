@@ -11,13 +11,13 @@ use std::{fs, io};
 use js_agent::bundle::{Admission, Placer};
 use js_agent::lifecycle::{Event, Lifecycle, NoChecks, Runtime as _};
 use js_agent::native::grant;
-use js_agent_wire::{Command, Hello, JobSpec, Outcome, Phase, ProtocolRange, WireShape, refusal};
+use js_agent_wire::{Hello, JobSpec, Outcome, Phase, ProtocolRange, WireShape, refusal};
 use js_caps::FULL_DISK_ACCESS;
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use super::{FakeAccounts, FakeLauncher, Rig, native};
 use crate::lifecycle::fake::ManualClock;
-use crate::lifecycle::{config_in, names, reply};
+use crate::lifecycle::{config_in, names};
 use crate::support::Scratch;
 
 /// A lifecycle over the native runtime of a [`Rig`]: its pool is on the rig's fake host and
@@ -65,11 +65,7 @@ impl Over {
 
     /// Applies a start of `spec` and returns the names of the events.
     pub(super) fn start(&mut self, spec: JobSpec) -> Vec<String> {
-        names(
-            &self
-                .life
-                .apply(&reply(vec![Command::Start(Box::new(spec))])),
-        )
+        names(&self.life.start_spec(&spec))
     }
 
     /// Steps the lifecycle until `done`, and returns the events of the steps.
@@ -269,7 +265,7 @@ fn a_native_job_without_the_grant_is_refused_and_makes_nothing() {
         assert!(!h.dir.path("native-leases").exists());
         assert!(!h.scratch_of("r1").exists());
         assert_eq!(h.life.free().cpu_millis, 4000);
-        let result = &h.life.results()[0];
+        let result = &crate::lifecycle::results(&h.life)[0];
         assert_eq!(result.outcome, Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some(refusal::NO_FULL_DISK_ACCESS));
     }

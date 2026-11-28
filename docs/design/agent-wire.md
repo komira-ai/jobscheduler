@@ -47,11 +47,14 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   the host once it has taken the beat, informational, absent when it holds none), `exclusive`, and the per-job lists `job_acks`
   (`JobResultAck`), `retired_acks` and `unknown_jobs` (the listed jobs the server holds no record of, which it does not stop and the agent
   keeps running; absent means none, and an older agent ignores it).
-- `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job
-  `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`, with the optional `reason`, `StopReason`: `cancelled`, `ended`, `replaced`,
-  `orphan_expired` or `operator`, each a record the server holds; absent from an older server and from a stop the dispatch queue carries,
-  ignored by an older agent, and a reason this version does not know reads as `unknown`, so the stop still stops). A tag this version does
-  not know reads as `Command::Unknown`.
+- `Command`, tagged by `type`: `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`, with the optional `reason`, `StopReason`:
+  `cancelled`, `ended`, `replaced`, `orphan_expired` or `operator`, each a record the server holds; absent from an older server and from a
+  stop the dispatch queue carries, ignored by an older agent, and a reason this version does not know reads as `unknown`, so the stop still
+  stops). A tag this version does not know reads as `Command::Unknown`, and so do the `start`, `stop` and `cancel` an older server sends
+  (they left the wire in komira-ai/jobscheduler#1156); the commands beside one that reads so still arrive. The `held`, `results` and
+  `result_acks` fields stay on the wire, always empty from this release (an agent of this release sends `held` and `results` empty, and a
+  server of this release sends `result_acks` empty), because every earlier release sends and reads them; they are still decoded and
+  checked as before.
 - The live-log fields ([live-logs.md](live-logs.md), section 7), in `js-agent-wire`; the lease server sends `log_sink` and `log_grant` and stores `logs`, and the `crun` and native agents read `log_sink` and `log_grant` and fill `log_grant_state` and `logs`: `JobStartSpec.log_sink` (where to upload one job's logs;
   no secret), `HeartbeatReply.log_grant` (the host's upload credential), the heartbeat's `log_grant_state` (`stale`, `until_ms`) and
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
@@ -101,17 +104,16 @@ listed job it holds no record of (a server on an empty, restored or older table,
 on a stop the same whatever its reason. Both fields are additive: an agent from before them stops every job it is told to stop and
 ignores the list, and a server from before them sends neither (`crates/js-agent-wire/tests/stop_reason.rs`).
 
-The per-job messages ride in major 1 beside the lease and run messages. An agent announces them with the hello capability
+The per-job messages are the only commands in major 1. An agent announces them with the hello capability
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that
 reported it; an agent lists a job a job start began only under `jobs`, never in `held` or `results`
 (`crates/js-agent-wire/src/per_job.rs`). The agent side is built: the agent reports `per-job` (`crates/js-agent/src/contract.rs`)
 and carries out both commands. The server side is built too: the lease server adds `job_start`, `job_stop`, `job_acks` and
 `retired_acks` to the reply of an agent that reported `per-job` (`add_jobs` in `crates/js-lease-server/src/agent_api.rs`). The server
-has no run path: the registry never queues a `start`, `stop` or `cancel` for a run. It answers the heartbeat of an agent that still
-keys its work by run, a previous release's, as a responder and nothing more (`answer` in `crates/js-registry/src/registry/beat.rs`):
-a `cancel` for each run the heartbeat lists in `held`, at most `MAX_COMMANDS`, and a `ResultAck` with `unknown-lease` for each entry of
-`results`, so that the agent kills what it holds and drops what it reports. The rest of the reply is empty apart from the taint
-acknowledgement, and the job half is added as above. The registry still records `held` from a hello and a heartbeat. The capabilities
+has no run path: the registry never queues a command for a run, and the wire has no command or acknowledgement for one. It answers the
+heartbeat of an agent that still keys its work by run, a previous release's, and nothing more (`answer` in
+`crates/js-registry/src/registry/beat.rs`): no command and no `result_acks`; the `held` and `results` it lists are read and not answered. The
+rest of the reply is empty apart from the taint acknowledgements and `host_taint`, and the job half is added as above. The registry still records `held` from a hello and a heartbeat. The capabilities
 `one-job` (`ONE_JOB_CAPABILITY`) and `run-files` gate start fields an older agent would silently ignore.
 
 **The dispatch poll.** An agent that runs jobs announces the hello capability `dispatch-poll` (`DISPATCH_CAPABILITY`, `crates/js-agent-wire/src/dispatch.rs`) and polls `POST /v1/agent/dispatch` (`DispatchPoll`: host, epoch, session, and the acknowledgements of what it took; answered with `DispatchReply`) only when its welcome says `dispatch_poll`. A server that serves the poll to a host leaves the starts and stops its dispatch queue carries out of that host's heartbeat reply; a host whose welcome lacks the flag gets them in the heartbeat reply as before. Every additive: an older server never sets the flag, an older agent never reports the capability. The poll's rules, the agent's backoff and the queue are in `multi-instance.md`, section 0.2.
@@ -269,6 +271,8 @@ reply is empty or false and none is written: **0** bytes, derived (a `taint_ack`
 
 ### Worked example: a reply with commands (`fixtures/v0.1.135/reply.json`)
 
+This example is computed from the frozen fixture of that release, which carries the run commands (`start`, `stop`, `cancel`) and a
+`result_acks` entry the current wire no longer has: this release reads those commands as `Command::Unknown` and sends no such reply.
 The start, a `JobSpec` (`run_id` 1, `lease_id` 2, `image` 3, `run` 4, `os` 5, `arch` 6, `native` 7, `args` 8, `limits` 9,
 `gpu_indices` 10, `mounts` 11, `files` 12, `isolation` 13, `labels` 14, `heartbeat_seq` 15, `valid_for_ms` 16, `bundle` 17):
 
@@ -545,9 +549,10 @@ If the decision is (A):
 1. Record the decision in section 3.6 and step 20 of the design (the design's owner edits it; this note does not).
 2. Build the server side of the per-job set (step 28) and decide how the run messages leave major 1. The server without a run path
    does not refuse a hello that lacks `per-job`: a refusal would raise the floor of what the wire accepts, and a format changes only
-   by addition. It admits the agent and answers its heartbeat with a cancel for each held run and an `unknown-lease` acknowledgement
-   for each result (open point 3), with a test of that reply against the previous release's heartbeat fixture. The run messages stay
-   in `js-agent-wire` for as long as an agent of that release runs.
+   by addition. It admits the agent and gives it no work: its held runs and results are read and not answered (open point 3), with a test of
+   that reply against the previous release's heartbeat fixture. Built: the run commands and the `unknown-lease` acknowledgement left
+   the wire in komira-ai/jobscheduler#1156; the `held`, `results` and `result_acks` fields stay, always empty, because every earlier
+   release sends and reads them.
 3. Move the previous-release fixtures to the first release whose agent sends the per-job lists, so the both-direction tests cover
    per-job bodies as a released agent wrote them (`tests/fixtures/v0.1.135` predate them; open point 7).
 4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built, in
@@ -583,10 +588,13 @@ server, and the JSON fixtures and frozen copies.
 2. **How near real beats come to the body limit.** The lease server counts the 413 `body-too-large` answers by route
    (`js_agent_bodies_too_large_total`), and the agent notes each run whose tail it cut (`log-tail-cut`) or left out
    (`log-tail-shed`) and each start it skipped `Full`. Settled by reading those over the farm, which this note does not do.
-3. **How the run messages leave major 1 (steps 28 and 30).** A server without the run path admits a hello without `per-job` and answers
-   the agent's heartbeats as a responder (section 1; `answer` in `crates/js-registry/src/registry/beat.rs`). It does not refuse the hello,
-   because that would raise a floor. When the run messages can be dropped from the wire is settled by the last release whose agent
-   keys its work by run, and by `ProtocolRange::negotiate` (`crates/js-agent-wire/src/protocol.rs`).
+3. **How the run messages leave major 1 (steps 28 and 30).** Decided and built in komira-ai/jobscheduler#1156. The run commands
+   (`start`, `stop`, `cancel`) and the `unknown-lease` verdict left the wire; an older server's commands read as `Command::Unknown`
+   and the text `UNKNOWN_LEASE` reads as `Ack::Unknown`. The `held`, `results` and `result_acks` fields stay as always-empty fields,
+   because every earlier release sends and reads them and a format changes only by addition. A server without the run path admits a
+   hello without `per-job` and gives its heartbeats no work (section 1; `answer` in `crates/js-registry/src/registry/beat.rs`). It does
+   not refuse the hello: refusing a hello without `per-job` would raise the floor and needs a protocol major
+   (`ProtocolRange::negotiate`, `crates/js-agent-wire/src/protocol.rs`).
 4. **Presence of zero values under (B).** Which fields need proto3 `optional` so that zero and absent stay distinct (`exit_code`,
    `disk_gib`, `epoch` 0, a GPU `index` 0)? Settled field by field against the `Option` fields and `serde(default)`s of
    `crates/js-agent-wire/src`.

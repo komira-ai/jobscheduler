@@ -2,11 +2,11 @@
 //! server sends and however few results it acknowledges: a start is skipped once the held
 //! entries would leave no room for a result, the results go out oldest first as far as they
 //! fit (a job's entry is listed without its result meanwhile), and the retired job ids go in
-//! what is left.
+//! what is left. An agent of this release lists no run: `held` and `results` are empty.
 
 use js_agent::lifecycle::RETIRED_LISTED;
 use js_agent_wire::limits::{self, HEARTBEAT_BODY_BUDGET};
-use js_agent_wire::{Command, Heartbeat, HeldState, Phase};
+use js_agent_wire::{Command, Heartbeat, HeldState, JobSpec, Phase};
 use serde_json::json;
 
 use super::logs::full_load;
@@ -32,8 +32,8 @@ fn beat(h: &Harness) -> Heartbeat {
         epoch: u64::MAX,
         session: wide(1),
         phase: Phase::Serving,
-        held: h.life.held(),
-        results: h.life.results(),
+        held: Vec::new(),
+        results: Vec::new(),
         taint: None,
         taint_cleared: None,
         tainted: Some(false),
@@ -54,16 +54,16 @@ fn size(beat: &Heartbeat) -> usize {
     serde_json::to_vec(beat).unwrap().len()
 }
 
-/// A run start at the longest id that the host cannot fit (5 CPUs of 4), so it is refused
-/// and its result is held until acknowledged.
-fn unfit_run(i: usize) -> Command {
+/// A start of a spec ([`Harness::start`]) at the longest id that the host cannot fit (5 CPUs
+/// of 4), so it is refused and its result is held until acknowledged.
+fn unfit_spec(i: usize) -> JobSpec {
     let mut spec = job(&wide(i));
     spec.lease_id = format!("l{i}");
     spec.limits.cpu_millis = 5000;
-    Command::Start(Box::new(spec))
+    spec
 }
 
-/// A job start at the longest id that the host cannot fit, refused as [`unfit_run`] is.
+/// A job start at the longest id that the host cannot fit, refused as [`unfit_spec`] is.
 fn unfit_job(i: usize) -> Command {
     let mut spec = start(&wide(i));
     spec.allocation_id = format!("a{i}");
@@ -71,24 +71,23 @@ fn unfit_job(i: usize) -> Command {
     job_start(spec)
 }
 
-/// Asserts that a server that sends run starts and acknowledges nothing makes the agent take
-/// [`LISTABLE`] of them (each refused, and so held with its result) and skip the next as
-/// `Full`; that the heartbeat then lists every held run, carries the results oldest first as
-/// far as they fit and the rest not at all, and stays within the body the server reads; and
-/// that once the carried results are acknowledged, the waiting ones go out and a start is
-/// taken again. It catches a beat whose held list and results pass the body limit (the
-/// server answers 413 and the agent exits), a result skipped out of order, and a bound that
+/// Asserts that starts the agent keeps taking while the server acknowledges nothing make it
+/// take [`LISTABLE`] of them (each refused, and so held with its result) and skip the next
+/// as `Full`; that the heartbeat then lists every held job, carries the results oldest first
+/// as far as they fit and lists the rest without theirs, and stays within the body the
+/// server reads; and that once the carried results are acknowledged, the waiting ones go out
+/// and a start is taken again. It catches a beat whose listing passes the body limit (the
+/// server answers 413 and the agent exits), a result carried out of order, and a bound that
 /// never lets go.
 #[test]
-fn run_starts_past_what_a_beat_lists_are_skipped_and_results_wait() {
+fn starts_past_what_a_beat_lists_are_skipped_and_taken_again_once_results_go_out() {
     let mut h = Harness::new("listing-runs");
     for i in 0..LISTABLE {
-        let events = h.apply(vec![unfit_run(i)]);
-        let said = names(&events);
-        assert!(said[0].starts_with("refused "), "run {i}: {said:?}");
+        let said = names(&h.start(unfit_spec(i)));
+        assert!(said[0].starts_with("refused "), "start {i}: {said:?}");
     }
-    let events = h.apply(vec![unfit_run(LISTABLE)]);
-    assert_eq!(names(&events), [format!("skipped {} Full", wide(LISTABLE))]);
+    let said = names(&h.start(unfit_spec(LISTABLE)));
+    assert_eq!(said, [format!("skipped {} Full", wide(LISTABLE))]);
     h.life.step();
     let first = beat(&h);
     assert!(
@@ -96,8 +95,13 @@ fn run_starts_past_what_a_beat_lists_are_skipped_and_results_wait() {
         "{} bytes",
         size(&first)
     );
-    assert_eq!(first.held.len(), LISTABLE);
-    let carried: Vec<String> = first.results.iter().map(|r| r.run_id.clone()).collect();
+    assert_eq!(first.jobs.len(), LISTABLE);
+    let with = first.jobs.iter().take_while(|j| j.result.is_some()).count();
+    assert!(first.jobs[with..].iter().all(|j| j.result.is_none()));
+    let carried: Vec<String> = first.jobs[..with]
+        .iter()
+        .map(|j| j.job_id.clone())
+        .collect();
     let oldest: Vec<String> = (0..carried.len()).map(wide).collect();
     assert_eq!(carried, oldest, "the oldest results, in order");
     assert!(
@@ -105,8 +109,8 @@ fn run_starts_past_what_a_beat_lists_are_skipped_and_results_wait() {
         "{}",
         carried.len()
     );
-    for run_id in &carried {
-        h.ack(run_id, "ACCEPTED");
+    for job_id in &carried {
+        h.ack(job_id, "ACCEPTED");
     }
     h.life.step();
     let next = beat(&h);
@@ -115,14 +119,14 @@ fn run_starts_past_what_a_beat_lists_are_skipped_and_results_wait() {
         "{} bytes",
         size(&next)
     );
-    assert_eq!(next.held.len(), LISTABLE - carried.len());
+    assert_eq!(next.jobs.len(), LISTABLE - carried.len());
     assert_eq!(
-        next.results[0].run_id,
+        next.jobs[0].job_id,
         wide(carried.len()),
         "the waiting one is next"
     );
-    let events = h.apply(vec![unfit_run(LISTABLE)]);
-    let said = names(&events);
+    assert!(next.jobs[0].result.is_some(), "and its result goes out");
+    let said = names(&h.start(unfit_spec(LISTABLE)));
     assert!(said[0].starts_with("refused "), "taken again: {said:?}");
 }
 

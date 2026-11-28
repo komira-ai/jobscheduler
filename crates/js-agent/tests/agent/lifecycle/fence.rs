@@ -1,7 +1,7 @@
 //! The fence of a job start, the job id with the allocation id: a start whose fence is
-//! retired runs nothing and books nothing, the same job under a new allocation runs, a run
-//! start is judged by its run id as before, and the fences retired by a stop or a silence
-//! are in the state root before the stop is reported and survive a restart.
+//! retired runs nothing and books nothing, the same job under a new allocation runs, and
+//! the fences retired by a stop or a silence are in the state root before the stop is
+//! reported and survive a restart.
 
 use std::fs;
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use js_agent::lifecycle::{Clock, detail};
 use js_agent_wire::{Command, Outcome};
 use serde_json::{Value, json};
 
-use super::silence::{BOUND_MS, fenced, job_start, long_run, result_of};
+use super::silence::{BOUND_MS, fenced, job_start, result_of};
 use super::{Harness, names, reply_json};
 
 /// The retired list's file.
@@ -85,26 +85,6 @@ fn the_same_job_with_a_new_allocation_is_accepted() {
         assert_eq!(events, ["skipped j1 FenceRetired"], "{allocation}");
     }
     assert_eq!(created(&h).len(), 2);
-}
-
-/// Asserts that a run start, which carries no fence beyond its run id, is judged as before
-/// the fence: a run that ended is not run again under another lease id (`Retired`), nor is
-/// one stopped before its start, and a run whose id was never retired runs. It catches a
-/// fence check that reaches run starts and lets a finished run in under a new lease.
-#[test]
-fn a_start_without_a_fence_behaves_as_before() {
-    let mut h = Harness::new("fence-runs");
-    h.start(long_run("r1"));
-    h.fake.exit("r1", 0);
-    h.life.step();
-    h.ack("r1", "ACCEPTED");
-    let mut again = long_run("r1");
-    again.lease_id = "another-lease".to_owned();
-    assert_eq!(names(&h.start(again)), ["skipped r1 Retired"]);
-    assert!(h.stop("r2").is_empty());
-    assert_eq!(names(&h.start(long_run("r2"))), ["skipped r2 Retired"]);
-    assert_eq!(names(&h.start(long_run("r3"))), ["started r3"]);
-    assert_eq!(created(&h), ["r1", "r3"]);
 }
 
 /// Asserts that a stop retires the fence so that a late start never runs: a stop of a job

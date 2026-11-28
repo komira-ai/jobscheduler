@@ -1,30 +1,22 @@
-//! The usage of the leases through the job half: the worker samples the cgroup files on its
-//! own thread, once per heartbeat interval, and the session carries what it measured. The
-//! container runtime and the cgroup files are in memory and the clock is moved by the test;
-//! every wait on the worker is for an event (an order done), never for a time.
+//! The usage of the node through the job half: the worker samples the cgroup files on its
+//! own thread, once per heartbeat interval. The worker holds no run, so it names no lease to
+//! sample and the reading carries the node alone. The container runtime and the cgroup
+//! files are in memory and the clock is moved by the test; every wait on the worker is for
+//! an event (an order done), never for a time.
 
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use js_agent::Delivery;
 use js_agent::usage::Outbox;
-use js_agent::{Delivery, Drain, HEARTBEAT_PATH, Session};
-use js_agent_wire::{Command, HeartbeatReply};
-use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
 use super::{start_with_usage, starts};
-use crate::lifecycle::job;
-use crate::support::{Reply, Scratch, Script, Sent, beat_ok, hello, lowest, reply, welcome_with};
+use crate::support::Scratch;
 
 const SLICE: &str = "/sys/fs/cgroup/jobs.slice";
 const MEMORY: u64 = 100 << 20;
-
-/// The drain the sessions of these tests carry; none of them drains.
-const DRAIN: Drain = Drain {
-    wait: Duration::from_secs(10),
-    settle: Duration::from_secs(30),
-};
 
 /// The node's and `r1`'s cgroup files after `k` windows of 30 seconds in which each used one
 /// whole core.
@@ -48,123 +40,6 @@ fn counters(machine: &FakeMachine, k: u64) {
     machine
         .files
         .set(&format!("{SLICE}/cpu.max"), "max 100000\n");
-}
-
-/// The answer that starts `r1` with a wall-time limit of an hour, so that it is still
-/// running when the test is over.
-fn long_start() -> Value {
-    serde_json::to_value(long_reply()).unwrap()
-}
-
-/// The same answer as a value of the wire type.
-fn long_reply() -> HeartbeatReply {
-    let mut spec = job("r1");
-    spec.limits.wall_ms = 3_600_000;
-    HeartbeatReply {
-        commands: vec![Command::Start(Box::new(spec))],
-        ..HeartbeatReply::default()
-    }
-}
-
-/// The load of each heartbeat sent so far, `Null` for a beat without one.
-fn loads(sent: &Sent) -> Vec<Value> {
-    let sent = sent.borrow();
-    let beats = sent.iter().filter(|(path, _)| path == HEARTBEAT_PATH);
-    beats.map(|(_, body)| body["load"].clone()).collect()
-}
-
-/// A minute of `lease-r1` at one core, the memory these tests use.
-fn minute(index: u16) -> Value {
-    json!({
-        "lease_id": "lease-r1",
-        "minute": index,
-        "cpu_mean_millis": 1000,
-        "cpu_peak_window_millis": 1000,
-        "ws_max_bytes": MEMORY,
-    })
-}
-
-/// Asserts the whole path with a worker and a session: the beats carry the load the worker
-/// sampled, with the node's counters, the clock of the lease and, from the second sample
-/// on, the lease as covered; `seq` rises by one for each sample; a beat that fails to send
-/// gives its minute back, the next beat carries it again, and the one after that does not
-/// (it carries only the minute closed since). It catches a sample that is never published,
-/// a sequence that skips, minutes lost with a failed send and minutes sent for ever.
-#[test]
-fn a_failed_send_requeues_and_the_next_beat_carries_the_minute_once() {
-    let dir = Scratch::new("jobs-usage-requeue");
-    let machine = FakeMachine::new();
-    machine.world.set_cgroup_base(SLICE);
-    counters(&machine, 0);
-    let outbox = Arc::new(Outbox::new());
-    let worker = start_with_usage(&dir, &machine, &outbox, Some(SLICE));
-    let down: Reply = Err("the server is down".to_owned());
-    let replies = vec![
-        welcome_with(1, 30_000, 90_000),
-        reply(200, long_start()),
-        beat_ok(),
-        beat_ok(),
-        down,
-        beat_ok(),
-        beat_ok(),
-    ];
-    let (mut script, sent) = Script::new(replies);
-    let mut session = Session::new(hello("h1"), &mut script, lowest())
-        .with_jobs(&worker, DRAIN)
-        .with_usage(outbox.clone());
-    let settle = || assert!(worker.handle().settle());
-
-    session.tick();
-    assert_eq!(outbox.window_usec(), 30_000_000);
-    session.tick();
-    settle();
-    session.tick();
-    for k in 1..=4 {
-        machine.clock.advance(30_000);
-        counters(&machine, k);
-        settle();
-        session.tick();
-    }
-
-    let loads = loads(&sent);
-    assert_eq!(loads.len(), 6);
-    assert_eq!(loads[0], Value::Null, "nothing was sampled yet");
-    assert_eq!(
-        loads[1],
-        json!({
-            "seq": 1,
-            "mono_usec": 0,
-            "cpu_usage_usec": 0,
-            "host_cpu_usec": 0,
-            "working_set_bytes": MEMORY,
-            "active_file_bytes": 0,
-            "actions_cpu_limited": false,
-            "clocks": [{ "lease_id": "lease-r1", "started_mono_usec": 0 }],
-        })
-    );
-    assert_eq!(loads[2]["seq"], 2);
-    assert_eq!(loads[2]["mono_usec"], 30_000_000);
-    assert_eq!(loads[2]["cpu_usage_usec"], 30_000_000);
-    assert_eq!(loads[2]["covered"], json!(["lease-r1"]));
-    assert_eq!(loads[2].get("minutes"), None);
-    let carried: Vec<(Value, Value, Value)> = loads[3..]
-        .iter()
-        .map(|load| {
-            (
-                load["seq"].clone(),
-                load["mono_usec"].clone(),
-                load["minutes"].clone(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        carried,
-        [
-            (json!(3), json!(60_000_000), json!([minute(0)])),
-            (json!(4), json!(90_000_000), json!([minute(0)])),
-            (json!(5), json!(120_000_000), json!([minute(1)])),
-        ]
-    );
 }
 
 /// Asserts that the worker samples only when the heartbeat interval has passed on its
@@ -205,44 +80,6 @@ fn the_worker_samples_once_per_window_on_its_own_thread() {
     );
 }
 
-/// Asserts that a lease that ends between two windows has its open minute closed and reported
-/// once in the next reading, and is then neither covered nor clocked: the worker samples it
-/// running for two windows, its container exits, and the reading of the next window carries
-/// its minute 0 and nothing of it beside. It catches an ended lease whose last minute is lost
-/// (the server never learns its tail) and one still reported as running.
-#[test]
-fn a_lease_that_ends_between_windows_has_its_open_minute_reported_once() {
-    let dir = Scratch::new("jobs-usage-ended");
-    let machine = FakeMachine::new();
-    machine.world.set_cgroup_base(SLICE);
-    counters(&machine, 0);
-    let outbox = Arc::new(Outbox::new());
-    let worker = start_with_usage(&dir, &machine, &outbox, Some(SLICE));
-    outbox.set_window(Duration::from_secs(30));
-    assert_eq!(worker.try_deliver(long_reply()), Delivery::Delivered);
-    assert!(worker.handle().settle());
-    let first = outbox.take().expect("the first window's reading");
-    let clocked: Vec<&str> = first.clocks.iter().map(|c| c.lease_id.as_str()).collect();
-    assert_eq!(clocked, ["lease-r1"]);
-    machine.clock.advance(30_000);
-    counters(&machine, 1);
-    assert!(worker.handle().settle());
-    let second = outbox.take().expect("the second window's reading");
-    assert_eq!(second.covered, ["lease-r1"]);
-    assert!(second.minutes.is_empty());
-
-    machine.world.exit("r1", 0);
-    assert!(worker.handle().settle());
-    machine.clock.advance(30_000);
-    counters(&machine, 2);
-    assert!(worker.handle().settle());
-    let ended = outbox.take().expect("the reading after the end");
-    let minutes = serde_json::to_value(&ended.minutes).unwrap();
-    assert_eq!(minutes, json!([minute(0)]));
-    assert!(ended.covered.is_empty());
-    assert!(ended.clocks.is_empty());
-}
-
 /// Asserts that without an actions control group nothing is sampled and the worker says why
 /// once: no file is read, the outbox stays empty, and the line names the flag. It catches a
 /// load made of files nobody pointed the agent at, and a silent absence.
@@ -264,49 +101,4 @@ fn without_an_actions_cgroup_nothing_is_sampled_and_the_worker_says_why() {
         1,
         "{lines:?}"
     );
-}
-
-/// Asserts that a lease whose control group the runtime could not give at its start is
-/// looked up again at the following windows: the worker says once that it is not known,
-/// does not say it again, and once the runtime can say, the lease is sampled (its baseline
-/// at that window, covered at the next). It catches a lease that stays unsampled for its
-/// whole life after one failed lookup, and a line in every window while it is missing.
-#[test]
-fn a_missing_control_group_is_looked_up_again_at_the_next_windows() {
-    let dir = Scratch::new("jobs-usage-late-cgroup");
-    let machine = FakeMachine::new();
-    counters(&machine, 0);
-    let outbox = Arc::new(Outbox::new());
-    outbox.set_window(Duration::from_secs(30));
-    let worker = start_with_usage(&dir, &machine, &outbox, Some(SLICE));
-    let said = |worker: &js_agent::Worker| {
-        let lines = worker.take_lines();
-        lines
-            .iter()
-            .filter(|line| line.contains("control group"))
-            .count()
-    };
-
-    assert_eq!(worker.try_deliver(long_reply()), Delivery::Delivered);
-    assert!(worker.handle().settle());
-    assert_eq!(said(&worker), 1, "told once that it is not known");
-    let first = outbox.take().unwrap();
-    assert_eq!(first.seq, 1);
-    assert_eq!(first.clocks.len(), 1, "the lease is named, not sampled");
-
-    machine.clock.advance(30_000);
-    assert!(worker.handle().settle());
-    assert_eq!(said(&worker), 0, "not told again while it is still missing");
-    assert!(outbox.take().is_some());
-
-    machine.world.set_cgroup_base(SLICE);
-    for k in 1..=2 {
-        machine.clock.advance(30_000);
-        counters(&machine, k);
-        assert!(worker.handle().settle());
-        let load = outbox.take().unwrap();
-        let covered = load.covered.len();
-        assert_eq!(covered, usize::from(k == 2), "window {k}");
-    }
-    assert_eq!(said(&worker), 0, "nothing more once it is found");
 }

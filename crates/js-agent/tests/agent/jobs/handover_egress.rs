@@ -391,7 +391,11 @@ fn an_update_under_an_egress_ceiling_leaves_the_wiring_and_the_next_agent_adopts
         )
     );
     assert!(
-        rig.worker.snapshot().results.is_empty(),
+        rig.worker
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.result.is_none()),
         "both acknowledged"
     );
     let log = fs::read_to_string(node.dir.path().join("calls")).expect("calls");

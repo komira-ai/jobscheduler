@@ -6,24 +6,23 @@ use js_agent_wire::{Command, HeartbeatReply, JobUsage, Taint};
 use crate::health::one_line;
 use crate::lifecycle::{Event, JobBooking, Lifecycle};
 
-/// A reply that stops every run and every job `life` holds.
+/// A reply that stops every job `life` holds.
 pub(super) fn stops(life: &Lifecycle) -> HeartbeatReply {
-    let runs = life
-        .held()
+    let commands = life
+        .held_jobs()
         .into_iter()
-        .map(|run| Command::Stop { run_id: run.run_id });
-    let jobs = life.held_jobs().into_iter().map(|job| Command::JobStop {
-        job_id: job.job_id,
-        reason: None,
-    });
-    let commands = runs.chain(jobs).collect();
+        .map(|job| Command::JobStop {
+            job_id: job.job_id,
+            reason: None,
+        })
+        .collect();
     HeartbeatReply {
         commands,
         ..HeartbeatReply::default()
     }
 }
 
-/// `reply` with each `Start` and `JobStart` made an unknown command (so the places of the
+/// `reply` with each `JobStart` made an unknown command (so the places of the
 /// others, which a refusal is logged by, stay), and a line for each.
 pub(super) fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
     let mut lines = Vec::new();
@@ -31,13 +30,6 @@ pub(super) fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<
         .commands
         .into_iter()
         .map(|command| match command {
-            Command::Start(spec) => {
-                lines.push(format!(
-                    "draining: the start of {} is not taken",
-                    spec.run_id
-                ));
-                Command::Unknown
-            }
             Command::JobStart(spec) => {
                 lines.push(format!(
                     "draining: the start of job {} is not taken",

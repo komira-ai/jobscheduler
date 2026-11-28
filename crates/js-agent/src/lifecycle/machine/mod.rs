@@ -1,9 +1,9 @@
-//! The state machine: one [`Job`] per run the agent holds, moved by the commands of a
+//! The state machine: one [`Job`] per job the agent holds, moved by the commands of a
 //! reply ([`Lifecycle::apply`]) and by the passing of time ([`Lifecycle::step`]).
 //!
 //! The jobs and what they book are in `job`, a restart in `adopt`, the end of a job
 //! (watching its container and the cleanup in order) in `cleanup`, the stop after a
-//! silence of the server in `silence`, the mount providers a start waits on and a run
+//! silence of the server in `silence`, the mount providers a start waits on and a job
 //! releases in `providing` and `provided`, and what a heartbeat carries in `listing`.
 
 mod adopt;
@@ -30,18 +30,17 @@ mod timeline;
 mod vm;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
-    RunResult, StartSizing, Taint, limits, refusal,
+    Ack, Command, HeartbeatReply, Isolation, JobSpec, NativeSpec, Outcome, StartSizing, Taint,
+    limits, refusal,
 };
 use js_types::JobNetwork;
 
 pub use self::exclusive::{Quiet, Restored};
 use self::held::Records;
-use self::job::{Given, Job, Keyed, Retired, Stage, Stuck, blind_taint, host_taint};
+use self::job::{Given, Job, Retired, Stage, Stuck, blind_taint, host_taint};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::hold;
@@ -53,35 +52,20 @@ use super::{
 };
 use crate::quota::QuotaError;
 
-/// How many fences of finished or stopped work the agent remembers (a run id, or a job id
-/// with its allocation id), so a late or repeated start for one of them runs nothing. The
+/// How many fences of finished or stopped work the agent remembers (a job id with its
+/// allocation id), so a late or repeated start for one of them runs nothing. The
 /// oldest is forgotten first; a start for work older than the last [`RETIRED_CAP`] is the
 /// server's to stop sending.
 pub const RETIRED_CAP: usize = limits::MAX_HELD;
 
-/// The most jobs the wire lets a heartbeat list. What the agent holds is bounded tighter,
-/// by the bytes of the listing (`listing`), wherever a job is added: a start, a container
-/// taken over, a result read back. A job carries at most one result, so the results stay
-/// within the wire limit as well.
+/// The most jobs the wire lets a heartbeat list, each in its `jobs`. What the agent holds is
+/// bounded tighter, by the bytes of the listing (`listing`), wherever a job is added: a
+/// start, a container taken over, a result read back. A job carries at most one result, so
+/// the results stay within the wire limit as well.
 const MAX_JOBS: usize = limits::MAX_HELD;
 const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
 
-/// A run that is running, as far as its usage is concerned.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunningLease {
-    /// The lease the run belongs to.
-    pub lease_id: String,
-    /// The container's control group directory, when the runtime could say.
-    pub cgroup: Option<PathBuf>,
-    /// When the container started, on the agent's monotonic clock in microseconds, to the
-    /// millisecond. `None` for an adopted run that started before the clock began.
-    pub started_usec: Option<u64>,
-    /// The run was taken over from an earlier process of the agent, so the minutes before
-    /// the takeover were never seen.
-    pub adopted: bool,
-}
-
-/// How many slots the agent has: one for each run it can hold. A slot's container user is
+/// How many slots the agent has: one for each job it can hold. A slot's container user is
 /// the base of `--container-user` plus the slot, so the base plus this many must fit in the
 /// ids of a user namespace, which the agent checks when it starts.
 pub const SLOTS: u32 = MAX_JOBS as u32;
@@ -122,7 +106,7 @@ pub struct Lifecycle {
     checks: Box<dyn CheckHook>,
     clock: Box<dyn Clock>,
     jobs: Vec<Job>,
-    /// Containers no job stands for that could not be removed; not held runs.
+    /// Containers no job stands for that could not be removed; not held jobs.
     stuck: Vec<Stuck>,
     retired: Retired,
     /// The files in the state root that keep the held results and the retired list.
@@ -200,8 +184,8 @@ impl Lifecycle {
     }
 
     /// Acts on a heartbeat reply: validates it as the wire demands, starts what can be
-    /// started, stops what is to be stopped and drops the results the server
-    /// acknowledged. A command that fails validation is skipped and reported; the commands
+    /// started, stops what is to be stopped and drops the results the server acknowledged
+    /// (`job_acks`). A reply's `result_acks` are not read: no result is held under one. A command that fails validation is skipped and reported; the commands
     /// beside it still count.
     pub fn apply(&mut self, reply: &HeartbeatReply) -> Vec<Event> {
         let received = self.clock.now_ms();
@@ -209,9 +193,9 @@ impl Lifecycle {
     }
 
     /// [`Lifecycle::apply`] for a reply that arrived at `received` on the lifecycle's clock
-    /// (milliseconds, [`Clock::now_ms`]): a start's `valid_for_ms` is counted from then, so
-    /// a reply that waited for a worker busy with a slow runtime call is not given the time
-    /// it spent waiting.
+    /// (milliseconds, [`Clock::now_ms`]): a start's timeline counts its wait from then, so
+    /// a reply that waited for a worker busy with a slow runtime call shows the time it
+    /// spent waiting.
     pub fn apply_at(&mut self, reply: &HeartbeatReply, received: u64) -> Vec<Event> {
         self.apply_reply(reply, received, true)
     }
@@ -222,6 +206,28 @@ impl Lifecycle {
     /// hold the last heartbeat's reply granted.
     pub fn apply_commands_at(&mut self, reply: &HeartbeatReply, received: u64) -> Vec<Event> {
         self.apply_reply(reply, received, false)
+    }
+
+    /// Starts `spec`, the start that is not on the wire. Nothing in the agent calls it: no
+    /// server sends a start of a [`JobSpec`], and a job start comes through [`Lifecycle::apply`].
+    /// It is the one way the features that only a [`JobSpec`] carries (the legacy native body
+    /// and bundle, the legacy mount roots, labels and pids) are reached, by their tests, until
+    /// they are deleted (komira-ai/jobscheduler#1247). It is started exactly as a job
+    /// start is: keyed by job (its `run_id` is the job id and its `lease_id` the allocation
+    /// id), listed in [`Lifecycle::held_jobs`] with its result inside, acknowledged by
+    /// `job_acks`, stopped by a `JobStop`, and fenced by its job id with its allocation id.
+    /// It gives the start nothing a `JobStartSpec` adds beyond the [`JobSpec`] (no
+    /// environment, no live-log sink, not a VM, no host ports, no layers or mounts of a job's
+    /// file system, no placement time, no Xcode, no sizing). The start is received at the
+    /// lifecycle's clock now. The jobs are then swept and the held results written down, as
+    /// [`Lifecycle::apply`] does, and the events are returned.
+    pub fn start_spec(&mut self, spec: &JobSpec) -> Vec<Event> {
+        let received = self.clock.now_ms();
+        let mut events = Vec::new();
+        self.start(spec, received, &mut events);
+        self.sweep();
+        self.persist_held(&mut events);
+        events
     }
 
     /// The body of [`Lifecycle::apply_at`]; `whole` is whether the reply speaks for the
@@ -236,28 +242,19 @@ impl Lifecycle {
                 code: refused.error.code(),
             })
             .collect();
-        // The lease is followed before the commands, so a `Start` in the reply that grants
+        // The lease is followed before the commands, so a start in the reply that grants
         // an exclusive lease is judged against it.
         if whole && checked.exclusive.is_ok() {
             self.follow(reply.exclusive.as_deref());
         }
         for command in &checked.commands {
             match command {
-                Command::Start(spec) => self.start((spec, Keyed::Run), received, &mut events),
-                Command::Stop { run_id } => self.stop(run_id, false),
-                Command::Cancel { run_id } => self.stop(run_id, true),
                 Command::JobStart(spec) => self.start_job(spec, received, &mut events),
                 Command::JobStop { job_id, reason } => {
                     self.stop_job(job_id, *reason, &mut events);
                 }
                 Command::Unknown => {}
             }
-        }
-        if checked.acks.is_ok() {
-            reply
-                .result_acks
-                .iter()
-                .for_each(|ack| self.acknowledge(ack));
         }
         if checked.job_acks.is_ok() {
             reply
@@ -331,48 +328,12 @@ impl Lifecycle {
         events
     }
 
-    /// The runs the agent holds, for the next heartbeat: adopted ones first, then in the
-    /// order they started. A run is listed until its container and scratch are gone and
-    /// its result is acknowledged. A job a job start began is not a run and is not here
-    /// ([`Lifecycle::held_jobs`]).
-    pub fn held(&self) -> Vec<HeldRun> {
-        self.keyed(Keyed::Run)
-            .map(|job| HeldRun {
-                run_id: job.run_id.clone(),
-                state: job.held_state(),
-            })
-            .collect()
-    }
-
-    /// The jobs of one keying, in the order of [`Lifecycle::held`].
-    fn keyed(&self, keyed: Keyed) -> impl Iterator<Item = &Job> {
-        self.jobs.iter().filter(move |job| job.keyed == keyed)
-    }
-
-    /// The runs that are running, one for each lease (a second run of a lease already named
-    /// is left out), in the order of [`Lifecycle::held`]. A job a job start began has no
-    /// lease and is not sampled per lease, so it is not here.
-    pub fn running(&self) -> Vec<RunningLease> {
-        let mut named = BTreeSet::new();
-        let running = self
-            .keyed(Keyed::Run)
-            .filter(|job| matches!(job.stage, Stage::Running(_)));
-        running
-            .filter(|job| named.insert(job.lease_id.as_str()))
-            .map(|job| RunningLease {
-                lease_id: job.lease_id.clone(),
-                cgroup: job.cgroup.clone(),
-                started_usec: job.started_usec,
-                adopted: job.adopted,
-            })
-            .collect()
-    }
-
-    /// Asks the runtime again for the control group of each run that is running, was
-    /// started by this process and has none yet; the usage of a lease with no control group
-    /// is not sampled, and a runtime that could not say once (a container it had just
-    /// started) may say later. Returns one line for each run that is still without, the
-    /// first time only. Adopted runs are left alone: they are never sampled.
+    /// Asks the runtime again for the control group of each job that is running, was
+    /// started by this process and has none yet: a runtime that could not say once (a
+    /// container it had just started) may say later. Returns one line for each job that is
+    /// still without, the first time only. Adopted jobs are left alone. The group is what
+    /// the post-job checks read; the per-lease usage sampler it once fed has no lease to
+    /// sample, since no run is held (komira-ai/jobscheduler#1247 deletes it).
     pub fn find_cgroups(&mut self) -> Vec<String> {
         let mut lines = Vec::new();
         for job in &mut self.jobs {
@@ -393,20 +354,6 @@ impl Lifecycle {
             }
         }
         lines
-    }
-
-    /// The results of runs the server has not acknowledged that the next heartbeat carries:
-    /// oldest first, as many as fit the body beside what else it lists (`listing`); the
-    /// others wait for a later heartbeat. The result of a job a job start began is in its
-    /// listing ([`Lifecycle::held_jobs`]).
-    pub fn results(&self) -> Vec<RunResult> {
-        let fit = self.fit();
-        self.jobs
-            .iter()
-            .zip(fit.carried)
-            .filter(|(job, carried)| job.keyed == Keyed::Run && *carried)
-            .filter_map(|(job, _)| job.result.clone())
-            .collect()
     }
 
     /// The slots held by a run that has not passed its cleanup.
@@ -477,54 +424,27 @@ impl Lifecycle {
         }
     }
 
-    fn acknowledge(&mut self, ack: &ResultAck) {
-        self.drop_result((Keyed::Run, &ack.run_id), ack.ack);
-    }
-
-    /// Drops the result of the job of `keyed` named `id` on a verdict the agent knows; an
-    /// unknown verdict keeps it, to be sent again.
-    fn drop_result(&mut self, (keyed, id): (Keyed, &str), ack: Ack) {
+    /// Drops the result of the job named `id` on a verdict the agent knows; an unknown
+    /// verdict keeps it, to be sent again.
+    fn drop_result(&mut self, id: &str, ack: Ack) {
         if ack == Ack::Unknown {
             return;
         }
         self.jobs
             .iter_mut()
-            .filter(|job| job.keyed == keyed && job.run_id == id)
+            .filter(|job| job.run_id == id)
             .for_each(|job| job.result = None);
     }
 
-    /// Stops (or, `silent`, cancels) the run `run_id`. Its id is retired at once, with the
-    /// lease of a run the agent holds, so the list in the state root names it before the
-    /// stop is reported and a restart does not run it again.
-    fn stop(&mut self, run_id: &str, silent: bool) {
-        let held = self
-            .jobs
-            .iter_mut()
-            .find(|job| job.keyed == Keyed::Run && job.run_id == run_id);
-        match held {
-            Some(job) => {
-                job.request_stop(silent);
-                self.retired.insert_with(&job.run_id, Some(&job.lease_id));
-            }
-            None => self.retired.insert(run_id),
-        }
-    }
-
-    /// Whether a start may run now, and its mounts resolved when it may. `env` is the
-    /// environment of a job start, empty for a run start.
+    /// Whether a start may run now, and its mounts resolved when it may.
     ///
     /// A start must fit the machine (`limits-exceed-shape`) and what is free of it
     /// (`no-capacity`). What is free is the offer less the bookings of the jobs held, in disk,
-    /// GPUs and slots for every start, and in CPU and memory for a run start only. A job start
-    /// (keyed by job id) was placed by the job service, which packs a host by measured load
-    /// within its CPU slack and books each job its peak: its CPU and memory are the job
-    /// service's to judge, one rule for both, and the agent sums neither. Its CPU is not
-    /// limited, and its memory is a booking, not a limit: its lease has no `memory.max`.
-    fn admit(
-        &self,
-        (spec, keyed): (&JobSpec, Keyed),
-        given: &Given,
-    ) -> Result<Vec<ResolvedMount>, Refusal> {
+    /// GPUs and slots. A job was placed by the job service, which packs a host by measured
+    /// load within its CPU slack and books each job its peak: its CPU and memory are the job
+    /// service's to judge, and the agent sums neither. Its CPU is not limited, and its memory
+    /// is a booking, not a limit: its lease has no `memory.max`.
+    fn admit(&self, spec: &JobSpec, given: &Given) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
@@ -600,11 +520,7 @@ impl Lifecycle {
             ));
         }
         let used = self.booked();
-        // The job service's placement judged a job start's CPU and memory.
-        let placed = keyed == Keyed::Job;
         let room = [
-            placed || want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
-            placed || want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
             disk <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             spec.gpu_indices.iter().all(|gpu| !used.gpus.contains(gpu)),
             self.slots.has_room(),
@@ -734,15 +650,8 @@ impl Lifecycle {
     }
 
     /// Answers a start `failed_to_start` with `wire` as the detail, having created nothing.
-    fn refuse(
-        &mut self,
-        (spec, keyed): (&JobSpec, Keyed),
-        wire: &'static str,
-        why: String,
-        events: &mut Vec<Event>,
-    ) {
+    fn refuse(&mut self, spec: &JobSpec, wire: &'static str, why: String, events: &mut Vec<Event>) {
         let mut job = Job::of(spec, Stage::Freed, 0, None, 0);
-        job.keyed = keyed;
         job.result = Some(job.report(Outcome::FailedToStart, None, Some(wire)));
         self.jobs.push(job);
         events.push(Event::Refused {
@@ -865,57 +774,27 @@ impl Lifecycle {
         }
     }
 
-    /// Starts the run `spec` names, or the job a job start names (`keyed`; see `per_job`).
-    fn start(&mut self, (spec, keyed): (&JobSpec, Keyed), received: u64, events: &mut Vec<Event>) {
-        if self.may_start((spec, keyed), received, events) {
-            self.admit_and_start((spec, keyed), &Given::default(), received, events);
+    /// Starts the job `spec` stands for, if it may start now.
+    fn start(&mut self, spec: &JobSpec, received: u64, events: &mut Vec<Event>) {
+        if self.may_start(spec, events) {
+            self.admit_and_start(spec, &Given::default(), received, events);
         }
     }
 
-    /// Whether a start is new work this agent may take on: not late, not held (a start of
-    /// held work changes nothing; one that names held work of the other keying is a clash),
-    /// not retired (a run start by its run id, `Skip::Retired`; a job start by its fence,
-    /// the job id with the allocation id, `Skip::FenceRetired`), and not beyond the jobs a
-    /// heartbeat can list. A start that may not is skipped, with an event when that is
-    /// worth a line. Nothing is booked or made before this has passed.
-    fn may_start(
-        &mut self,
-        (spec, keyed): (&JobSpec, Keyed),
-        received: u64,
-        events: &mut Vec<Event>,
-    ) -> bool {
+    /// Whether a start is new work this agent may take on: not held (a start of held work
+    /// changes nothing), not retired (its fence, the job id with the allocation id,
+    /// `Skip::FenceRetired`), and not beyond the jobs a heartbeat can list. A start that may
+    /// not is skipped, with an event when that is worth a line. Nothing is booked or made
+    /// before this has passed.
+    fn may_start(&mut self, spec: &JobSpec, events: &mut Vec<Event>) -> bool {
         let run_id = &spec.run_id;
-        let waited = self.clock.now_ms().saturating_sub(received);
-        let late = spec.valid_for_ms != 0 && waited > spec.valid_for_ms;
-        if late {
-            events.push(Event::Skipped {
-                run_id: run_id.clone(),
-                why: Skip::Stale,
-            });
+        if self.jobs.iter().any(|job| &job.run_id == run_id) {
             return false;
         }
-        if let Some(held) = self.jobs.iter().find(|job| &job.run_id == run_id) {
-            // The same id under the other keying is another piece of work that would share
-            // this one's scratch directory and labels: it is not started.
-            if held.keyed != keyed {
-                events.push(Event::Skipped {
-                    run_id: run_id.clone(),
-                    why: Skip::Clash,
-                });
-            }
-            return false;
-        }
-        let retired = match keyed {
-            Keyed::Run => self.retired.contains(run_id).then_some(Skip::Retired),
-            Keyed::Job => {
-                let fenced = self.retired.fenced(run_id, &spec.lease_id);
-                fenced.then_some(Skip::FenceRetired)
-            }
-        };
-        if let Some(why) = retired {
+        if self.retired.fenced(run_id, &spec.lease_id) {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
-                why,
+                why: Skip::FenceRetired,
             });
             return false;
         }
@@ -930,12 +809,11 @@ impl Lifecycle {
     }
 
     /// Admits a start [`Lifecycle::may_start`] let through and starts it, or refuses it.
-    /// `given` is what a job start gives its run (nothing for a run start): the environment
-    /// its container is given ([`RunSpec::env`](crate::lifecycle::RunSpec::env)) and its
+    /// `given` is what the start gives its run: the environment its container is given ([`RunSpec::env`](crate::lifecycle::RunSpec::env)) and its
     /// live-log sink.
     fn admit_and_start(
         &mut self,
-        (spec, keyed): (&JobSpec, Keyed),
+        spec: &JobSpec,
         given: &Given,
         received: u64,
         events: &mut Vec<Event>,
@@ -946,12 +824,12 @@ impl Lifecycle {
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit((spec, keyed), given)
+            .admit(spec, given)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
-                self.refuse((spec, keyed), wire, why, events);
+                self.refuse(spec, wire, why, events);
                 return;
             }
         };
@@ -971,7 +849,7 @@ impl Lifecycle {
         let slot = match self.take_slot(run_id, events) {
             Ok(slot) => slot,
             Err((wire, why)) => {
-                self.refuse((spec, keyed), wire, why, events);
+                self.refuse(spec, wire, why, events);
                 return;
             }
         };
@@ -984,6 +862,6 @@ impl Lifecycle {
             self.sizing.insert(run_id.clone(), sizing.clone());
         }
         let made = (mounts, slot, booked);
-        self.prepare_or_begin((spec, keyed), given, made, received, events);
+        self.prepare_or_begin(spec, given, made, events);
     }
 }

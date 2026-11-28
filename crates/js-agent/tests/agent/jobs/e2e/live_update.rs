@@ -110,7 +110,8 @@ fn finish(rig: Rig, jobs: &[&String]) {
     assert!(rig.worker.settle());
     rig.tick();
     rig.tick();
-    assert!(rig.worker.snapshot().results.is_empty(), "acknowledged");
+    let jobs = rig.worker.snapshot().jobs;
+    assert!(jobs.iter().all(|job| job.result.is_none()), "acknowledged");
     let ran = rig.agent.stop();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }

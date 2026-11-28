@@ -11,7 +11,7 @@ use js_agent::lifecycle::{
     Clock, Event, Found, Lifecycle, NoChecks, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
     Status, Ticket,
 };
-use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, Mount, Outcome};
+use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome};
 
 use super::{LONG, Program, Shared, Subject, clean_up};
 
@@ -132,11 +132,7 @@ impl Rig {
 
     /// Starts `spec`; the events as short texts.
     fn start(&mut self, spec: JobSpec) -> Vec<String> {
-        let reply = HeartbeatReply {
-            commands: vec![Command::Start(Box::new(spec))],
-            ..HeartbeatReply::default()
-        };
-        names(&self.life.apply(&reply))
+        names(&self.life.start_spec(&spec))
     }
 
     /// The log, and empties it.
@@ -184,7 +180,6 @@ fn job(s: &mut dyn Subject, run_id: &str, program: Program, wall_ms: u64) -> Job
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: 0,
         bundle: None,
         native: None,
         network: Default::default(),
@@ -215,7 +210,11 @@ fn past_its_wall_time(
     assert!(rig.taken().is_empty());
     rig.clock.advance(1);
     assert_eq!(names(&rig.life.step())[0], "result r1");
-    let outcome = rig.life.results()[0].outcome;
+    let outcome = rig.life.held_jobs()[0]
+        .result
+        .as_ref()
+        .expect("a result")
+        .outcome;
     let log = rig.taken();
     clean_up(s);
     (log, outcome)

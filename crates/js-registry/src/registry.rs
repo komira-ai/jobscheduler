@@ -88,7 +88,7 @@ pub struct HostView {
     /// cannot tell, and a scaler must not read silence there as a failed boot.
     pub heard_since_hello: bool,
     /// Whether the host's last hello or heartbeat listed a run (`held`): a run of the
-    /// previous release's lease protocol, which the registry answers with a cancel, so the
+    /// previous release's lease protocol, which the registry answers with nothing, so the
     /// host is not yet clear of it.
     pub releasing: bool,
     /// The taint the host reported, once it has: it can no longer be trusted clean, so it
@@ -418,8 +418,8 @@ impl Registry {
     /// that counts: the pool would book nothing for jobs the host books at its default.
     ///
     /// The runs a hello lists as held (the previous release's lease protocol) are never
-    /// adopted: each is answered with a cancel in the host's next heartbeat reply (a
-    /// welcome carries no commands).
+    /// adopted, and no heartbeat reply carries a command for them (a welcome carries no
+    /// commands either).
     pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
         let admission = self.judge_hello(hello, credential, false)?;
         Ok(self.take_hello(admission))
@@ -465,11 +465,9 @@ impl Registry {
     /// session only as far as the transport does, and a pool-token holder can still
     /// take an id over with a hello, as [`Registry::hello`] says.
     ///
-    /// The reply is the one for a previous release's agent that still keys its work by run
-    /// ([`beat::answer`]): a cancel for each run the heartbeat lists as held, at most
-    /// [`js_agent_wire::limits::MAX_COMMANDS`], and an `UnknownLease` acknowledgement for
-    /// each result it carries; nothing is queued for it. The job half of the reply is added
-    /// by the transport.
+    /// The reply carries no command and no result acknowledgement, whatever held runs and
+    /// results the heartbeat lists ([`beat::answer`]); nothing is queued for the host. The
+    /// job half of the reply is added by the transport.
     ///
     /// **Taint.** The first taint report a host sends is kept, and the reply says
     /// `taint_ack` whenever the heartbeat carries one, and `taint_cleared_ack` whenever it

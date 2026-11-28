@@ -83,12 +83,12 @@
 //! A session given a [`Worker`] ([`Session::with_jobs`]) carries what the worker holds. It
 //! never calls the container runtime and never waits for the worker:
 //!
-//! - Every heartbeat carries the worker's published [`Snapshot`]: the held runs, the
-//!   results not yet acknowledged, the jobs a job start began (with their results) and the
-//!   retired job ids, the taint to report, and whether the host is tainted at all (`tainted`,
-//!   which the server reads as the agent's word that it holds none when it is false). Every
-//!   hello carries the held runs as its held list, so a server that restarted learns what the
-//!   agent still runs. A new epoch keeps the worker and everything it holds.
+//! - Every heartbeat carries the worker's published [`Snapshot`]: the jobs a job start began
+//!   (with their results) and the retired job ids, the taint to report, and whether the host
+//!   is tainted at all (`tainted`, which the server reads as the agent's word that it holds
+//!   none when it is false). The heartbeat's `held` and `results` lists, and the hello's
+//!   `held` list, are always empty: they are fields an older server reads, and this agent
+//!   holds no run keyed by a lease. A new epoch keeps the worker and everything it holds.
 //! - Every accepted reply that says anything (a command, an acknowledgement of a result or
 //!   a retired job id, a `taint_ack`) is handed to the worker, which checks it as a whole
 //!   and acts on each command in order; a command it refuses is logged by its place in the
@@ -609,15 +609,16 @@ impl<'a> Session<'a> {
         self.jobs.as_ref().map(|jobs| jobs.drain)
     }
 
-    /// Whether the worker holds a run or a result the server has not acknowledged.
+    /// Whether the worker holds a job, a result or a retired job id the server has not
+    /// acknowledged.
     pub fn jobs_left(&self) -> bool {
         self.jobs
             .iter()
             .any(|jobs| !jobs.worker.snapshot().is_empty())
     }
 
-    /// Whether a drain still waits: the worker holds something a wait can see end, a run or
-    /// job that is not `Blocked` ([`Snapshot::blocked`]), a result or a retired job id.
+    /// Whether a drain still waits: the worker holds something a wait can see end, a job that
+    /// is not `Blocked` ([`Snapshot::blocked`]), a job's result or a retired job id.
     pub fn drain_left(&self) -> bool {
         self.jobs
             .iter()
@@ -665,14 +666,10 @@ impl<'a> Session<'a> {
     }
 
     fn hello_message(&self) -> Result<Value, ValidationError> {
-        let mut hello = self.hello.clone();
-        let held = self.jobs.as_ref().map(|jobs| jobs.worker.snapshot().held);
-        if let Some(held) = held {
-            hello.held = held;
-        }
+        let hello = &self.hello;
         hello
             .validate()
-            .map(|()| serde_json::to_value(&hello).unwrap_or_default())
+            .map(|()| serde_json::to_value(hello).unwrap_or_default())
     }
 
     /// Sends a heartbeat carrying the outbox's load, and tells the outbox how it went.
@@ -713,8 +710,8 @@ impl<'a> Session<'a> {
             epoch: live.epoch,
             session: live.secret.0.clone(),
             phase,
-            held: jobs.held,
-            results: jobs.results,
+            held: Vec::new(),
+            results: Vec::new(),
             taint: jobs.taint,
             taint_cleared: jobs.taint_cleared,
             tainted: jobs.tainted,

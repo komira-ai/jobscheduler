@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{heartbeat, job};
+use common::heartbeat;
 use js_agent_wire::{
     Ack, BookedResources, Command, Heartbeat, HeartbeatReply, HeldJob, HeldState, Hello, Isolation,
     JobResult, JobResultAck, JobStartSpec, LogGrant, LogGrantState, LogReport, LogSink, Outcome,
@@ -28,10 +28,15 @@ fn fixture(text: &str) -> Value {
 /// Asserts that every body of the previous release decodes with this version's types and
 /// passes their checks, that the new lists read as empty (a heartbeat has no `jobs` and no
 /// `retired_jobs`, a reply no `job_acks` and no `retired_acks`), that encoding the decoded
-/// body again gives the same JSON (nothing new is sent when it is empty), and that the
-/// previous hello reports no `per-job`. It catches a new field without a default, which
+/// hello and heartbeat again gives the same JSON (nothing new is sent when it is empty), and
+/// that the previous hello reports no `per-job`. The reply carries a `start`, a `stop` and a
+/// `cancel` and the acknowledgement `UNKNOWN_LEASE`: the frozen previous structs read the
+/// body as before, and this version reads the three commands as unknown commands, none
+/// refused, and the acknowledgement as `Unknown`, and encodes the decoded reply as the
+/// fixture with exactly those three commands written as `{"type":"unknown"}` and the
+/// acknowledgement written as `UNKNOWN`. It catches a new field without a default, which
 /// would make every deployed agent's heartbeat, or every deployed server's reply,
-/// unreadable.
+/// unreadable, and a run command or verdict of the previous release that is still acted on.
 #[test]
 fn previous_agent_wire_is_still_accepted_by_the_new_wire_types() {
     let hello: Hello = serde_json::from_value(fixture(HELLO)).unwrap();
@@ -55,10 +60,31 @@ fn previous_agent_wire_is_still_accepted_by_the_new_wire_types() {
         (checked.acks, checked.job_acks, checked.retired_acks),
         (Ok(()), Ok(()), Ok(()))
     );
-    assert!(matches!(&reply.commands[0], Command::Start(spec) if spec.run_id == "run-1"));
+    assert_eq!(reply.commands, vec![Command::Unknown; 3]);
+    assert_eq!(reply.result_acks.len(), 1);
+    assert_eq!(reply.result_acks[0].run_id, "r1");
+    assert_eq!(reply.result_acks[0].ack, Ack::Unknown);
     assert!(reply.job_acks.is_empty());
     assert!(reply.retired_acks.is_empty());
-    assert_eq!(serde_json::to_value(&reply).unwrap(), fixture(REPLY));
+    let mut expected = fixture(REPLY);
+    expected["commands"] = json!([{"type": "unknown"}, {"type": "unknown"}, {"type": "unknown"}]);
+    expected["result_acks"][0]["ack"] = json!("UNKNOWN");
+    assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
+
+    let old: previous::HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
+    assert_eq!(old.commands.len(), 3);
+    let previous::Command::Start(spec) = &old.commands[0] else {
+        panic!("the start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (spec.run_id.as_str(), spec.lease_id.as_str()),
+        ("run-1", "1-1")
+    );
+    assert!(spec.image.starts_with("ubuntu:24.04@sha256:"));
+    assert!(matches!(&old.commands[1], previous::Command::Stop { run_id } if run_id == "r1"));
+    assert!(matches!(&old.commands[2], previous::Command::Cancel { run_id } if run_id == "r2"));
+    assert_eq!(old.result_acks[0].ack, "UNKNOWN_LEASE");
+    assert!(old.taint_ack);
 }
 
 /// Asserts that a server of the previous release reads a heartbeat that reports a cleared
@@ -352,9 +378,8 @@ fn job_start(id: &str) -> Command {
 }
 
 /// Asserts the other direction: a reply of this version with a job start and a job stop
-/// around a start, a stop and a cancel decodes with the previous release's types, the two job
-/// commands as `Unknown` and the start and stop beside them intact, its `job_acks` and
-/// `retired_acks` ignored; and a heartbeat of this version that lists jobs and retired job
+/// decodes with the previous release's types, both as `Unknown`, its acknowledgement,
+/// `job_acks` and `retired_acks` read or ignored as that release read them; and a heartbeat of this version that lists jobs and retired job
 /// ids decodes there with its held runs and results as they are. It catches a new command
 /// that breaks the old enum (the whole reply lost, stops included) and a new field that an
 /// old server cannot skip.
@@ -363,16 +388,9 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
     let reply = HeartbeatReply {
         commands: vec![
             job_start("job-1"),
-            Command::Start(Box::new(job())),
             Command::JobStop {
                 job_id: "job-2".into(),
                 reason: None,
-            },
-            Command::Stop {
-                run_id: "r1".into(),
-            },
-            Command::Cancel {
-                run_id: "r2".into(),
             },
         ],
         result_acks: vec![ResultAck {
@@ -389,19 +407,9 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
     assert!(reply.validate().refused.is_empty());
     let wire = serde_json::to_value(&reply).unwrap();
     let old: previous::HeartbeatReply = serde_json::from_value(wire).unwrap();
-    assert_eq!(old.commands.len(), 5);
+    assert_eq!(old.commands.len(), 2);
     assert!(matches!(old.commands[0], previous::Command::Unknown));
-    let previous::Command::Start(spec) = &old.commands[1] else {
-        panic!("the start beside the job start is lost: {:?}", old.commands);
-    };
-    assert_eq!(
-        (spec.run_id.as_str(), spec.lease_id.as_str()),
-        ("run-1", "1-1")
-    );
-    assert!(spec.image.starts_with("ubuntu:24.04@sha256:"));
-    assert!(matches!(old.commands[2], previous::Command::Unknown));
-    assert!(matches!(&old.commands[3], previous::Command::Stop { run_id } if run_id == "r1"));
-    assert!(matches!(&old.commands[4], previous::Command::Cancel { run_id } if run_id == "r2"));
+    assert!(matches!(old.commands[1], previous::Command::Unknown));
     assert_eq!(old.result_acks.len(), 1);
     assert_eq!(
         (

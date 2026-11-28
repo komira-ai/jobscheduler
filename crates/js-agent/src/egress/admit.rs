@@ -105,7 +105,6 @@ mod tests {
             isolation: Isolation::Contained,
             labels: std::collections::BTreeMap::new(),
             heartbeat_seq: 0,
-            valid_for_ms: 0,
             bundle: None,
             run: None,
             os: None,

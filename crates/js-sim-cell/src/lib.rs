@@ -9,12 +9,13 @@
 //!
 //! - [`observe`]: the facts. What the client driver heard about each unit of work and
 //!   what it asked for ([`ClientEvent`], [`Ask`]), the ground truth of each agent
-//!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
-//!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
-//!   process, the processes it killed ([`Killed`]), and the server's list of hosts
-//!   ([`ServerView`]), gathered at one virtual time into [`Observations`]. The ledger also keeps what the
-//!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
-//!   [`StartSeen`], [`StopSeen`]).
+//!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]), which
+//!   outlives any agent process, the processes it killed ([`Killed`]), and the server's
+//!   list of hosts ([`ServerView`]), gathered at one virtual time into [`Observations`].
+//!   The ledger also keeps what the agents sent for the whole-host handshake
+//!   ([`ReadyReport`]). Completions ([`Completion`]), verdicts ([`Acked`]), starts
+//!   ([`StartSeen`]) and stops ([`StopSeen`]) of runs are entries a test writes into the
+//!   observations by hand: no agent holds a run.
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
 //!   step and once at the end, and the one-line [`Violation`] it reports. Thirty-one
 //!   properties: no host booked past what it holds, no lease on two hosts and no host

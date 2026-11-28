@@ -61,9 +61,7 @@ fn a_run_whose_create_is_under_way_leaves_no_residue_for_a_run_that_ends() {
     assert!(!h.life.is_tainted());
     assert!(h.life.findings().is_empty());
     assert_eq!(h.life.busy_slots(), [1], "r1's slot is free, r2's is held");
-    let held: Vec<(String, HeldState)> = h
-        .life
-        .held()
+    let held: Vec<(String, HeldState)> = crate::lifecycle::held(&h.life)
         .into_iter()
         .map(|HeldRun { run_id, state }| (run_id, state))
         .collect();

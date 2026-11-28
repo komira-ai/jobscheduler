@@ -12,11 +12,11 @@ use js_agent::mac_accounts::Pool;
 use js_agent::native::{Journal, NativeConfig, NativeRuntime};
 use js_agent::usage::Outbox;
 use js_agent::{Delivery, Machine, Platform, Rescue, RuntimeBuild, SharedClock, Snapshot, Worker};
-use js_agent_wire::{Command, HeartbeatReply, HeldState, Outcome};
+use js_agent_wire::{HeartbeatReply, Outcome};
 
 use super::agent::backend;
-use super::lifecycle::job;
-use super::{FakeAccounts, FakeLauncher, POLLS, TERM, config, open_pool, pool_settings};
+use super::lifecycle::job_start;
+use super::{FakeAccounts, FakeLauncher, TERM, config, open_pool, pool_settings};
 use crate::jobs::fake::FakeMachine;
 use crate::jobs::{STEP_NEVER, acks, plan};
 use crate::support::Scratch;
@@ -75,14 +75,14 @@ fn over_accounts(dir: &Scratch) -> (OverAccounts, Arc<FakeAccounts>, Arc<FakeLau
     (machine, accounts, launcher)
 }
 
-/// Asserts the path of a native result through the worker: the start runs the program and
-/// the run is held as running; the program's exit is found by the worker's next step and
-/// published as a result with the exit code and what the program printed; the account the run
-/// was lent is retired (its record and home gone) and the scratch directory goes; an
-/// acknowledgement drops the run. It also asserts that a worker over the native backend says
-/// nothing at start of a load it cannot carry: the Mac host's counters are its load. It
-/// catches a native agent whose worker keeps a result from the server, or leaves the account,
-/// and one whose heartbeat still carries no load.
+/// Asserts the path of a native job's result through the worker: a job start the native
+/// runtime cannot serve (an image start, on a runtime with no bundle store) is held with a
+/// `FailedToStart` result carrying `image-unsupported-here`, the result stays in the
+/// worker's snapshot until an acknowledgement drops the job, and nothing is lent: no account
+/// and no run directory. It also asserts that a worker over the native backend says nothing
+/// at start of a load it cannot carry: the Mac host's counters are its load. It catches a
+/// native agent whose worker keeps a result from the server, or lends an account to a start
+/// it refuses, and one whose heartbeat still carries no load.
 #[test]
 fn a_native_result_stays_published_until_it_is_acknowledged() {
     let dir = Scratch::new("native-worker");
@@ -98,64 +98,29 @@ fn a_native_result_stays_published_until_it_is_acknowledged() {
         "{lines:?}"
     );
 
-    // The program waits for the gate file, then prints.
-    let gate = dir.path("gate");
-    let mut start = job("r1", "/bin/sh");
-    start.native.as_mut().unwrap().args = [
-        "-c",
-        "while [ ! -e \"$0\" ]; do :; done; echo done",
-        gate.to_str().unwrap(),
-    ]
-    .map(str::to_owned)
-    .to_vec();
     let start = HeartbeatReply {
-        commands: vec![Command::Start(Box::new(start))],
+        commands: vec![job_start("j1", &[])],
         ..HeartbeatReply::default()
     };
     assert_eq!(worker.try_deliver(start), Delivery::Delivered);
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
-    assert_eq!(snapshot.held.len(), 1);
-    assert_eq!(snapshot.held[0].state, HeldState::Running);
-    let lent = launcher.last();
-    let account = lent.var("USER").unwrap().to_owned();
-    assert!(accounts.records().contains(&account), "the account is lent");
-
-    std::fs::write(&gate, b"").unwrap();
-    for _ in 0..POLLS {
-        assert!(worker.handle().settle());
-        if !worker.snapshot().results.is_empty() {
-            break;
-        }
-        std::thread::yield_now();
-    }
-    let snapshot = worker.snapshot();
-    assert_eq!(snapshot.results.len(), 1, "the exit was never found");
-    assert_eq!(snapshot.results[0].outcome, Outcome::Succeeded);
-    assert_eq!(
-        snapshot.results[0].log_tail.as_ref().unwrap().stdout,
-        "done\n"
-    );
-    for _ in 0..POLLS {
-        if !accounts.records().contains(&account) {
-            break;
-        }
-        assert!(worker.handle().settle());
-        std::thread::yield_now();
-    }
-    assert!(
-        !accounts.records().contains(&account),
-        "the run's account is retired"
-    );
-    assert!(!dir.path("scratch").join("r1").exists());
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].job_id, "j1");
+    let result = snapshot.jobs[0].result.as_ref().expect("a result");
+    assert_eq!(result.outcome, Outcome::FailedToStart);
+    assert_eq!(result.detail.as_deref(), Some("image-unsupported-here"));
+    assert!(launcher.launched().is_empty(), "no supervisor");
+    assert!(accounts.records().is_empty(), "no account is lent");
+    assert!(!dir.path("scratch").join("j1").exists());
 
     assert_eq!(
-        worker.try_deliver(acks("r1", "ACCEPTED")),
+        worker.try_deliver(acks("j1", "ACCEPTED")),
         Delivery::Delivered
     );
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
-    assert!(snapshot.held.is_empty() && snapshot.results.is_empty());
+    assert!(snapshot.jobs.is_empty());
 }
 
 /// Asserts that a worker over the native backend drops the leases an earlier process left

@@ -7,14 +7,13 @@ use js_agent::{Delivery, LINES_CAP, QUEUE};
 use js_agent_wire::{Command, HeartbeatReply, HeldState, Outcome};
 
 use super::fake::{Build, FakeMachine, HANG_GUARD};
-use super::{STEP_NEVER, acks, plan, start, starts, stops};
-use crate::lifecycle::job;
+use super::{STEP_NEVER, acks, job_start, plan, start, starts, stops};
 use crate::support::Scratch;
 
-/// Asserts the path of a result through the worker: a start runs the container and the run
-/// is held as running; when the container exits the result is published and the run is
+/// Asserts the path of a result through the worker: a start runs the container and the job
+/// is held as running; when the container exits the result is published and the job is
 /// listed as exited, and the container and its scratch are gone; the result stays in the
-/// snapshot until an acknowledgement names it, and then the run is not held. It catches a
+/// snapshot until an acknowledgement names it, and then the job is not held. It catches a
 /// result that is dropped before the server acknowledged it, and one that is never
 /// published.
 #[test]
@@ -27,60 +26,30 @@ fn a_result_stays_published_until_it_is_acknowledged() {
     assert!(worker.handle().settle());
     assert_eq!(machine.world.created(), ["r1"]);
     let snapshot = worker.snapshot();
-    assert_eq!(snapshot.held.len(), 1);
-    assert_eq!(snapshot.held[0].state, HeldState::Running);
-    assert!(snapshot.results.is_empty());
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].state, HeldState::Running);
+    assert!(snapshot.jobs[0].result.is_none());
 
     machine.world.exit("r1", 0);
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
-    assert_eq!(snapshot.held[0].state, HeldState::ExitedUnacked);
-    assert_eq!(snapshot.results.len(), 1);
-    assert_eq!(snapshot.results[0].outcome, Outcome::Succeeded);
+    assert_eq!(snapshot.jobs[0].state, HeldState::ExitedUnacked);
+    let result = snapshot.jobs[0].result.as_ref().expect("the job's result");
+    assert_eq!(result.outcome, Outcome::Succeeded);
     assert_eq!(machine.world.alive(), 0, "the container is removed");
 
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().results.len(), 1, "no ack, no drop");
+    assert!(
+        worker.snapshot().jobs[0].result.is_some(),
+        "no ack, no drop"
+    );
     assert_eq!(
         worker.try_deliver(acks("r1", "ACCEPTED")),
         Delivery::Delivered
     );
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
-    assert!(snapshot.held.is_empty() && snapshot.results.is_empty());
-}
-
-/// Asserts that a reply that waits in the queue for a worker busy in a slow runtime call
-/// keeps the time it arrived: a start with a validity of one second that arrived while the
-/// worker was inside a call, and was applied five seconds later on the agent's clock, is
-/// stale and creates nothing. It catches a worker that counts `valid_for_ms` from the
-/// moment it gets to the reply, so a start that outlived its lease runs.
-#[test]
-fn a_start_that_waited_for_the_worker_is_stale() {
-    let dir = Scratch::new("jobs-worker-stale");
-    let machine = FakeMachine::new();
-    let worker = start(&dir, &machine);
-
-    machine.world.hold_creates();
-    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
-    machine.world.wait_entered(1);
-    let mut late = starts(&["r2"]);
-    if let Command::Start(spec) = &mut late.commands[0] {
-        spec.valid_for_ms = 1000;
-    }
-    assert_eq!(worker.try_deliver(late), Delivery::Delivered);
-    machine.clock.advance(5000);
-    machine.world.release();
-    assert!(worker.handle().settle());
-
-    assert_eq!(machine.world.created(), ["r1"], "r2 was stale on arrival");
-    let held: Vec<String> = worker
-        .snapshot()
-        .held
-        .into_iter()
-        .map(|r| r.run_id)
-        .collect();
-    assert_eq!(held, ["r1"]);
+    assert!(snapshot.jobs.is_empty());
 }
 
 /// Asserts that a worker whose queue is full drops the next reply and says so (`false`)
@@ -159,10 +128,10 @@ fn the_containers_of_an_earlier_process_are_held_at_start() {
     assert!(first.handle().settle());
 
     let second = start(&dir, &FakeMachine::of(&machine.world));
-    let held = second.snapshot().held;
+    let held = second.snapshot().jobs;
     assert_eq!(held.len(), 1);
     assert_eq!(
-        (held[0].run_id.as_str(), held[0].state),
+        (held[0].job_id.as_str(), held[0].state),
         ("r1", HeldState::Running)
     );
     let lines = second.take_lines();
@@ -191,11 +160,13 @@ fn a_worker_finds_an_exit_by_itself() {
         .expect("the worker starts");
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     let handle = worker.handle();
-    assert!(handle.wait_until(&|s| !s.held.is_empty(), HANG_GUARD));
-    assert!(!handle.wait_until(&|s| !s.results.is_empty(), Duration::from_millis(1)));
+    let ended = |s: &js_agent::Snapshot| s.jobs.iter().any(|j| j.result.is_some());
+    assert!(handle.wait_until(&|s| !s.jobs.is_empty(), HANG_GUARD));
+    assert!(!handle.wait_until(&ended, Duration::from_millis(1)));
     machine.world.exit("r1", 3);
-    assert!(handle.wait_until(&|s| !s.results.is_empty(), HANG_GUARD));
-    let result = &worker.snapshot().results[0];
+    assert!(handle.wait_until(&ended, HANG_GUARD));
+    let snapshot = worker.snapshot();
+    let result = snapshot.jobs[0].result.as_ref().expect("the job's result");
     assert_eq!(
         (result.outcome, result.exit_code),
         (Outcome::Failed, Some(3))
@@ -215,19 +186,21 @@ fn a_closed_worker_takes_no_start_and_still_stops() {
 
     worker.close();
     let mut both = starts(&["r2"]);
-    both.commands.push(Command::Stop {
-        run_id: "r1".to_owned(),
+    both.commands.push(Command::JobStop {
+        job_id: "r1".to_owned(),
+        reason: None,
     });
     assert_eq!(worker.try_deliver(both), Delivery::Delivered);
     assert!(worker.handle().settle());
 
     assert_eq!(machine.world.created(), ["r1"]);
-    let results = worker.snapshot().results;
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].outcome, Outcome::Killed);
+    let jobs = worker.snapshot().jobs;
+    assert_eq!(jobs.len(), 1);
+    let result = jobs[0].result.as_ref().expect("the job's result");
+    assert_eq!(result.outcome, Outcome::Killed);
     let lines = worker.take_lines();
     assert!(
-        lines.contains(&"draining: the start of r2 is not taken".to_owned()),
+        lines.contains(&"draining: the start of job r2 is not taken".to_owned()),
         "{lines:?}"
     );
 }
@@ -251,9 +224,9 @@ fn stop_all_stops_every_run() {
     assert!(log.contains(&"stop r1".to_owned()) && log.contains(&"stop r2".to_owned()));
     let outcomes: Vec<Outcome> = worker
         .snapshot()
-        .results
+        .jobs
         .iter()
-        .map(|r| r.outcome)
+        .filter_map(|j| j.result.as_ref().map(|r| r.outcome))
         .collect();
     assert_eq!(outcomes, [Outcome::Killed, Outcome::Killed]);
     assert!(worker.handle().settle());
@@ -267,7 +240,7 @@ fn stop_all_stops_every_run() {
 }
 
 /// Asserts that a command the lifecycle refuses is logged by its place in the reply, and
-/// the commands beside it still count: a stop at 0 is acted on and a start with no run id
+/// the commands beside it still count: a stop at 0 is acted on and a start with no job id
 /// at 1 is refused with its index. It catches a reply thrown away for one bad command, and a
 /// refusal nobody can find in the log.
 #[test]
@@ -277,20 +250,23 @@ fn a_refused_command_is_logged_by_its_place() {
     let worker = start(&dir, &machine);
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
-    let mut bad = job("r2");
-    bad.run_id = String::new();
+    let mut bad = job_start("r2");
+    bad.job_id = String::new();
     let reply = HeartbeatReply {
         commands: vec![
-            Command::Stop {
-                run_id: "r1".to_owned(),
+            Command::JobStop {
+                job_id: "r1".to_owned(),
+                reason: None,
             },
-            Command::Start(Box::new(bad)),
+            Command::JobStart(Box::new(bad)),
         ],
         ..HeartbeatReply::default()
     };
     assert_eq!(worker.try_deliver(reply), Delivery::Delivered);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().results[0].outcome, Outcome::Killed);
+    let jobs = worker.snapshot().jobs;
+    let result = jobs[0].result.as_ref().expect("the job's result");
+    assert_eq!(result.outcome, Outcome::Killed);
     let lines = worker.take_lines();
     assert!(
         lines
@@ -312,9 +288,9 @@ fn lines_over_the_cap_are_counted() {
     let _ = worker.take_lines();
     let mut many = HeartbeatReply::default();
     for n in 0..LINES_CAP + 44 {
-        let mut huge = job(&format!("r{n}"));
-        huge.limits.cpu_millis = 9000;
-        many.commands.push(Command::Start(Box::new(huge)));
+        let mut huge = job_start(&format!("r{n}"));
+        huge.booked.cpu_millis = 9000;
+        many.commands.push(Command::JobStart(Box::new(huge)));
     }
     assert_eq!(worker.try_deliver(many), Delivery::Delivered);
     assert!(worker.handle().settle());
@@ -355,17 +331,17 @@ fn a_start_waiting_for_its_image_goes_on_when_the_pull_ends() {
     let dir = Scratch::new("jobs-worker-wake");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let first = job("r1").image;
+    let first = job_start("r1").image;
     let second = first.replace("job:1", "job:2");
     machine.world.begin_pull(&first);
     machine.world.begin_pull(&second);
     let mut reply = starts(&["r1", "r2"]);
-    if let Command::Start(spec) = &mut reply.commands[1] {
+    if let Command::JobStart(spec) = &mut reply.commands[1] {
         spec.image = second.clone();
     }
     assert_eq!(worker.try_deliver(reply), Delivery::Delivered);
     assert!(worker.handle().settle());
-    let states: Vec<HeldState> = worker.snapshot().held.iter().map(|h| h.state).collect();
+    let states: Vec<HeldState> = worker.snapshot().jobs.iter().map(|h| h.state).collect();
     assert_eq!(states, [HeldState::Starting, HeldState::Starting]);
     assert!(machine.world.created().is_empty());
 
@@ -373,7 +349,7 @@ fn a_start_waiting_for_its_image_goes_on_when_the_pull_ends() {
         machine.world.end_pull(image, true);
         let running = created.len();
         let up = move |s: &js_agent::Snapshot| {
-            s.held
+            s.jobs
                 .iter()
                 .filter(|h| h.state == HeldState::Running)
                 .count()

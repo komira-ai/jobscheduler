@@ -155,8 +155,8 @@
 //! a taint read from the marker at start has none. The worker prints it with the taint and the
 //! health route names it.
 //!
-//! A tainted agent starts no job (every `Start` is answered `failed_to_start` with the code
-//! `host-tainted`, final for that `Start`) and lets the jobs it runs finish.
+//! A tainted agent starts no job (every job start is answered `failed_to_start` with the code
+//! `host-tainted`, final for that start) and lets the jobs it runs finish.
 //! [`Lifecycle::pending_taint`] is what the next heartbeat's `taint` field carries, once the
 //! marker is on disk and until the server acknowledges it (`taint_ack`); the
 //! acknowledgement stops the report and keeps the marker. A marker that cannot be written

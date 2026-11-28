@@ -3,10 +3,11 @@
 
 mod common;
 
-use common::{heartbeat, hello, job, round_trip, welcome, with_unknown};
+use common::{heartbeat, hello, job, job_start, round_trip, welcome, with_unknown};
 use js_agent_wire::{
     Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldState, Hello, HelloReply,
-    Isolation, JobSpec, Outcome, Phase, ProtocolRange, RefusalReason, ResultAck, Welcome,
+    Isolation, JobResultAck, JobSpec, Outcome, Phase, ProtocolRange, RefusalReason, ResultAck,
+    Welcome,
 };
 use serde_json::{Value, json};
 
@@ -24,9 +25,9 @@ fn isolation_absent_is_contained() {
 
 /// Asserts that an isolation value this version does not know fails to decode with an
 /// error that names it, that the same start with a known value decodes under the pinned
-/// `start` tag, and that inside a reply the unknown one reads as an unknown command
+/// `job_start` tag, and that inside a reply the unknown one reads as an unknown command
 /// beside intact commands. It catches an older agent that would run a job it cannot
-/// classify, and a wrong tag (which would turn every start into an unknown command).
+/// classify, and a wrong tag (which would turn every job start into an unknown command).
 #[test]
 fn unknown_isolation_is_typed_error_not_contained() {
     let mut body = serde_json::to_value(job()).unwrap();
@@ -35,39 +36,40 @@ fn unknown_isolation_is_typed_error_not_contained() {
     assert!(err.is_data());
     assert!(err.to_string().contains("unknown variant `vm`"), "{err}");
     let tagged = |isolation: &str| {
-        let mut command = json!({"type": "start"});
-        let mut fields = body.as_object().unwrap().clone();
-        fields.insert("isolation".into(), json!(isolation));
-        command.as_object_mut().unwrap().extend(fields);
+        let mut command = serde_json::to_value(Command::JobStart(Box::new(job_start()))).unwrap();
+        command["isolation"] = json!(isolation);
         command
     };
     let known: Command = serde_json::from_value(tagged("host")).unwrap();
-    assert!(matches!(&known, Command::Start(spec) if spec.isolation == Isolation::Host));
-    let stop = json!({"type": "stop", "run_id": "r"});
+    assert!(matches!(&known, Command::JobStart(spec) if spec.isolation == Isolation::Host));
+    let stop = json!({"type": "job_stop", "job_id": "r"});
     let reply = json!({"commands": [tagged("vm"), stop]});
     let reply: HeartbeatReply = serde_json::from_value(reply).unwrap();
     assert_eq!(
         reply.commands,
-        vec![Command::Unknown, Command::Stop { run_id: "r".into() }]
+        vec![
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None
+            }
+        ]
     );
 }
 
-/// Asserts that a start with only its required fields decodes with every optional field
+/// Asserts that a job spec with only its required fields decodes with every optional field
 /// at its default. It catches a dropped `#[serde(default)]` on args, gpu_indices, mounts,
-/// labels, heartbeat_seq or valid_for_ms, which would reject a start from an older server.
+/// labels or heartbeat_seq, which would reject a spec from an older server.
 #[test]
 fn minimal_start_takes_defaults() {
     let body = json!({
-        "type": "start",
         "run_id": "r", "lease_id": "1-1", "image": "alpine",
         "limits": {"cpu_millis": 1, "memory_bytes": 1, "wall_ms": 1}
     });
-    let Command::Start(spec) = serde_json::from_value(body.clone()).unwrap() else {
-        panic!("not a start");
-    };
+    let spec: JobSpec = serde_json::from_value(body).unwrap();
     assert!(spec.args.is_empty() && spec.gpu_indices.is_empty() && spec.mounts.is_empty());
     assert!(spec.labels.is_empty());
-    assert_eq!((spec.heartbeat_seq, spec.valid_for_ms), (0, 0));
+    assert_eq!(spec.heartbeat_seq, 0);
     assert_eq!(spec.limits.pids, None);
     assert_eq!(spec.bundle, None);
     assert_eq!(spec.isolation, Isolation::Contained);
@@ -180,7 +182,7 @@ fn unknown_fields_ignored_everywhere() {
         heartbeat()
     );
     let reply = HeartbeatReply {
-        commands: vec![Command::Start(Box::new(job()))],
+        commands: vec![Command::JobStart(Box::new(job_start()))],
         result_acks: vec![ResultAck {
             run_id: "run-1".into(),
             ack: Ack::Accepted,
@@ -214,7 +216,7 @@ fn unknown_enum_values_leave_known_entries_intact() {
     let reply: HeartbeatReply = serde_json::from_value(json!({
         "commands": [
             {"type": "pause", "run_id": "a"},
-            {"type": "stop", "run_id": "b"},
+            {"type": "job_stop", "job_id": "b"},
             {"type": "cancel", "run_id": "c"}
         ],
         "result_acks": [
@@ -227,8 +229,11 @@ fn unknown_enum_values_leave_known_entries_intact() {
         reply.commands,
         vec![
             Command::Unknown,
-            Command::Stop { run_id: "b".into() },
-            Command::Cancel { run_id: "c".into() },
+            Command::JobStop {
+                job_id: "b".into(),
+                reason: None
+            },
+            Command::Unknown,
         ]
     );
     assert_eq!(reply.result_acks[0].ack, Ack::Unknown);
@@ -358,4 +363,98 @@ fn old_hello_with_gpu_class_still_registers() {
     assert_eq!(found.variant, None);
     assert_eq!(found.count, 2);
     assert_eq!(found.memory_per_device, Some(40 * GIB));
+}
+
+/// Asserts that a reply whose commands are an older server's `start`, `stop` and `cancel`
+/// beside a `job_start` and a `job_stop` reads the three run commands as unknown commands and
+/// the two job commands as themselves, in order, and that the reply check refuses none of
+/// them. It catches a run command that is still decoded as a command to act on, and an older
+/// server's command that costs the job commands beside it.
+#[test]
+fn an_older_servers_run_commands_read_as_unknown_beside_job_commands() {
+    let mut start = serde_json::to_value(job()).unwrap();
+    start["type"] = json!("start");
+    let job_start_wire = serde_json::to_value(Command::JobStart(Box::new(job_start()))).unwrap();
+    let reply: HeartbeatReply = serde_json::from_value(json!({
+        "commands": [
+            start,
+            job_start_wire,
+            {"type": "stop", "run_id": "r1"},
+            {"type": "job_stop", "job_id": "j1"},
+            {"type": "cancel", "run_id": "r2"}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        reply.commands,
+        vec![
+            Command::Unknown,
+            Command::JobStart(Box::new(job_start())),
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "j1".into(),
+                reason: None
+            },
+            Command::Unknown,
+        ]
+    );
+    let checked = reply.validate();
+    assert!(checked.refused.is_empty(), "{:?}", checked.refused);
+    assert_eq!(checked.commands.len(), 5);
+}
+
+/// Asserts that the text `UNKNOWN_LEASE`, which an older server wrote, reads as `Ack::Unknown`
+/// in a result acknowledgement and in a job acknowledgement, and that the acknowledgements
+/// beside it keep their verdicts and pass the reply check. It catches a verdict that this
+/// version still treats as a distinct answer, and one that fails the whole reply.
+#[test]
+fn an_unknown_lease_acknowledgement_reads_as_unknown() {
+    let reply: HeartbeatReply = serde_json::from_value(json!({
+        "result_acks": [
+            {"run_id": "r1", "ack": "UNKNOWN_LEASE"},
+            {"run_id": "r2", "ack": "ACCEPTED"}
+        ],
+        "job_acks": [
+            {"job_id": "j1", "ack": "UNKNOWN_LEASE"},
+            {"job_id": "j2", "ack": "STALE"}
+        ]
+    }))
+    .unwrap();
+    let results: Vec<(&str, Ack)> = reply
+        .result_acks
+        .iter()
+        .map(|ack| (ack.run_id.as_str(), ack.ack))
+        .collect();
+    assert_eq!(results, [("r1", Ack::Unknown), ("r2", Ack::Accepted)]);
+    assert_eq!(
+        reply.job_acks,
+        [
+            JobResultAck {
+                job_id: "j1".into(),
+                ack: Ack::Unknown
+            },
+            JobResultAck {
+                job_id: "j2".into(),
+                ack: Ack::Stale
+            }
+        ]
+    );
+    let checked = reply.validate();
+    assert_eq!((checked.acks, checked.job_acks), (Ok(()), Ok(())));
+}
+
+/// Asserts that a job spec whose JSON still carries `valid_for_ms`, as every start of an
+/// older server did, decodes to the same spec as one without it (the member is ignored), and
+/// that encoding it writes no `valid_for_ms`. It catches a spec that refuses the older member
+/// or writes it back.
+#[test]
+fn a_job_spec_with_valid_for_ms_decodes_and_encodes_without_it() {
+    let mut body = serde_json::to_value(job()).unwrap();
+    assert!(body.get("valid_for_ms").is_none());
+    body["valid_for_ms"] = json!(10_000);
+    let spec: JobSpec = serde_json::from_value(body).unwrap();
+    assert_eq!(spec, job());
+    let written = serde_json::to_value(&spec).unwrap();
+    assert!(written.get("valid_for_ms").is_none(), "{written}");
+    assert_eq!(written, serde_json::to_value(job()).unwrap());
 }

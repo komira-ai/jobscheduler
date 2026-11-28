@@ -23,11 +23,11 @@ fn unacked_result_stays_in_held() {
         h.life.step();
         h.ack("r2", "ACCEPTED");
     }
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.results()[0].run_id, "r1");
-    assert_eq!(h.life.results()[0].lease_id, "lease-r1");
+    assert_eq!(super::results(&h.life).len(), 1);
+    assert_eq!(super::results(&h.life)[0].run_id, "r1");
+    assert_eq!(super::results(&h.life)[0].lease_id, "lease-r1");
     assert_eq!(
-        h.life.held(),
+        super::held(&h.life),
         [
             HeldRun {
                 run_id: "r1".to_owned(),
@@ -42,20 +42,16 @@ fn unacked_result_stays_in_held() {
 }
 
 /// Asserts that every verdict the agent knows ends the wait for a result, that a verdict
-/// it does not know keeps the result to be sent again, and that an acknowledgement for a
-/// run the agent does not hold is ignored. It catches a result dropped on an unknown
-/// verdict (the server never recorded it) and one resent for ever after `STALE`.
+/// it does not know (one from a later release, and `UNKNOWN_LEASE`, which an older server
+/// gave) keeps the result to be sent again, and that an acknowledgement for a job the
+/// agent does not hold is ignored. It catches a result dropped on an unknown verdict (the
+/// server never recorded it), `UNKNOWN_LEASE` read as a verdict that drops a result, and
+/// one resent for ever after `STALE`.
 #[test]
 fn every_known_verdict_drops_the_result_and_an_unknown_one_keeps_it() {
     let mut h = Harness::new("verdicts");
-    let verdicts = [
-        "ACCEPTED",
-        "DUPLICATE",
-        "STALE",
-        "UNKNOWN_LEASE",
-        "MISMATCH",
-    ];
-    let runs: Vec<String> = (0..=verdicts.len()).map(|n| format!("r{n}")).collect();
+    let verdicts = ["ACCEPTED", "DUPLICATE", "STALE", "MISMATCH"];
+    let runs: Vec<String> = (0..verdicts.len() + 2).map(|n| format!("r{n}")).collect();
     for run in &runs {
         let mut spec = job(run);
         spec.limits.cpu_millis = 100;
@@ -64,46 +60,46 @@ fn every_known_verdict_drops_the_result_and_an_unknown_one_keeps_it() {
         h.fake.exit(run, 0);
     }
     h.life.step();
-    assert_eq!(h.life.results().len(), runs.len());
+    assert_eq!(super::results(&h.life).len(), runs.len());
     h.ack("stranger", "ACCEPTED");
+    h.ack("r4", "UNKNOWN_LEASE");
     h.ack("r5", "A_VERDICT_FROM_THE_FUTURE");
     assert_eq!(
-        h.life.results().len(),
+        super::results(&h.life).len(),
         runs.len(),
         "unknown verdicts keep it"
     );
     for (run, verdict) in runs.iter().zip(verdicts) {
         h.ack(run, verdict);
     }
-    assert_eq!(h.held(), ["r5"]);
+    assert_eq!(h.held(), ["r4", "r5"]);
+    h.ack("r4", "ACCEPTED");
     h.ack("r5", "ACCEPTED");
     assert!(h.held().is_empty());
 }
 
-/// Asserts that acknowledgements that do not validate (the same run twice) are all
-/// ignored while the commands beside them are still acted on. It catches an agent that
-/// trusts a malformed acknowledgement list.
+/// Asserts that a `result_acks` entry in a reply, the acknowledgement an older server gave
+/// for a run's result, drops nothing: the result of the job it names stays held until a
+/// `job_acks` entry names it. It catches an agent that still reads the older
+/// acknowledgement and so drops a result the server never took.
 #[test]
-fn malformed_acknowledgements_are_ignored() {
-    let mut h = Harness::new("bad-acks");
+fn a_result_acks_entry_drops_no_result() {
+    let mut h = Harness::new("result-acks-ignored");
     h.start(job("r1"));
     h.fake.exit("r1", 0);
     h.life.step();
     let reply = reply_json(&json!({
-        "commands": [{ "type": "start", "run_id": "r2", "lease_id": "l2", "image": "img:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                       "limits": { "cpu_millis": 100, "memory_bytes": 1048576, "wall_ms": 1000 } }],
-        "result_acks": [
-            { "run_id": "r1", "ack": "ACCEPTED" },
-            { "run_id": "r1", "ack": "ACCEPTED" }
-        ]
+        "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }]
     }));
     h.life.apply(&reply);
     assert_eq!(
-        h.life.results()[0].outcome,
+        super::results(&h.life)[0].outcome,
         Outcome::Succeeded,
         "not dropped"
     );
-    assert_eq!(h.held(), ["r1", "r2"]);
+    assert_eq!(h.held(), ["r1"]);
+    h.ack("r1", "ACCEPTED");
+    assert!(h.held().is_empty());
 }
 
 /// Asserts that the capacity of a hello is its shape and the indices of the GPUs it

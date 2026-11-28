@@ -124,14 +124,14 @@ impl Lifecycle {
                 };
                 // What ended the job is what happened, not what the agent meant to do: an
                 // exit that came before any stop was sent is the job's own, whether the
-                // stop was merely asked for (a `Stop` applied since the last step) or
+                // stop was merely asked for (a `JobStop` applied since the last step) or
                 // failed (the runtime refused it). A container that is gone has nothing to
                 // tell, so the cause stands.
                 let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
                 let (how, status) = outcome(cause, exit);
                 // A result read back from the state root is the one to send: the exit of a
                 // container taken over after the agent had reported it makes no second.
-                if !job.silent && job.result.is_none() {
+                if job.result.is_none() {
                     let mut result = job.report(how, status, cause_detail(cause));
                     // The container is still there: it is removed in the next stage. A log
                     // that cannot be read costs the result its tail and nothing else. What the

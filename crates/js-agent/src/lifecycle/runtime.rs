@@ -54,9 +54,9 @@ pub mod label {
     /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
     /// as a number; absent on a container an earlier agent made.
     pub const SLOT: &str = "jobscheduler.dev/slot";
-    /// `job` on a container a job start made (its run id is the job id and its lease id the
-    /// allocation id), so a restarted agent lists it under the job keying again; absent on
-    /// a container of a run start and on one an earlier agent made.
+    /// `job` on every container the agent makes (its run id is the job id and its lease id
+    /// the allocation id): a restarted agent takes over a container with this label and
+    /// evicts one without it or with another value (one an older release's run start made).
     pub const KEYING: &str = "jobscheduler.dev/keying";
     /// The host ports of a run the `crun` runtime offers them to (`RunSpec::host_ports`), each
     /// `HOST` when the job port is the host port and `HOST:JOB` when it is not, comma

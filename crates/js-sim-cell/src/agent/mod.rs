@@ -1,13 +1,14 @@
 //! The cell's agent, behind the real wire of `js-agent-wire`, as a [`js_sim::Node`]: one of
 //! two kinds ([`AgentKind`]). The fake is the conformance suite's in-process agent
-//! ([`FakeAgent`]), which the kernel can run by the hundred: it is the scale agent. The
+//! ([`FakeAgent`]), which the kernel can run by the hundred: it is the scale agent, and it
+//! holds jobs keyed by job id. The
 //! real one is the lifecycle of `js-agent` over an in-memory runtime (module `real`), for
 //! a handful of hosts, against which the fake is held (`tests/agreement.rs`).
 //!
 //! [`AgentNode`] builds the hello and heartbeat bodies a real agent builds and checks every
 //! answer with the wire's own `validate()` before it acts on any field. The session below
 //! is the same for both kinds. A fake's node turns every command into the [`FakeAgent`]
-//! call that models it. The check is by part, as the wire's
+//! call that models it (`per_job.rs`). The check is by part, as the wire's
 //! `ReplyCheck` says. A body that does not decode, and a welcome that fails its check, are
 //! ignored whole. A heartbeat reply's refused commands are skipped, and so are its
 //! acknowledgements when they fail their check. The valid commands beside them still
@@ -15,17 +16,19 @@
 //!
 //! | what arrives | the call |
 //! |---|---|
-//! | `Start` in a reply | [`AgentHarness::start`]`(run, valid_for_ms, waited)` |
-//! | `Stop` or `Cancel` in a reply | [`AgentHarness::cancel`]`(run)` |
-//! | an acknowledgement of a result | [`AgentHarness::ack`]`(run)` |
-//! | the run's own time ran out | [`AgentHarness::complete`]`(run)` |
+//! | `JobStart` in a reply | [`AgentHarness::start`]`(job)` |
+//! | `JobStop` in a reply | [`AgentHarness::cancel`]`(job)` |
+//! | an acknowledgement of a result | [`AgentHarness::ack`]`(job)` |
+//! | the job's own time ran out | [`AgentHarness::complete`]`(job)` |
 //! | a heartbeat is sent | [`AgentHarness::heartbeat`] |
 //! | a heartbeat had no answer in [`js_agent::REQUEST_LIMIT`] | [`AgentHarness::disconnect`] |
 //! | the next answer to any call | [`AgentHarness::reconnect`] |
 //! | a heartbeat is answered 200 | [`AgentHarness::contact`] |
 //!
-//! The [`FakeAgent`] is keyed by the run id: the wire's start, stop, cancel, result and
-//! acknowledgement all name the run, so the run id is what the fake calls a lease.
+//! The [`FakeAgent`] is keyed by the job id: the wire's job start, job stop, result and
+//! acknowledgement all name the job, so the job id is what the fake calls a lease. The
+//! agent holds no run keyed by a lease: every hello's `held` and every heartbeat's `held`
+//! and `results` are empty, and a reply's `result_acks` are ignored.
 //!
 //! The fake is built with [`FakeAgent::with_window`]`(None)`: the wire carries no self-fence
 //! and the real agent has none either (design section 8, row 5). A broken one
@@ -34,18 +37,14 @@
 //!
 //! # The real agent
 //!
-//! A real agent's node builds the hello as for the fake, from the host's shape, with the
-//! held runs the lifecycle lists. Each heartbeat's held runs and results are the
-//! lifecycle's, after it took a step; each 200 reply is handed to the lifecycle whole
-//! (`Lifecycle::apply`), less any start the cell cannot account for, and the lifecycle
-//! takes a step. A container the lifecycle created is a launch; a result the reply's
-//! acknowledgement ended is acknowledged with its verdict. The lifecycle's clock is the
-//! kernel's time of the input being applied. The fake's connection calls
-//! (`disconnect`, `reconnect`, `contact`, `heartbeat`) have no counterpart: the real
-//! lifecycle learns nothing from a lost answer and keeps no self-fence. It counts what
-//! the fake's node counts, except [`Counter::StartDroppedLate`]: the real agent counts a
-//! start's validity from the arrival of its reply, which the node hands over on arrival,
-//! so none is ever late.
+//! A real agent's node builds the hello as for the fake, from the host's shape. Each
+//! heartbeat's jobs are the lifecycle's, after it took a step; each 200 reply is handed to
+//! the lifecycle whole (`Lifecycle::apply`), less any start the cell cannot account for,
+//! and the lifecycle takes a step. A container the lifecycle created is a launch. The
+//! lifecycle's clock is the kernel's time of the input being applied. The fake's
+//! connection calls (`disconnect`, `reconnect`, `contact`, `heartbeat`) have no
+//! counterpart: the real lifecycle learns nothing from a lost answer and keeps no
+//! self-fence. It counts what the fake's node counts.
 //!
 //! # The session
 //!
@@ -71,35 +70,24 @@
 //! [`AgentProfile`] is the previous release's, which does; the agent keeps none either way
 //! and a credential in a welcome is ignored.
 //!
-//! A start names the heartbeat the server had taken when it queued it
-//! ([`js_agent_wire::JobSpec::heartbeat_seq`]); the agent numbers its heartbeats of a
-//! session from 1 and keeps the time it sent each, with the hello that opened the session
-//! as number 0, and `waited` is the time since that send (a number it never sent counts
-//! from the hello). The server numbers the heartbeats it took, so the two numberings agree
-//! while no heartbeat is lost on the way; after a lost one the agent's number names a later
-//! send and `waited` reads short.
-//!
 //! A hello is sent every interval while none is welcomed, without waiting for the answer to
 //! the last. The first welcome closes every open hello: when answers are delayed past an
 //! interval, a welcome to a later hello is then ignored, the agent keeps the earlier
 //! session, and the server's refusal of its next heartbeat makes it say hello again. The
 //! real agent has one call in flight at a time and never meets that case.
 //!
-//! # Runs
+//! # Jobs
 //!
-//! A start of the image [`SIM_RUN_IMAGE`] whose first argument is a number of
+//! A job start of the image [`SIM_RUN_IMAGE`] whose first command argument is a number of
 //! milliseconds ends by itself that long after its launch: the node arms a timer and calls
 //! [`AgentHarness::complete`] (a real agent's container exits with status 0), and the
-//! run's result rides in every heartbeat until an answer acknowledges it. Any other start
-//! runs until it is stopped. A stopped or cancelled run of the fake sends no result; the
-//! real agent reports a stopped run killed, and a cancelled one not at all. The resources a run holds are its start's `limits` (and
-//! one GPU per index it names).
+//! job's result rides in every heartbeat until an answer acknowledges it. Any other start
+//! runs until it is stopped. A stopped job is reported `killed`. The resources a job holds
+//! are its start's `booked` (and one GPU per index it names).
 //!
-//! The process remembers every run a hello or heartbeat it sent listed as held, and every
-//! job a heartbeat listed, so the cell can tell a run or a job the server cannot have seen
-//! listed ([`AgentNode::runs_unlisted`]).
-//! Every verdict it reads on a result, held or not, is written into the cell's
-//! [`Ledger`] ([`crate::Acked`]).
+//! The process remembers every job a heartbeat listed, so the cell can tell a job the
+//! server cannot have seen listed ([`AgentNode::runs_unlisted`]). Every verdict it reads on
+//! a job's result is written into the cell's ledger with the answer ([`crate::JobReply`]).
 //!
 //! # Processes
 //!
@@ -122,19 +110,17 @@
 //! refuses or stays silent as the node's [`Prepare`] switch says
 //! ([`AgentNode::set_prepare`]), and restores once the lease ends. The switch is the
 //! node's, so a replacement process keeps it. The cell's [`Ledger`] records every ready
-//! report the process sends, every start that reaches it (launched or not) and every
-//! stop or cancel that reaches a run it is running.
+//! report the process sends.
 //!
-//! # Jobs
+//! # The per-job messages
 //!
 //! A fake agent whose hello reports [`js_agent_wire::PER_JOB_CAPABILITY`] (the cell's fake
-//! agents do) also speaks the per-job messages:
-//! it acts on `JobStart` and `JobStop`, lists its jobs with their state in every heartbeat,
-//! sends each result until an answer acknowledges it, and lists the ids it retired until
-//! an answer acknowledges them, with a second [`FakeAgent`], keyed by job id, as the
-//! engine (module `per_job`). A real agent's node does too, with the lifecycle's own per-job
-//! half as the engine (module `real_jobs`); the cell writes down what it carries as it does
-//! for the fake.
+//! agents do) speaks the per-job messages: it acts on `JobStart` and `JobStop`, lists its
+//! jobs with their state in every heartbeat, sends each result until an answer
+//! acknowledges it, and lists the ids it retired until an answer acknowledges them, with a
+//! [`FakeAgent`], keyed by job id, as the engine (module `per_job`). A real agent's node
+//! does too, with the lifecycle's own per-job half as the engine (module `real_jobs`); the
+//! cell writes down what it carries as it does for the fake.
 //!
 //! The node reads no clock and no random source: time arrives in each
 //! [`js_sim::NodeInput`].
@@ -171,7 +157,7 @@ pub use exclusive::Prepare;
 use process::{Answer, Process};
 pub use profile::AgentProfile;
 
-/// The image of a run that ends by itself: its first argument is how long it runs, in
+/// The image of a job that ends by itself: its first argument is how long it runs, in
 /// milliseconds. Pinned by a fixed digest, as a start must be.
 pub const SIM_RUN_IMAGE: &str =
     "sim-run@sha256:5151515151515151515151515151515151515151515151515151515151515151";
@@ -346,7 +332,7 @@ impl AgentNode {
         self.io.prepare
     }
 
-    /// Whether the agent process runs a run, or a job, that no hello or heartbeat it sent
+    /// Whether the agent process runs a job that no heartbeat it sent
     /// listed as held, so the server cannot have seen it listed; `false` while the host
     /// has no process.
     #[must_use]

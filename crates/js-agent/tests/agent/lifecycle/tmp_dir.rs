@@ -225,7 +225,7 @@ fn a_tmp_directory_that_cannot_be_bound_refuses_the_run() {
         ["finding r1 scratch-failed", "result r1"]
     );
     assert!(h.fake.created().is_empty(), "no container");
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("scratch-failed"));
 }

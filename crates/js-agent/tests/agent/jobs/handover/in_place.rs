@@ -11,7 +11,7 @@ use js_agent_wire::HeldState;
 
 use super::{LONG, handed, next_process, phases, running, state};
 use crate::jobs::fake::FakeMachine;
-use crate::jobs::{job, start, starts};
+use crate::jobs::{job_start, start, starts};
 use crate::support::{Scratch, beat_ok, welcome};
 
 /// Asserts that a replace request that finds the handover file hands the runs over as a stop
@@ -29,8 +29,8 @@ fn a_replace_asked_to_hand_over_leaves_the_runs_to_the_next_process_and_ends_rep
 
     assert_eq!(exit, Exit::Replaced);
     assert_eq!(phases(&sent), ["serving", "draining"]);
-    assert_eq!(sent[1].1["held"][0]["state"], "running");
-    assert_eq!(sent[1].1["held"][1]["state"], "running");
+    assert_eq!(sent[1].1["jobs"][0]["state"], "running");
+    assert_eq!(sent[1].1["jobs"][1]["state"], "running");
     assert_eq!(machine.world.alive(), 2);
     assert!(
         !machine
@@ -47,10 +47,10 @@ fn a_replace_asked_to_hand_over_leaves_the_runs_to_the_next_process_and_ends_rep
     );
 
     let next = next_process(&dir, &machine, worker);
-    let held = next.snapshot().held;
+    let held = next.snapshot().jobs;
     let states: Vec<(&str, HeldState)> = held
         .iter()
-        .map(|run| (run.run_id.as_str(), run.state))
+        .map(|job| (job.job_id.as_str(), job.state))
         .collect();
     assert_eq!(
         states,
@@ -142,7 +142,7 @@ fn held_by_a_pull(
     dir: &Scratch,
     machine: &FakeMachine,
 ) -> (js_agent::Worker, String, Vec<crate::support::Reply>) {
-    let pulled = job("r2").image;
+    let pulled = job_start("r2").image;
     let worker = running(dir, machine, &["r1"]);
     machine.world.begin_pull(&pulled);
     assert_eq!(worker.try_deliver(starts(&["r2"])), Delivery::Delivered);

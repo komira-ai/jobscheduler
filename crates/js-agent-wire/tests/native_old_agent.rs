@@ -1,4 +1,4 @@
-//! A native start against a frozen copy of the struct and the checks an agent had before
+//! A native job spec against a frozen copy of the struct and the checks an agent had before
 //! the `native` body existed. The copy is a fixture: it must not follow later changes to
 //! `JobSpec`, because it stands for agents already deployed.
 
@@ -6,8 +6,8 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::job;
-use js_agent_wire::{NativeSpec, NetworkLevel, refusal};
+use common::{job, job_start};
+use js_agent_wire::{Command, HeartbeatReply, NativeSpec, NetworkLevel, RunSpec, refusal};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -175,16 +175,16 @@ fn open_level_round_trips() {
     }
 }
 
-/// Proves that an agent from before `open` refuses a start that asks for it rather than run
-/// it at another level: its decoder fails on the word (and a reply that carries such a start
-/// reads it as a command it does not know, which runs nothing, as this version reads any
-/// level it does not know), while the levels it knew still decode as before. Catches an
-/// `open` that an old agent would read as `on`, `off` or a default, and so run with no
-/// network or behind a filter the job did not ask for.
+/// Proves that an agent from before `open` refuses a native body that asks for it rather than
+/// run it at another level: its decoder fails on the word, while the levels it knew still
+/// decode as before; and that this version reads a job start whose `run` asks for `open` as
+/// itself, while a level it does not know reads as one unknown command beside the job stop
+/// after it, which runs nothing. Catches an `open` that an old agent would read as `on`, `off`
+/// or a default, and so run with no network or behind a filter the job did not ask for, and an
+/// unknown level that is read as a default here.
 #[test]
 fn old_agent_reads_open_as_invalid() {
     let mut start = native_job();
-    start["type"] = json!("start");
     start["native"]["network"] = json!("on");
     let on: before_open::Start = serde_json::from_value(start.clone()).unwrap();
     assert_eq!(on.native.network, before_open::NetworkLevel::On);
@@ -194,29 +194,32 @@ fn old_agent_reads_open_as_invalid() {
     body.network = NetworkLevel::Open;
     start["native"] = serde_json::to_value(&body).unwrap();
     assert_eq!(start["native"]["network"], json!("open"));
-    let old = serde_json::from_value::<before_open::Start>(start.clone());
+    let old = serde_json::from_value::<before_open::Start>(start);
     assert!(old.is_err(), "an old agent decodes no open start: {old:?}");
 
+    let mut spec = job_start();
+    spec.command = Vec::new();
+    spec.run = Some(RunSpec::from(body));
+    let start = serde_json::to_value(Command::JobStart(Box::new(spec))).unwrap();
+    assert_eq!(start["run"]["network"], json!("open"));
     let mut unknown = start.clone();
-    unknown["native"]["network"] = json!("wide");
-    let stop = json!({"type": "stop", "run_id": "r"});
-    let reply: js_agent_wire::HeartbeatReply =
+    unknown["run"]["network"] = json!("wide");
+    let stop = json!({"type": "job_stop", "job_id": "r"});
+    let reply: HeartbeatReply =
         serde_json::from_value(json!({"commands": [unknown, stop]})).unwrap();
     assert_eq!(
         reply.commands,
         vec![
-            js_agent_wire::Command::Unknown,
-            js_agent_wire::Command::Stop { run_id: "r".into() }
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None
+            }
         ]
     );
-    let reply: js_agent_wire::HeartbeatReply =
-        serde_json::from_value(json!({"commands": [start]})).unwrap();
-    assert!(
-        matches!(
-            reply.commands.as_slice(),
-            [js_agent_wire::Command::Start(_)]
-        ),
-        "this version reads open: {:?}",
-        reply.commands
-    );
+    let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [start]})).unwrap();
+    let [Command::JobStart(read)] = reply.commands.as_slice() else {
+        panic!("this version reads open: {:?}", reply.commands);
+    };
+    assert_eq!(read.run.as_ref().unwrap().network, NetworkLevel::Open);
 }

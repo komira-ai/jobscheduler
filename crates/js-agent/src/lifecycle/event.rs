@@ -20,22 +20,14 @@ pub struct Finding {
 /// Why a start was not acted on, when that is worth a log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// It reached the agent after its validity window.
-    Stale,
-    /// The run was finished, or stopped, earlier: a run start whose run id is retired.
-    Retired,
-    /// The fence of this job start (its job id with its allocation id) is retired: the job
-    /// ended, was stopped or cancelled, was stopped for a silence of the server, or a stop
-    /// that named no allocation retired every fence of the job. Nothing is made or booked.
+    /// The fence of this start (its job id with its allocation id) is retired: the job
+    /// ended, was stopped, was stopped for a silence of the server, or a stop that named no
+    /// allocation retired every fence of the job. Nothing is made or booked.
     /// The same job under another allocation is another fence.
     FenceRetired,
-    /// The agent already holds as many runs as a heartbeat can list, so it took on no
+    /// The agent already holds as many jobs as a heartbeat can list, so it took on no
     /// more; the server may send the start again once results are acknowledged.
     Full,
-    /// The agent holds a run whose run id is the job id of this job start, or a job whose
-    /// job id is the run id of this run start: the two would share one scratch directory
-    /// and one set of labels, so the start is not taken.
-    Clash,
 }
 
 /// What a job booked and where the booking came from, carried by [`Event::Started`] and
@@ -51,8 +43,9 @@ pub struct JobBooking {
     /// has no `memory.max`, and the job may use swap).
     pub memory_bytes: u64,
     /// The size class and which history gave the CPU and the memory, as the job's start said
-    /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)); `None` for a run start,
-    /// for a server that sends none, and for a job taken over from an earlier agent.
+    /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)); `None` for a server
+    /// that sends none, a start that is not on the wire, and a job taken over from an earlier
+    /// agent.
     pub sizing: Option<StartSizing>,
 }
 
@@ -67,7 +60,7 @@ pub struct StartTimeline {
     pub received_ms: u64,
     /// The server's Unix time in milliseconds at which it placed the job, as its start says
     /// ([`JobStartSpec::placed_at_ms`](js_agent_wire::JobStartSpec::placed_at_ms)); `None`
-    /// for a run start and for a server that sends none.
+    /// for a start that is not on the wire and for a server that sends none.
     pub placed_at_ms: Option<u64>,
     /// When the reply arrived in Unix time (milliseconds), taken from the clock's Unix time
     /// at the start's admission less the time since `received_ms`; `None` when the clock has

@@ -87,8 +87,9 @@ fn the_disk_booking_survives_a_restart_through_the_label() {
     assert_eq!(names(&h.start(job_with_disk("c", 4))), ["started c"]);
 }
 
-/// The labels an agent from before the disk label wrote for a run of 1 CPU and 1 GiB.
-fn older_agent_labels(run: &'static str) -> [(&'static str, &'static str); 7] {
+/// The labels an agent from before the disk label wrote for a job of 1 CPU and 1 GiB, with
+/// the job keying this release adopts.
+fn older_agent_labels(run: &'static str) -> [(&'static str, &'static str); 8] {
     [
         (label::RUN, run),
         (label::LEASE, "lease-old"),
@@ -97,6 +98,7 @@ fn older_agent_labels(run: &'static str) -> [(&'static str, &'static str); 7] {
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
+        (label::KEYING, "job"),
     ]
 }
 

@@ -44,10 +44,10 @@
 //! - **Loss.** A host silent for more than the grace period is lost: it takes no new job.
 //! - **Phase.** Only a serving host takes a new job. A phase the wire does not know
 //!   reads as quarantined, which takes none.
-//! - **Heartbeat reply.** The registry queues no run. A previous release's agent that
-//!   still keys its work by run is answered with a cancel for each run it lists as held and
-//!   an `UnknownLease` acknowledgement for each result it reports, so it kills what it holds
-//!   and drops what it reports ([`Registry::heartbeat`]). The job half of the reply is the
+//! - **Heartbeat reply.** The registry queues no run. The reply to a heartbeat carries no
+//!   command and no result acknowledgement, whatever held runs and results the heartbeat
+//!   lists, so a previous release's agent is admitted and its beat recorded but is told
+//!   nothing about its runs ([`Registry::heartbeat`]). The job half of the reply is the
 //!   transport's.
 //! - **Taint.** The first taint a host reports, or that the caller sets with
 //!   [`Registry::taint_host`] (the first one stands), is kept with its binding

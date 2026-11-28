@@ -1,9 +1,11 @@
 //! What survives a restart of the agent beside the containers: the results the server has
 //! not acknowledged and the ids that must not start again, kept in the state root.
 //!
-//! - **`held/<id>.json`**, one file for each result the lifecycle holds, `<id>` the run id
-//!   or the job id. The file holds the result and how the job is keyed (`run` or `job`).
-//!   It is written whole (a temporary file, synced, renamed over, the directory synced)
+//! - **`held/<id>.json`**, one file for each result the lifecycle holds, `<id>` the job id.
+//!   The file holds the result and the keying `job`, which the release before this one reads
+//!   back after a rollback; a file that names any other keying (`run`, left by an older
+//!   release) cannot be read and is removed and reported like any other file that cannot be
+//!   used. It is written whole (a temporary file, synced, renamed over, the directory synced)
 //!   at the end of the [`Lifecycle::apply`] or [`Lifecycle::step`] that made the result,
 //!   so before any heartbeat can carry it, and again when the result changes (its log tail
 //!   is cut to fit a heartbeat). It is removed at the end of the call in which the
@@ -51,7 +53,7 @@ use js_agent_wire::RunResult;
 use serde::{Deserialize, Serialize};
 
 use super::Lifecycle;
-use super::job::{Job, Keyed, Retired};
+use super::job::{Job, Retired};
 use super::listing::entry_len;
 use crate::lifecycle::taint::StateRoot;
 use crate::lifecycle::{Event, Finding, code};
@@ -87,6 +89,15 @@ const LOG_SHARE: u64 = 16;
 /// streams, none when it has no tail. A tail is only ever cut, so a cut changes the mark.
 type Mark = Option<(usize, usize)>;
 
+/// How a held result's file says its job is keyed. The agent keys every job by job id, so
+/// the one keying that reads is `job`; a file that says another (`run`) does not decode.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Keyed {
+    /// Keyed by job id.
+    Job,
+}
+
 /// A held result as its file says it: with its `input_failure` when it has one, which an
 /// agent of an earlier release, which does not read it, ignores.
 #[derive(Serialize)]
@@ -101,7 +112,8 @@ struct Written<'a> {
 /// earlier release wrote has no `input_failure`.
 #[derive(Deserialize)]
 pub(super) struct Stored {
-    keyed: Keyed,
+    #[serde(rename = "keyed")]
+    _keyed: Keyed,
     result: RunResult,
     #[serde(default)]
     input_failure: Option<String>,
@@ -394,9 +406,8 @@ impl Records {
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let name = format!("{}{RESULT_SUFFIX}", result.run_id);
         let input_failure = job.input_failure.as_deref();
-        let keyed = job.keyed;
         serde_json::to_vec(&Written {
-            keyed,
+            keyed: Keyed::Job,
             result,
             input_failure,
         })
@@ -581,9 +592,9 @@ impl Lifecycle {
         let (results, retired) = self.records.load(room, &taken, events);
         self.retired = retired;
         for Stored {
-            keyed,
             result,
             input_failure,
+            ..
         } in results
         {
             let taken = self.jobs.iter().position(|job| job.run_id == result.run_id);
@@ -592,7 +603,7 @@ impl Lifecycle {
                     self.jobs[index].result = Some(result);
                     self.jobs[index].input_failure = input_failure;
                 }
-                None => self.jobs.push(Job::held(keyed, result, input_failure)),
+                None => self.jobs.push(Job::held(result, input_failure)),
             }
         }
     }

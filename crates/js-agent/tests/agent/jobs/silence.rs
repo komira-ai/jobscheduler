@@ -9,8 +9,7 @@ use std::time::Duration;
 use js_agent::{Delivery, Drain, Note, QUEUE, Session, Step, Worker};
 
 use super::fake::FakeMachine;
-use super::{STEP_NEVER, plan, start_answer};
-use crate::lifecycle::silence::long_run;
+use super::{STEP_NEVER, job_start, plan, start_answer};
 use crate::support::{
     Scratch, Script, beat_ok, hello, lowest, refused, reply, welcome, welcome_with,
 };
@@ -27,11 +26,15 @@ const DRAIN: Drain = Drain {
     settle: Duration::from_secs(30),
 };
 
-/// A reply that starts these runs, each with a wall limit of a day, which no test reaches.
+/// A reply that starts these jobs, each with a wall limit of a day, which no test reaches.
 fn starts(runs: &[&str]) -> js_agent_wire::HeartbeatReply {
     let commands = runs
         .iter()
-        .map(|run| js_agent_wire::Command::Start(Box::new(long_run(run))))
+        .map(|run| {
+            let mut spec = job_start(run);
+            spec.wall_ms = 86_400_000;
+            js_agent_wire::Command::JobStart(Box::new(spec))
+        })
         .collect();
     js_agent_wire::HeartbeatReply {
         commands,
@@ -91,8 +94,9 @@ fn silence_is_counted_from_welcome_not_from_process_start() {
     machine.clock.advance(1);
     assert!(worker.handle().settle());
     assert_eq!(stopped(&machine), ["stop r1"]);
-    let results = worker.snapshot().results;
-    assert_eq!(results[0].detail.as_deref(), Some("silence-stop"));
+    let jobs = worker.snapshot().jobs;
+    let result = jobs[0].result.as_ref().expect("the job's result");
+    assert_eq!(result.detail.as_deref(), Some("silence-stop"));
 }
 
 /// Asserts that a server restart shorter than the bound stops nothing: after a welcome and
@@ -130,7 +134,7 @@ fn a_server_restart_shorter_than_the_bound_stops_nothing() {
     assert!(worker.handle().settle());
     assert!(stopped(&machine).is_empty(), "{:?}", stopped(&machine));
     assert!(worker.snapshot().running());
-    assert_eq!(worker.snapshot().held.len(), 2);
+    assert_eq!(worker.snapshot().jobs.len(), 2);
 }
 
 /// Asserts that a reply the worker had no room for is contact all the same: with the

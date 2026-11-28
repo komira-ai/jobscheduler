@@ -10,7 +10,6 @@
 
 use js_agent_wire::{LogTail, RunResult};
 
-use super::job::Keyed;
 use super::{Job, Lifecycle, per_job};
 use crate::lifecycle::{Event, code};
 
@@ -22,21 +21,16 @@ pub(super) fn len_of<T: serde::Serialize>(value: &T) -> usize {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
-/// What the result of `job` weighs in a heartbeat: a run's in `results`, a job's inside its
-/// listing, in the form each is sent, without the comma after it.
+/// What the result of `job` weighs in a heartbeat: inside its listing, in the form it is
+/// sent, without the comma after it.
 pub(super) fn result_len(job: &Job, result: &RunResult) -> usize {
-    match job.keyed {
-        Keyed::Run => len_of(result),
-        Keyed::Job => {
-            len_of(&per_job::job_result(
-                result,
-                job.logs,
-                job.input_failure.clone(),
-                job.usage,
-                (job.cpu_series.clone(), job.memory_series.clone()),
-            )) + RESULT_KEY_LEN
-        }
-    }
+    len_of(&per_job::job_result(
+        result,
+        job.logs,
+        job.input_failure.clone(),
+        job.usage,
+        (job.cpu_series.clone(), job.memory_series.clone()),
+    )) + RESULT_KEY_LEN
 }
 
 /// `text` cut to at most `max` bytes, keeping the end, at a character boundary.

@@ -1,61 +1,55 @@
-//! A job's life on the host: from the `Start` that names it, through its container, to the
+//! A job's life on the host: from the `JobStart` that names it, through its container, to the
 //! result the server acknowledges and the slot that frees (design 5.4 and 5.10).
 //!
 //! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a [`CheckHook`] and a
 //! [`Clock`]. It reads a [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
-//! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s, the
 //! [`HeldJob`](js_agent_wire::HeldJob)s and the retired job ids of the next heartbeat; it
 //! reads no clock but the one it is given and sleeps never.
 //!
 //! # What the agent guarantees per job
 //!
-//! - **A start runs at most once.** It is idempotent on the run id: a start for a run the
-//!   agent holds changes nothing, and so is one for a run it finished or was told to stop
-//!   (the agent remembers the last [`RETIRED_CAP`] run ids). A start that reaches the
-//!   agent later than its `valid_for_ms` allows (the agent's clock, measured from the
-//!   moment the reply arrived) is dropped and nothing is sent.
-//! - **A job start is a start keyed by job id** (`JobStart`, see `js_agent_wire::per_job`).
-//!   It is made into the start a run start makes (run id the job id, lease id the
-//!   allocation id, limits the booked resources and the job's `wall_ms`, and no
-//!   `valid_for_ms`, so no lease bounds it) and goes through the same admission, refusals,
-//!   slots and wall clock: the wall limit counts from the moment the container is made, so a
-//!   start delayed in delivery is neither shortened nor stretched. It is idempotent on the
-//!   job id, and job ids share the bounded set of retired run ids above (kept in the state
-//!   root, so a late start of a stopped job does not run after a restart either), each with
-//!   its allocation: a job start is judged by its fence (below). Such a
-//!   job is listed in the heartbeat's `jobs` alone, with its
-//!   result inside until a `job_acks` entry of a verdict the agent knows names it; never in
-//!   `held` or `results`, and no `Stop`, `Cancel` or `result_acks` entry touches it (nor a
-//!   `JobStop` or `job_acks` entry a run), so a lease server never sees a job id. A start
-//!   whose id names held work of the other keying is not taken (`Skip::Clash`). The job's
+//! - **A start runs at most once.** It is idempotent on the job id: a start for a job the
+//!   agent holds changes nothing, and so is one for a job it finished or was told to stop
+//!   (the agent remembers the last [`RETIRED_CAP`] fences, each a job id with its
+//!   allocation id, kept in the state root, so a late start of a stopped job does not run
+//!   after a restart either).
+//! - **A job start is a start keyed by job id** (`JobStart`, see `js_agent_wire::per_job`),
+//!   the only start on the wire. It is made into a [`JobSpec`](js_agent_wire::JobSpec) (job id
+//!   as run id, allocation id as lease id, limits the booked resources and the job's
+//!   `wall_ms`) and goes through admission, refusals, slots and the wall clock: the wall
+//!   limit counts from the moment the container is made, so a start delayed in delivery is
+//!   neither shortened nor stretched. A job is listed in the heartbeat's `jobs`, with its
+//!   result inside until a `job_acks` entry of a verdict the agent knows names it.
+//!   [`Lifecycle::start_spec`] is the one start that is not on the wire and that nothing in
+//!   the agent calls: it starts a `JobSpec` as a job start is started, so the tests of the
+//!   features only a `JobSpec` carries reach them until they are deleted. A
+//!   container the agent made is labelled ([`label::KEYING`]) `job`, and a restart adopts only
+//!   a container so labelled. The job's
 //!   environment is delivered: it goes to the runtime in [`RunSpec::env`], and a container
 //!   runtime sets it over the image's own variables (a name in both takes the job's value),
 //!   and the macOS native one over the environment it builds for the run; a runtime that
 //!   cannot carry it ([`Runtime::check_env`]) answers the start `env-unsupported` and runs
 //!   nothing. A
-//!   `JobStop` for a held job ends it as a `Stop` does (`killed`, once however often it
-//!   comes); for a job the agent does not hold it retires the id and lists it in
+//!   `JobStop` for a held job asks it to stop (the stop grace, then the kill) and it ends
+//!   `killed`, once however often it comes; for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
 //!   `retired_acks` names it, the answer that the job is stopped and gone. A stop's optional
 //!   `reason` is reported once ([`Event::StopReasoned`]) and a reply's `unknown_jobs` when it
-//!   changes ([`Event::UnknownToServer`]); neither changes what is stopped. A container a
-//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it
-//!   lists it as a job again.
+//!   changes ([`Event::UnknownToServer`]); neither changes what is stopped.
 //! - **A job start whose fence is retired runs never.** The fence is the job id with the
 //!   allocation id (`js_agent_wire::START_FENCE_CAPABILITY`, which the hello reports). The
 //!   fence of a job that ended is retired when the job leaves the listing; that of a job
-//!   the server stopped or cancelled, or that the agent stopped for silence, when the stop
+//!   the server stopped, or that the agent stopped for silence, when the stop
 //!   is asked, and it is in the state root before the stop is reported; a stop of a job
 //!   the agent does not hold names no allocation and retires every fence of the job. Such
 //!   a start is skipped (`Skip::FenceRetired`) before anything is booked or made; the same
-//!   job under a new allocation is a new fence and runs. A run start has no fence beyond
-//!   its run id and is judged as before (`Skip::Retired`).
+//!   job under a new allocation is a new fence and runs.
 //! - **A silence of the server stops every job** ([`Lifecycle::stop_on_silence`],
 //!   `--silence-stop`, see [`DEFAULT_SILENCE_STOP`] for the bound). Contact is a welcome or
 //!   a heartbeat reply the session accepted, stamped on the lifecycle's clock by the
 //!   session ([`Contact`]); a reply the worker had no room for counts. Once the server has
 //!   not been heard for the bound, every job that runs or waits to start is stopped as
-//!   a `Stop` stops it (the stop grace, then the kill; a native run is killed at once), its
+//!   a `JobStop` stops it (the stop grace, then the kill; a native run is killed at once), its
 //!   fence is retired and its result is `killed` with the detail `silence-stop`. It is done
 //!   once for each silence; a contact ends the silence, and starts that follow are judged
 //!   as above. It runs while an agent runs: a native run is not bounded while no agent
@@ -86,8 +80,7 @@
 //!   providers, for the lookups of its host paths and, once those are done, for its
 //!   assembly ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker;
 //!   the waits that do not depend on one another run side by side. The
-//!   wall time then counts from that moment, but never past the end of the lease the
-//!   start's `valid_for_ms` named. A stop or cancel while it waits ends it without a
+//!   wall time then counts from that moment. A stop while it waits ends it without a
 //!   container, and a fetch that failed ends every run that waited on it
 //!   `failed_to_start`. Nothing bounds the wait but those and the runtime's own limit on
 //!   a fetch, and an agent that restarts while a run waits has nothing on the host to
@@ -112,7 +105,7 @@
 //! - **A result says what happened.** It is sent as soon as the container has exited,
 //!   before any cleanup, and it stays in the heartbeat until the server acknowledges it. An
 //!   acknowledgement of a kind this version does not know keeps it. A container that
-//!   exited before a stop reached it (a `Stop` applied between the exit and the next step,
+//!   exited before a stop reached it (a `JobStop` applied between the exit and the next step,
 //!   or a stop the runtime refused) is reported as it exited, `succeeded` with status 0
 //!   included; `killed` and `timed_out` mean the agent's stop ended it, or that the
 //!   container was gone when the agent looked.
@@ -136,8 +129,9 @@
 //!   agent labelled, before the first heartbeat of the new process, and lists them first,
 //!   so the server never sees a gap that would make it run the work twice. A labelled
 //!   container no job can stand for (bad or repeated labels, a booking outside the offer
-//!   or beside one already taken over, a number of runs beyond what a heartbeat can
-//!   list) is stopped and removed by its own id and recorded as a [`Finding`]. One that
+//!   or beside one already taken over, a number of jobs beyond what a heartbeat can
+//!   list, or a keying label other than `job`, as on a container an older release's run
+//!   start made) is stopped and removed by its own id and recorded as a [`Finding`]. One that
 //!   cannot be removed holds what its labels say it booked (the whole offer when they do
 //!   not say) and is stopped and removed again at every step, so nothing is left running
 //!   with nothing booked for it. Containers are taken over in the order of their age
@@ -165,7 +159,7 @@
 //!   marker is on disk, so a taint the server was told of is a taint a restart finds, and a
 //!   taint on disk is reported at the first heartbeat of the process that finds it. (The
 //!   run's own result is not held back by it: it is reported as soon as the container has
-//!   exited, before its cleanup and checks.) A tainted agent answers every later `Start`
+//!   exited, before its cleanup and checks.) A tainted agent answers every later start
 //!   `failed_to_start` with the code `host-tainted`, lets the jobs it runs finish, and
 //!   offers the taint until the server acknowledges it. A marker that cannot be written
 //!   keeps the agent tainted in memory (it refuses starts and frees no slot) and the taint
@@ -215,14 +209,14 @@
 //!   operator moves the marker. See [`taint`] for the rules and
 //!   `docs/design/taint-self-clearing.md` for the reasons.
 //! - **A held host starts nothing** (see [`hold`]). While the hold file is in the state
-//!   root (the drain of an update wrote it), every `Start` and job start is answered
+//!   root (the drain of an update wrote it), every job start is answered
 //!   `failed_to_start` with the code `host-held`, after the taint's refusal: the host is not
 //!   tainted for it, and the file is looked at for each start, so its removal lets the next
 //!   start run. A file there that is not the agent's own, or that group or others have
 //!   permission on, is refused as a hold and holds the host all the same.
-//! - **A `host-tainted` refusal is final for that `Start`, and the host's.** The run did
+//! - **A `host-tainted` refusal is final for that start, and the host's.** The job did
 //!   not start on this host and will not; the server must not send it to this host again
-//!   (see `refusal::HOST_TAINTED`), and must treat a `Start` refused with it as the host's
+//!   (see `refusal::HOST_TAINTED`), and must treat a start refused with it as the host's
 //!   taint even when the heartbeat carries none (the marker may be unwritable, and a taint
 //!   that is not on disk is not reported), and must not count the refusal against the
 //!   run's retries. `taint_ack` acknowledges the taint this process reported: an
@@ -251,8 +245,8 @@
 //! - **Held results and retired fences survive a restart** as files in the state root (see
 //!   `held`); the `retired_jobs` still owed the server do not. Containers that still exist
 //!   are re-adopted, an exited one as its container says.
-//! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
-//!   purpose**, so that a `Start` that arrives after it never runs.
+//! - **A `JobStop` of a job the agent does not hold retires the job id on purpose**, so
+//!   that a start that arrives after it never runs.
 //! - **Each run has a slot, and each slot a user of its own.** A run in slot `k` (the lowest
 //!   free one, from 0) runs as the base of `--container-user` plus `k`, so runs held at once
 //!   never share a host uid. A slot is free again only when the cleanup of its last run
@@ -289,9 +283,8 @@
 //! that a slow runtime call delays the next [`Lifecycle::step`] but never a heartbeat, and
 //! a slow docker call cannot make the agent miss its heartbeat deadline and fence itself.
 //! The worker owns the lifecycle (it is built on that thread, so the runtime needs no
-//! `Send` bound); the session loop hands it replies and takes [`Lifecycle::held`],
-//! [`Lifecycle::results`], [`Lifecycle::held_jobs`], [`Lifecycle::retired_jobs`] and
-//! [`Lifecycle::pending_taint`] as the snapshot the worker publishes after each order and
+//! `Send` bound); the session loop hands it replies and takes [`Lifecycle::held_jobs`],
+//! [`Lifecycle::retired_jobs`] and [`Lifecycle::pending_taint`] as the snapshot the worker publishes after each order and
 //! step.
 //!
 //! # How it is wired
@@ -299,7 +292,7 @@
 //! Nothing here touches the network. The worker feeds [`Lifecycle::apply_at`] each
 //! heartbeat reply (stamped with the moment it arrived), calls [`Lifecycle::step`] after
 //! each order and whenever it has had none for a second, and the session puts the held
-//! runs, the results and the taint in the next heartbeat. The [`Config`] is built from
+//! jobs, their results and the taint in the next heartbeat. The [`Config`] is built from
 //! the flags ([`Local`]) and the hello's shape ([`Capacity::of`]).
 
 mod codes;
@@ -342,9 +335,7 @@ use crate::quota::ScratchQuota;
 pub use codes::{code, detail};
 pub use event::{CleanupTimeline, Event, Finding, JobBooking, LookupStamps, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote, Checked};
-pub use machine::{
-    Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
-};
+pub use machine::{Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, SLOTS, Slots};
 pub use mount_providers::{
     DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders, ProviderFlags, UserNames,
 };

@@ -5,7 +5,7 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
 ## What exists now
 
 The suite is the `agent` module of `js-conformance`, beside the provider suite. It is wire-neutral: the scenarios speak only to the
-`AgentHarness` trait (deliver a Start with its validity bound, a fenced Start naming a job and its allocation, a Start breaking one
+`AgentHarness` trait (deliver a Start, a fenced Start naming a job and its allocation, a Start breaking one
 rule of the start contract, a host Start and a Start under a whole-node lease; deliver a Cancel; answer a result with a verdict;
 end a job on its own or with a failure; acknowledge a taint; make the runtime fail a removal or the post-job check find something;
 give the operator's consent to host jobs; restart the agent; hold the host whole and ask whether it is ready; answer a heartbeat;
@@ -18,11 +18,10 @@ broken agent and that no other scenario does.
 |---|---|---|
 | `StartIsIdempotent` | a repeated Start launches the job once | `StartRunsTwice` |
 | `CancelUntilAbsent` | a Cancel lost on a dropped connection changes nothing; resent while the lease is listed, the lease leaves the listing; a further Cancel is harmless; a Start for the cancelled id does not run (the id is retired) | `CancelKeepsListed`, `ForgetsRetiredIds` |
-| `LateStartIsDropped` | a Start that waited longer than its validity is reported never started and launches nothing; one that waited exactly its validity runs; validity 0 is unbounded and runs | `RunsLateStart` |
 | `SelfFencesAfterSilence` | one tick short of the agent's own fence window the lease runs, the window counts from the last contact, the full window stops and reports it fenced; an agent with no fence fails | `NeverFences` |
 | `UnackedResultIsResent` | an unacknowledged result is repeated in every heartbeat, including the first on a new connection, and not while the link is down; an acknowledged one is not | `ForgetsUnackedResult` |
 | `RetiredFenceIsRefused` | a fenced Start repeated while its job runs launches it once; one whose fence (the job with its allocation) the agent retired, the job having ended and its result been acknowledged, launches nothing; the same job under a new allocation runs | `RunsRetiredFence`, `FenceKeyedByJobAlone` |
-| `AnsweredResultIsDropped` | a result answered with a verdict the agent knows (accepted, duplicate, stale, unknown lease, mismatch) is not sent again; one answered with a verdict it does not know is; an answer for a lease with no result, or one the agent does not hold, changes nothing | `KeepsRefusedResult`, `DropsUnrecognisedAnswer` |
+| `AnsweredResultIsDropped` | a result answered with a verdict the agent knows (accepted, duplicate, stale, mismatch) is not sent again; one answered with a verdict it does not know is; an answer for a lease with no result, or one the agent does not hold, changes nothing | `KeepsRefusedResult`, `DropsUnrecognisedAnswer` |
 | `UsageIsReportedOnEveryEnd` | a job's result carries its usage when it ended on its own, failed, or was killed by a stop | `DropsUsageOnFailure`, `DropsUsageOnKill` |
 | `FlawedStartIsRefused` | a start with no wall time, a reserved label, a fence with no allocation, a mount outside the agent's roots, a GPU on an agent with none, or a VM on an agent with no VM backend is refused and launches nothing; a well-formed start after them runs | `RunsFlawedStart(flaw)`, one per flaw |
 | `CleanupFreesTheSlotLast` | the container and the scratch are reported gone before the slot is freed; a container that cannot be removed frees no slot and taints the host | `FreesSlotBeforeCleanup`, `FreesSlotOnFailedRemoval`, `FailedRemovalTaintsNothing` |
@@ -35,25 +34,24 @@ broken agent and that no other scenario does.
 
 How an adapter maps a transport (full text in the module documentation of `agent`):
 
-- Start validity is relative (`valid_for`, 0 unbounded; dropped when `waited > valid_for`). The legacy agent measures `waited` from
-  receipt on the agent's clock (`valid_for_ms != 0 && waited > valid_for_ms`); the worker wire counts `valid_for_ms` from the send
-  time of the heartbeat the Start names.
 - The fence window is the transport's own, or none; an agent with no self-fence fails `SelfFencesAfterSilence` with that reason. The
   js-agent's window is its silence bound (`--silence-stop`, 300 s by default).
-- A fenced Start is a job start (`job_start`, fenced by the job id with the allocation id); `start` stays a run start, so it keeps
-  its validity bound.
-- `launches` and `never_started` are derived: the legacy agent emits a skipped-stale event to read; the worker wire has none, so an
-  adapter derives them from the Results and refusals that reached it and from what its job runner was asked to launch.
+- A fenced Start is a job start (`job_start`, fenced by the job id with the allocation id); `start` is the start the agent makes of a
+  run spec (`Lifecycle::start_spec`), which is keyed by job all the same. Neither carries a validity bound.
+- `launches` is derived: an adapter derives it from the Results and refusals that reached it and from what its job runner was asked
+  to launch.
 - A flawed start (`start_flawed`) puts its flaw where the transport carries it, and `refused` reads either refusal: a command the
-  wire's own check refuses (no wall time, a reserved label, a fence with no allocation) or a start the agent refuses when it admits
-  it (a mount outside its roots, a GPU its shape lacks, a VM with no backend). A reserved label is a run start's, a fence a job
-  start's, since each start kind carries only one of them.
+  wire's own check refuses (no wall time, a fence with no allocation), a start the agent refuses when it admits it (a mount outside
+  its roots, a GPU its shape lacks, a VM with no backend), or a spec the wire's check refuses before the adapter starts it (a
+  reserved label: `start_spec` does not run `JobSpec::validate`, so the js-agent adapter runs it and starts nothing it refuses).
+  A fence and a VM are a job start's; a mount and a label are a run spec's, since each start kind carries only some of them.
 - The runtime and the post-job check are the adapter's: `remove_fails` makes every removal of a run's container fail and
   `check_finds` makes the check find a leftover process of the job's user or fail to run. `cleanup` is the order the agent
   reported the container gone, the scratch gone and the slot free.
-- A restart (`restart`) is the agent's process starting again over the same runtime and state directory, followed by its first
-  heartbeat and a reply that says nothing of a taint. The js-agent adapter gives the operator's consent to host jobs
-  (`consent_to_host_jobs`) as a restart with `allow_host_jobs`.
+- A restart (`restart`) is the agent's process starting again over the same runtime and state directory (it takes over the
+  containers the agent made, each labelled as keyed by job), followed by its first heartbeat and a reply that says nothing of a
+  taint. The js-agent adapter gives the operator's consent to host jobs (`consent_to_host_jobs`) as a restart with
+  `allow_host_jobs`.
 - A whole-node lease (`hold_whole`) is named by every reply after it, and `whole_ready` is the agent's answer to whether the host
   is quiet for it (the js-agent's `prepare`, which its session asks on each heartbeat).
 
@@ -83,7 +81,7 @@ kinds, and each is tested where it lives:
 - Retries are not passed on: the agent wire carries no retry. The start contract's retry rule is the scheduler's, and
   `crates/js-types/src/start.rs` says it is not modelled yet.
 - Per session (5.1): the scheduler cancels none of a leasee's placements, and answers `Cancel` to a hello that announces a lease
-  not committed to its host id. The session's own half (cancel, grace, ack, never-started) is the scenarios above.
+  not committed to its host id. The session's own half (cancel, grace, ack) is the scenarios above.
 - The pool's and the consumer's consents to host jobs (`crates/js-lease-server/src/job_start.rs`), the scheduler's own taint
   record of a host job that a Result, hello or heartbeat does not undo (`crates/js-lease-server/src/agents_taints.rs`), and the
   whole-node lease token minted only after `exclusive_ready`, with `exclusive-not-ready` after a timeout

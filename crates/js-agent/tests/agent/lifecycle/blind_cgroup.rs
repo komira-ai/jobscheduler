@@ -319,8 +319,8 @@ fn a_run_with_no_group_and_no_process_is_not_blind() {
 
 /// Asserts that a run whose group the runtime names only when asked where its container is
 /// (the group was made between the lifecycle's look and that ask) is not blind: the group is
-/// taken as the run's, so it is sampled from then on, and the runtime is asked nothing more.
-/// Catches a group found at the last moment thrown away, leaving the lease unsampled.
+/// taken as the run's, the host is not tainted, and the runtime is asked nothing more.
+/// Catches a group found at the last moment thrown away, which taints a host that is seen.
 #[test]
 fn a_group_named_when_asked_where_the_container_is_is_the_runs() {
     let mut h = Harness::new("grouped-when-asked");
@@ -333,11 +333,6 @@ fn a_group_named_when_asked_where_the_container_is_is_the_runs() {
     h.life.step();
     assert_eq!(h.fake.where_asks("r1"), 1);
     assert!(!h.life.is_tainted());
-    let running = h.life.running();
-    assert_eq!(
-        running[0].cgroup.as_deref(),
-        Some(std::path::Path::new("/sys/fs/cgroup/actions/lease-r1/ctr"))
-    );
     h.clock.advance(SETTLE_MS);
     h.life.step();
     assert_eq!(

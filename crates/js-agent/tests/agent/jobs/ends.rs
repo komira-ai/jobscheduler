@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use js_agent::lifecycle::Capacity;
 use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Snapshot, Wake, Worker, drive};
-use js_agent_wire::{HeldRun, HeldState};
+use js_agent_wire::{HeldJob, HeldState};
 
 use super::drain::container_flags;
 use super::fake::{Build, FakeMachine, HANG_GUARD, World};
@@ -192,9 +192,10 @@ fn stops_in(world: &World) -> usize {
 
 fn running(run: &str) -> Snapshot {
     Snapshot {
-        held: vec![HeldRun {
-            run_id: run.to_owned(),
+        jobs: vec![HeldJob {
+            job_id: run.to_owned(),
             state: HeldState::Running,
+            result: None,
         }],
         ..Snapshot::default()
     }

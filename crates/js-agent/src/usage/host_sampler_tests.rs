@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{CpuTicks, HostSampler, HostStatistics, VmPages};
-use crate::lifecycle::RunningLease;
 use crate::usage::{
-    Collector, HostCpu, LeaseCgroup, NodeSampler, Outbox, Sample, SampleError, UsageClock,
+    Collector, HostCpu, LeaseCgroup, NodeSampler, Outbox, RunningLease, Sample, SampleError,
+    UsageClock,
 };
 
 /// Counters that give each CPU reading of `ticks` in turn (none once they are used up), and

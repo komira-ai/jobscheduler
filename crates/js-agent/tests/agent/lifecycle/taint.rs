@@ -204,7 +204,7 @@ fn a_host_job_whose_marker_cannot_be_written_is_not_started() {
     let events = names(&h.start(host_job("r1")));
     assert_eq!(events, ["tainted r1 host-job", "refused r1 taint-failed"]);
     assert!(h.fake.created().is_empty());
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("taint-failed"));
     assert!(h.life.is_tainted());
@@ -323,9 +323,7 @@ fn a_tainted_agent_refuses_starts_and_lets_running_jobs_finish() {
     h.fake.exit("r1", 0);
     h.life.step();
     assert_eq!(names(&h.start(job("r3"))), ["refused r3 host-tainted"]);
-    let refused = h
-        .life
-        .results()
+    let refused = super::results(&h.life)
         .into_iter()
         .find(|result| result.run_id == "r3")
         .unwrap();
@@ -336,8 +334,7 @@ fn a_tainted_agent_refuses_starts_and_lets_running_jobs_finish() {
     assert_eq!(events[0], "result r2");
     assert_eq!(events.last().unwrap(), "freed r2");
     assert!(
-        h.life
-            .results()
+        super::results(&h.life)
             .iter()
             .any(|r| r.run_id == "r2" && r.outcome == Outcome::Failed),
         "the running job finished and reported"
@@ -349,21 +346,18 @@ fn a_tainted_agent_refuses_starts_and_lets_running_jobs_finish() {
 }
 
 /// Asserts that a host job taints the host whatever happens to it: it exits 0, fails,
-/// runs out of memory, is stopped, cancelled or timed out, or fails to start. For each, the
+/// runs out of memory, is stopped or timed out, or fails to start. For each, the
 /// marker is on disk the moment the start is applied, names the run, and is still there
 /// when the slot is freed. It catches a host job whose taint depends on how it ended.
 #[test]
 fn host_job_taints_on_every_outcome() {
     type Ending = fn(&mut Harness);
-    let endings: [(&str, Ending); 7] = [
+    let endings: [(&str, Ending); 6] = [
         ("exit0", |h| h.fake.exit("r1", 0)),
         ("exit3", |h| h.fake.exit("r1", 3)),
         ("oom", |h| h.fake.exit_oom("r1")),
         ("stopped", |h| {
             h.stop("r1");
-        }),
-        ("cancelled", |h| {
-            h.cancel("r1");
         }),
         ("timed-out", |h| h.clock.advance(60_000)),
         ("never-started", |_| {}),
@@ -429,7 +423,7 @@ fn a_start_that_shows_the_host_is_not_seen_taints_it_as_unchecked() {
             check: Some(code::HOST_NOT_VISIBLE.to_owned()),
         })
     );
-    let result = &h.life.results()[1];
+    let result = &super::results(&h.life)[1];
     assert_eq!(
         (
             result.run_id.as_str(),
@@ -660,6 +654,7 @@ fn container(run_id: &str, isolation: Option<&str>) -> Vec<(&'static str, String
         ("jobscheduler.dev/disk-bytes", "0".to_owned()),
         ("jobscheduler.dev/gpus", String::new()),
         ("jobscheduler.dev/wall-ms", "60000".to_owned()),
+        ("jobscheduler.dev/keying", "job".to_owned()),
     ];
     labels.extend(isolation.map(|text| ("jobscheduler.dev/isolation", text.to_owned())));
     labels
@@ -941,7 +936,7 @@ fn a_check_that_could_not_run_taints_as_unchecked() {
 
 /// Asserts that a host job that is refused for any reason other than the taint taints
 /// nothing: one that names a mount root that does not exist, one larger than the machine
-/// and one that does not fit beside a running job leave no marker and the agent clean. It
+/// and one that wants a GPU a running job holds leave no marker and the agent clean. It
 /// catches a host job that taints the host on a start that creates nothing.
 #[test]
 fn a_host_job_that_is_refused_for_another_reason_taints_nothing() {
@@ -955,9 +950,9 @@ fn a_host_job_that_is_refused_for_another_reason_taints_nothing() {
     let mut large = host_job("l1");
     large.limits.cpu_millis = 99_000_000;
     let mut big = job("b1");
-    big.limits.cpu_millis = 3500;
+    big.gpu_indices = vec![0];
     let mut crowded = host_job("c1");
-    crowded.limits.cpu_millis = 1000;
+    crowded.gpu_indices = vec![0];
     for (spec, code) in [
         (bad_mount, "invalid-mount"),
         (large, "limits-exceed-shape"),

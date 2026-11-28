@@ -726,7 +726,7 @@ impl Cell {
         &self.observations
     }
 
-    /// The cell's launch and completion ledger.
+    /// The cell's launch ledger.
     #[must_use]
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
@@ -895,18 +895,8 @@ impl Cell {
             self.record(format!("launch {}", launch.host));
         }
         self.observations.ledger.extend(launches);
-        let seen = &self.observations;
-        let counts = [seen.ready.len(), seen.starts.len(), seen.stops.len()];
-        let (ready, starts, stops) = self.ledger.whole_after(counts);
+        let ready = self.ledger.ready_after(self.observations.ready.len());
         self.observations.ready.extend(ready);
-        self.observations.starts.extend(starts);
-        self.observations.stops.extend(stops);
-        let ended = self.observations.completions.len();
-        let completions = self.ledger.completions_after(ended);
-        self.observations.completions.extend(completions);
-        let judged = self.observations.verdicts.len();
-        let verdicts = self.ledger.verdicts_after(judged);
-        self.observations.verdicts.extend(verdicts);
         let seen = &self.observations;
         let counts = [
             seen.job_beats.len(),

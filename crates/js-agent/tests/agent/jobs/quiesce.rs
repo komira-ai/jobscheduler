@@ -15,13 +15,12 @@ use js_agent::{
     Delivery, Drain, EXIT_NOT_QUIET, HEARTBEAT_PATH, HookRunner, Note, QUEUE, Quiesce, Ran,
     ReadinessHook, Session, Worker, WorkerHook, WorkerHost, stall_bound,
 };
-use js_agent_wire::{Command, HeartbeatReply, JobSpec, RefusalReason};
+use js_agent_wire::{Command, HeartbeatReply, JobStartSpec, RefusalReason};
 use serde_json::{Value, json};
 
 use super::fake::{FakeMachine, HANG_GUARD};
-use super::{STEP_NEVER, plan, start, starts};
+use super::{STEP_NEVER, job_start, plan, start, starts};
 use crate::exclusive::{lines, note};
-use crate::lifecycle::job;
 use crate::support::{Reply, Scratch, Script, Sent, hello, lowest, reply, welcome};
 
 /// How long a test waits for a question that must not block. It is far below
@@ -39,13 +38,13 @@ const DRAIN: Drain = Drain {
 };
 
 /// A reply body that names `lease` (or none), carries `commands` and acknowledges the
-/// results of `acks`.
+/// results of the jobs `acks`.
 fn body(lease: Option<&str>, commands: &[Command], acks: &[&str]) -> Value {
     let acks: Vec<Value> = acks
         .iter()
-        .map(|run| json!({ "run_id": run, "ack": "ACCEPTED" }))
+        .map(|job| json!({ "job_id": job, "ack": "ACCEPTED" }))
         .collect();
-    json!({ "commands": commands, "result_acks": acks, "exclusive": lease })
+    json!({ "commands": commands, "job_acks": acks, "exclusive": lease })
 }
 
 /// The heartbeat answer with that body.
@@ -58,18 +57,18 @@ fn granting(lease: &str, acks: &[&str]) -> HeartbeatReply {
     serde_json::from_value(body(Some(lease), &[], acks)).unwrap()
 }
 
-/// A start for the run `run_id` that belongs to the whole-node lease [`LEASE`].
-fn of_lease(run_id: &str) -> Command {
-    let spec = JobSpec {
-        lease_id: LEASE.to_owned(),
-        ..job(run_id)
+/// A start for the job `job_id` whose allocation is the whole-node lease [`LEASE`].
+fn of_lease(job_id: &str) -> Command {
+    let spec = JobStartSpec {
+        allocation_id: LEASE.to_owned(),
+        ..job_start(job_id)
     };
-    Command::Start(Box::new(spec))
+    Command::JobStart(Box::new(spec))
 }
 
-/// A start for the run `run_id`, which belongs to a lease of its own.
-fn of_another(run_id: &str) -> Command {
-    Command::Start(Box::new(job(run_id)))
+/// A start for the job `job_id`, which belongs to an allocation of its own.
+fn of_another(job_id: &str) -> Command {
+    Command::JobStart(Box::new(job_start(job_id)))
 }
 
 /// The heartbeats sent so far.
@@ -210,14 +209,21 @@ fn a_whole_node_lease_is_followed_through_the_real_worker() {
     );
     assert_eq!(machine.world.created(), ["r1", "r2"], "r3 ran nothing");
     let beats = heartbeats(&sent);
+    let refused: Vec<&Value> = beats[6]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|job| job["job_id"] == "r3")
+        .collect();
+    assert_eq!(refused.len(), 1, "{}", beats[6]);
     assert_eq!(
-        beats[6]["results"],
-        json!([{
-            "run_id": "r3",
-            "lease_id": "lease-r3",
+        refused[0]["result"],
+        json!({
+            "job_id": "r3",
+            "allocation_id": "alloc-r3",
             "outcome": "failed_to_start",
             "detail": "no-capacity",
-        }])
+        })
     );
 }
 

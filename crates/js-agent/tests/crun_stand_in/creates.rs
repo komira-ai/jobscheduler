@@ -15,9 +15,7 @@ use js_agent::egress::EgressError;
 use js_agent::lifecycle::{
     Created, Event, Lifecycle, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Wake,
 };
-use js_agent_wire::{
-    Command, HeartbeatReply, HeldState, Isolation, JobSpec, Limits, NetworkCeiling,
-};
+use js_agent_wire::{HeldState, Isolation, JobSpec, Limits, NetworkCeiling};
 use js_contain::oci::{SupervisorId, recorded_supervisor};
 use js_types::{JobNetwork, PortMap};
 use serde_json::Value;
@@ -370,7 +368,6 @@ fn a_job_held_in_its_start_lets_another_job_start_and_run() {
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: 0,
         bundle: None,
         native: None,
         network,
@@ -379,28 +376,24 @@ fn a_job_held_in_its_start_lets_another_job_start_and_run() {
         os: None,
         arch: None,
     };
-    let start = |spec| HeartbeatReply {
-        commands: vec![Command::Start(Box::new(spec))],
-        ..HeartbeatReply::default()
-    };
     let started = |events: &[Event], run: &str| {
         events
             .iter()
             .any(|event| matches!(event, Event::Started { run_id, .. } if run_id == run))
     };
     let state_of = |life: &Lifecycle, run: &str| {
-        life.held()
+        life.held_jobs()
             .into_iter()
-            .find(|held| held.run_id == run)
+            .find(|held| held.job_id == run)
             .map(|held| held.state)
     };
 
-    let events = life.apply(&start(job("ja-wired", JobNetwork::AllowList)));
+    let events = life.start_spec(&job("ja-wired", JobNetwork::AllowList));
     assert!(!started(&events, "ja-wired"));
     entered.recv_timeout(LONG).expect("A reached its wiring");
     assert_eq!(state_of(&life, "ja-wired"), Some(HeldState::Starting));
 
-    let mut events = life.apply(&start(job("jb-wired", JobNetwork::None)));
+    let mut events = life.start_spec(&job("jb-wired", JobNetwork::None));
     events.extend(life.until(|life| state_of(life, "jb-wired") == Some(HeldState::Running)));
     assert!(started(&events, "jb-wired"), "{events:?}");
     assert_eq!(state_of(&life, "ja-wired"), Some(HeldState::Starting));

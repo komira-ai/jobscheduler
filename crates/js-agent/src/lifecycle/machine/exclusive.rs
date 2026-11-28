@@ -1,5 +1,5 @@
 //! The agent's side of a whole-node lease (whole-node design, sections 5 and 8): the
-//! gate on `Start`, the quiet check of `Preparing` and the clean-up check of `Restoring`.
+//! gate on a job start, the quiet check of `Preparing` and the clean-up check of `Restoring`.
 //!
 //! The server names the lease in the reply (`exclusive`) for as long as it holds the host
 //! whole. [`Lifecycle::apply`] follows it: from the reply that names a lease until the

@@ -4,7 +4,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{broken, expect, job, long};
+use common::{broken, expect, job, job_start, long};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{
@@ -73,14 +73,13 @@ fn path(value: &str) -> NativeSpec {
     native
 }
 
-/// The exact JSON of a native start with every field set. It catches a renamed field
+/// The exact JSON of a native job spec with every field set. It catches a renamed field
 /// (`args` in particular, which is not `argv`), a lost `snake_case` or a changed input tag,
-/// and an `image` that is dropped when empty (an old agent must read it as empty, not as
+/// and an `image` that is dropped when empty (a reader must read it as empty, not as
 /// missing).
 #[test]
-fn native_start_wire_form() {
+fn native_spec_wire_form() {
     let expected = json!({
-        "type": "start",
         "run_id": "run-1",
         "lease_id": "1-1",
         "image": "",
@@ -105,17 +104,16 @@ fn native_start_wire_form() {
         "mounts": [],
         "isolation": "contained",
         "labels": {"team": "infra"},
-        "heartbeat_seq": 7,
-        "valid_for_ms": 10000
+        "heartbeat_seq": 7
     });
-    let command = Command::Start(Box::new(spec()));
-    assert_eq!(serde_json::to_value(&command).unwrap(), expected);
-    let decoded: Command = serde_json::from_value(expected).unwrap();
-    assert_eq!(decoded, command);
-    assert_eq!(command.validate(), Ok(()));
+    let spec = spec();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), expected);
+    let decoded: JobSpec = serde_json::from_value(expected).unwrap();
+    assert_eq!(decoded, spec);
+    assert_eq!(spec.validate(), Ok(()));
 }
 
-/// A container start encodes without a `native` key, so the existing wire form is
+/// A container spec encodes without a `native` key, so the existing wire form is
 /// unchanged. It catches a `native: null` that a strict older reader would reject.
 #[test]
 fn container_start_has_no_native_key() {
@@ -163,38 +161,41 @@ fn input_and_output_defaults_are_the_narrow_ones() {
 }
 
 /// Fields a newer sender adds, at every level of the body, are ignored and a round trip
-/// drops them. It catches a `deny_unknown_fields`, which would make a newer server's start
-/// unreadable by this agent within major 1.
+/// drops them. It catches a `deny_unknown_fields`, which would make a newer sender's spec
+/// unreadable within major 1.
 #[test]
-fn unknown_fields_in_a_native_start_are_ignored() {
-    let mut wire = serde_json::to_value(Command::Start(Box::new(spec()))).unwrap();
+fn unknown_fields_in_a_native_spec_are_ignored() {
+    let mut wire = serde_json::to_value(spec()).unwrap();
     wire["extra"] = json!(1);
     wire["native"]["extra"] = json!({"a": 1});
     wire["native"]["inputs"][0]["extra"] = json!(true);
     wire["native"]["inputs"][1]["extra"] = json!(true);
     wire["native"]["outputs"][0]["extra"] = json!([]);
-    let decoded: Command = serde_json::from_value(wire).unwrap();
-    assert_eq!(decoded, Command::Start(Box::new(spec())));
+    let decoded: JobSpec = serde_json::from_value(wire).unwrap();
+    assert_eq!(decoded, spec());
     let again = serde_json::to_value(&decoded).unwrap();
     assert!(again["native"].get("extra").is_none());
     assert!(again.get("extra").is_none());
 }
 
 /// A network level, input type, placement, output kind or tree `unavailable` value this
-/// version does not know makes that one start unreadable, and the commands beside it still
+/// version does not know makes that one job start unreadable, and the commands beside it still
 /// arrive. It catches an unknown value being read as a default (which would widen what the
 /// job may do, or start it without a tree it did not agree to stage itself).
 #[test]
 fn an_unknown_confinement_value_reads_as_an_unknown_command() {
-    let stop = json!({"type": "stop", "run_id": "r"});
-    let start = serde_json::to_value(Command::Start(Box::new(spec()))).unwrap();
+    let stop = json!({"type": "job_stop", "job_id": "r"});
+    let mut run = job_start();
+    run.command = Vec::new();
+    run.run = Some(RunSpec::from(spec().native.unwrap()));
+    let start = serde_json::to_value(Command::JobStart(Box::new(run))).unwrap();
     let edits: [fn(&mut Value); 5] = [
-        |v| v["native"]["network"] = json!("bridge"),
-        |v| v["native"]["inputs"][0]["type"] = json!("volume"),
-        |v| v["native"]["inputs"][0]["placement"] = json!("shared"),
-        |v| v["native"]["outputs"][0]["kind"] = json!("socket"),
+        |v| v["run"]["network"] = json!("bridge"),
+        |v| v["run"]["inputs"][0]["type"] = json!("volume"),
+        |v| v["run"]["inputs"][0]["placement"] = json!("shared"),
+        |v| v["run"]["outputs"][0]["kind"] = json!("socket"),
         |v| {
-            v["native"]["inputs"][0] =
+            v["run"]["inputs"][0] =
                 json!({"type": "tree", "digest": STAGE, "dest": "src", "unavailable": "retry"})
         },
     ];
@@ -205,17 +206,23 @@ fn an_unknown_confinement_value_reads_as_an_unknown_command() {
             serde_json::from_value(json!({"commands": [one, stop.clone()]})).unwrap();
         assert_eq!(
             reply.commands,
-            vec![Command::Unknown, Command::Stop { run_id: "r".into() }]
+            vec![
+                Command::Unknown,
+                Command::JobStop {
+                    job_id: "r".into(),
+                    reason: None
+                }
+            ]
         );
     }
     let mut known = start.clone();
-    known["native"]["inputs"][0] =
+    known["run"]["inputs"][0] =
         json!({"type": "tree", "digest": STAGE, "dest": "src", "unavailable": "job_stages"});
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [known]})).unwrap();
-    let [Command::Start(read)] = reply.commands.as_slice() else {
+    let [Command::JobStart(read)] = reply.commands.as_slice() else {
         panic!("a known value must decode: {:?}", reply.commands);
     };
-    let inputs = &read.native.as_ref().unwrap().inputs;
+    let inputs = &read.run.as_ref().unwrap().inputs;
     assert!(matches!(
         &inputs[0],
         InputRef::Tree {
@@ -699,24 +706,24 @@ fn outputs_do_not_overlap_each_other_or_the_inputs() {
     assert_eq!(siblings.validate(), Ok(()));
 }
 
-/// A start whose `image` key is missing decodes (the field defaults to empty) and is refused
-/// as `invalid-image` instead of reading as an unknown command. It catches a start that
-/// vanishes without a report.
+/// A job start whose `image` key is missing decodes (the field defaults to empty) and is
+/// refused as `invalid-job` naming `image` instead of reading as an unknown command. It
+/// catches a start that vanishes without a report.
 #[test]
 fn a_start_with_no_image_key_is_refused_not_skipped() {
     let body = json!({
-        "type": "start", "run_id": "r", "lease_id": "1-1",
-        "limits": {"cpu_millis": 1, "memory_bytes": 1, "wall_ms": 1}
+        "type": "job_start", "job_id": "r", "allocation_id": "1-1",
+        "booked": {"cpu_millis": 1, "memory_bytes": 1}, "wall_ms": 1
     });
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [body]})).unwrap();
-    let [Command::Start(spec)] = reply.commands.as_slice() else {
-        panic!("not a start: {:?}", reply.commands);
+    let [Command::JobStart(spec)] = reply.commands.as_slice() else {
+        panic!("not a job start: {:?}", reply.commands);
     };
     expect(
         spec.validate().unwrap_err(),
         "image",
         Rule::Empty,
-        refusal::INVALID_IMAGE,
+        refusal::INVALID_JOB,
     );
 }
 

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use common::{expect, job};
 use js_agent_wire::{
-    Command, Isolation, JobSpec, Limits, Mount, NativeSpec, Rule, ValidationError, refusal,
+    Isolation, JobSpec, Limits, Mount, NativeSpec, Rule, ValidationError, refusal,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -162,8 +162,7 @@ fn an_unpinned_bundle_is_refused_by_its_own_code() {
 }
 
 /// A bundle without a native body is refused `invalid-bundle` with the rule that says a
-/// bundle needs a native job, whether the image is set or empty, by `validate`, by the
-/// start command and inside a reply (which drops only that start). It catches a job that
+/// bundle needs a native job, whether the image is set or empty. It catches a job that
 /// an agent from before the field would run as a plain image job without its tools, and
 /// an empty-image job refused under a code that does not mention the bundle.
 #[test]
@@ -174,32 +173,17 @@ fn a_bundle_without_native_is_refused_as_needing_native() {
         spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
         let err = spec.validate().unwrap_err();
         expect(err, "bundle", Rule::NeedsNative, refusal::INVALID_BUNDLE);
-        let err = Command::Start(Box::new(spec.clone()))
-            .validate()
-            .unwrap_err();
-        expect(err, "bundle", Rule::NeedsNative, refusal::INVALID_BUNDLE);
-        assert_only_the_start_is_dropped(spec);
     }
 }
 
-/// A native job with a pinned bundle is accepted by `validate`, by `require_pinned`, by
-/// the start command and inside a reply, which keeps the start. It catches a bundle that
-/// is refused beside the native body it exists for.
+/// A native job with a pinned bundle is accepted by `validate` and by `require_pinned`. It
+/// catches a bundle that is refused beside the native body it exists for.
 #[test]
 fn a_native_job_with_a_bundle_is_accepted() {
     let mut spec = native_job();
     spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
     assert_eq!(spec.validate(), Ok(()));
     assert_eq!(spec.require_pinned(), Ok(()));
-    let start = Command::Start(Box::new(spec));
-    assert_eq!(start.validate(), Ok(()));
-    let reply = js_agent_wire::HeartbeatReply {
-        commands: vec![start.clone()],
-        ..js_agent_wire::HeartbeatReply::default()
-    };
-    let checked = reply.validate();
-    assert!(checked.refused.is_empty());
-    assert_eq!(checked.commands, vec![&start]);
 }
 
 /// A native job that has an image as well as a bundle is refused `invalid-bundle`, rule
@@ -213,27 +197,6 @@ fn a_bundle_beside_an_image_is_refused_as_inconsistent() {
     spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
     let err = spec.validate().unwrap_err();
     expect(err, "bundle", Rule::Inconsistent, refusal::INVALID_BUNDLE);
-    let err = Command::Start(Box::new(spec.clone()))
-        .validate()
-        .unwrap_err();
-    expect(err, "bundle", Rule::Inconsistent, refusal::INVALID_BUNDLE);
-    assert_only_the_start_is_dropped(spec);
-}
-
-/// A reply with the start and a stop: the start is refused as `invalid-bundle` and the
-/// stop is kept.
-fn assert_only_the_start_is_dropped(spec: JobSpec) {
-    let reply = js_agent_wire::HeartbeatReply {
-        commands: vec![
-            Command::Start(Box::new(spec)),
-            Command::Stop { run_id: "r".into() },
-        ],
-        ..js_agent_wire::HeartbeatReply::default()
-    };
-    let checked = reply.validate();
-    assert_eq!(checked.refused.len(), 1);
-    assert_eq!(checked.refused[0].error.code(), refusal::INVALID_BUNDLE);
-    assert_eq!(checked.commands.len(), 1);
 }
 
 /// A native job with a tag-only bundle is refused `bundle-digest-required`: the pin is
@@ -320,7 +283,6 @@ impl OldJobSpec {
             isolation: self.isolation,
             labels: self.labels.clone(),
             heartbeat_seq: self.heartbeat_seq,
-            valid_for_ms: self.valid_for_ms,
             bundle: None,
             native: None,
             files: Vec::new(),
@@ -330,7 +292,7 @@ impl OldJobSpec {
             os: None,
             arch: None,
         };
-        Command::Start(Box::new(spec)).validate()
+        spec.validate().and_then(|()| spec.require_pinned())
     }
 }
 
@@ -342,9 +304,14 @@ impl OldJobSpec {
 fn an_old_agent_refuses_a_bundle_job_by_its_empty_image() {
     let mut spec = native_job();
     spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
-    let wire: Value = serde_json::to_value(Command::Start(Box::new(spec))).unwrap();
+    let wire: Value = serde_json::to_value(&spec).unwrap();
     assert_eq!(wire["native"]["program"], json!("/bin/echo"));
+    assert!(wire.get("valid_for_ms").is_none());
     let old: OldJobSpec = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        old.valid_for_ms, 0,
+        "the old agent reads the absent field as zero"
+    );
     let err = old.check().unwrap_err();
     expect(err, "image", Rule::Empty, refusal::INVALID_IMAGE);
 

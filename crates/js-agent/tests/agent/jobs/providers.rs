@@ -12,8 +12,7 @@ use js_agent::Delivery;
 use js_agent_wire::HeldState;
 
 use super::fake::{FakeMachine, HANG_GUARD};
-use super::{STEP_NEVER, plan, start, starts};
-use crate::lifecycle::job;
+use super::{STEP_NEVER, job_start, plan, start, starts};
 use crate::support::Scratch;
 
 /// Asserts that a worker given a provider asks it for its sweep as it starts, naming the
@@ -92,15 +91,15 @@ fn the_providers_of_a_worker_ring_it() {
         Ok(worker) => worker,
         Err(why) => panic!("the worker did not start: {why}"),
     };
-    let image = job("r1").image;
+    let image = job_start("r1").image;
     machine.world.begin_pull(&image);
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
+    assert_eq!(worker.snapshot().jobs[0].state, HeldState::Starting);
 
     machine.world.end_pull(&image, false);
     machine.ring_providers();
-    let running = |s: &js_agent::Snapshot| s.held.iter().any(|h| h.state == HeldState::Running);
+    let running = |s: &js_agent::Snapshot| s.jobs.iter().any(|h| h.state == HeldState::Running);
     assert!(worker.handle().wait_until(&running, HANG_GUARD));
     assert_eq!(machine.world.created(), ["r1"]);
 }

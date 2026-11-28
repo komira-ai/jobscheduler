@@ -350,7 +350,11 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
         )
     );
     assert!(
-        rig.worker.snapshot().results.is_empty(),
+        rig.worker
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.result.is_none()),
         "the ack was taken"
     );
     assert_eq!(rig.machine.world.alive(), 0);
@@ -821,7 +825,11 @@ fn an_update_hands_the_running_jobs_to_the_next_agent_and_each_result_reaches_th
         )
     );
     assert!(
-        rig.worker.snapshot().results.is_empty(),
+        rig.worker
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.result.is_none()),
         "both acknowledged"
     );
     assert_eq!(

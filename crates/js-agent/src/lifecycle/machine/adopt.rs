@@ -8,7 +8,7 @@ use js_agent_wire::Taint;
 
 use super::held::Records;
 use super::job::{
-    Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, label_id,
+    Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, keyed_by_job, label_id,
     may_change_host, slot_label,
 };
 use super::provided::Attached;
@@ -44,14 +44,14 @@ impl Lifecycle {
     /// Starts the lifecycle of an agent that has just started, taking over the labelled
     /// containers it finds so that they are held, first, from the very first heartbeat. A
     /// container that no job can stand for is stopped and removed by its own id, and
-    /// recorded as a finding: one that was created and never started, one whose labels do
-    /// not say what it booked, one that repeats
+    /// recorded as a finding: one that was created and never started, one that is not keyed
+    /// by job, one whose labels do not say what it booked, one that repeats
     /// a run id, one whose booking does not fit the machine's offer beside the containers
     /// taken over before it (a GPU not offered, or one already booked), and any beyond the
     /// number of runs a heartbeat can list. One that cannot be removed is not left
     /// unbooked: it holds what its labels say it booked (the whole offer when they do not
     /// say), and the stop and removal are tried again at every [`Lifecycle::step`] until
-    /// the removal succeeds. It is not a held run, and it never costs a running job its
+    /// the removal succeeds. It is not a held job, and it never costs a running job its
     /// place.
     ///
     /// The containers are taken over in the order of their age: those that have exited
@@ -291,12 +291,17 @@ impl Lifecycle {
     }
 
     /// The job a labelled container stands for, or why it cannot be one: it never started,
-    /// its labels do not say what it booked, its run id is held already, the agent holds as many runs as it
+    /// it is not keyed by job (its keying label is not `job`, as on a container of an older
+    /// release's run start), its labels do not say what it booked, its run id is held
+    /// already, the agent holds as many runs as it
     /// may, or its booking does not fit what the machine offers beside the jobs taken over
     /// before it.
     fn adoptable(&self, found: &Found, now: u64) -> Result<Job, &'static str> {
         if found.never_started {
             return Err("it was created and never started");
+        }
+        if !keyed_by_job(found) {
+            return Err("it is not keyed by job: an older release's run start made it");
         }
         let job = Job::adopted(found, now).ok_or("its labels do not say what it booked")?;
         let used = self.booked();

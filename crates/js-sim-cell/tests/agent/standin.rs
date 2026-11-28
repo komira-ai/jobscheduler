@@ -168,11 +168,11 @@ impl StandIn {
         self.beats().into_iter().map(|(at, _)| at).collect()
     }
 
-    /// The run ids of the results each heartbeat carried, in order.
+    /// The job ids of the results each heartbeat carried in its `jobs`, in order.
     pub fn results(&self) -> Vec<Vec<String>> {
         let each = |(_, beat): (u64, &Heartbeat)| {
-            let runs = beat.results.iter().map(|result| result.run_id.clone());
-            runs.collect()
+            let held = beat.jobs.iter().filter(|job| job.result.is_some());
+            held.map(|job| job.job_id.clone()).collect()
         };
         self.beats().into_iter().map(each).collect()
     }

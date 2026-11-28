@@ -80,7 +80,7 @@ use js_agent::lifecycle::{
     Capacity, CheckFinding, CheckHook, Clock, Config, Event, FilesRoot, Lifecycle, MARKER_FILE,
     MountRoots, RunQuota, RuntimeError, ScratchRoot, StateRoot,
 };
-use js_agent_wire::{Command, HeartbeatReply, JobSpec, Limits};
+use js_agent_wire::{Command, HeartbeatReply, HeldRun, JobSpec, Limits, RunResult};
 use serde_json::{Value, json};
 
 use crate::support::Scratch;
@@ -224,37 +224,63 @@ impl Harness {
         self.life.apply(&reply(commands))
     }
 
-    /// Applies a reply that starts `spec`.
+    /// Starts `spec` through [`Lifecycle::start_spec`]: keyed by job, its run id the job id
+    /// and its lease id the allocation id.
     pub fn start(&mut self, spec: JobSpec) -> Vec<Event> {
-        self.apply(vec![Command::Start(Box::new(spec))])
+        self.life.start_spec(&spec)
     }
 
-    /// Applies a reply that stops `run_id`.
-    pub fn stop(&mut self, run_id: &str) -> Vec<Event> {
-        self.apply(vec![Command::Stop {
-            run_id: run_id.to_owned(),
+    /// Applies a reply that stops the job `job_id`.
+    pub fn stop(&mut self, job_id: &str) -> Vec<Event> {
+        self.apply(vec![Command::JobStop {
+            job_id: job_id.to_owned(),
+            reason: None,
         }])
     }
 
-    /// Applies a reply that cancels `run_id`.
-    pub fn cancel(&mut self, run_id: &str) -> Vec<Event> {
-        self.apply(vec![Command::Cancel {
-            run_id: run_id.to_owned(),
-        }])
-    }
-
-    /// Applies a reply that acknowledges `run_id`'s result with `ack`.
-    pub fn ack(&mut self, run_id: &str, ack: &str) -> Vec<Event> {
+    /// Applies a reply that acknowledges the result of the job `job_id` with `ack`, in the
+    /// server's text.
+    pub fn ack(&mut self, job_id: &str, ack: &str) -> Vec<Event> {
         let reply = reply_json(&json!({
-            "result_acks": [{ "run_id": run_id, "ack": ack }]
+            "job_acks": [{ "job_id": job_id, "ack": ack }]
         }));
         self.life.apply(&reply)
     }
 
-    /// The run ids held, in order.
+    /// The ids of the jobs held, in order.
     pub fn held(&self) -> Vec<String> {
-        self.life.held().into_iter().map(|run| run.run_id).collect()
+        held(&self.life).into_iter().map(|run| run.run_id).collect()
     }
+}
+
+/// The jobs `life` holds as the older run listing shows them: each entry of
+/// [`Lifecycle::held_jobs`] with the job id as the run id.
+pub fn held(life: &Lifecycle) -> Vec<HeldRun> {
+    life.held_jobs()
+        .into_iter()
+        .map(|job| HeldRun {
+            run_id: job.job_id,
+            state: job.state,
+        })
+        .collect()
+}
+
+/// The results `life` holds as the older run listing shows them: the result inside each
+/// entry of [`Lifecycle::held_jobs`], the job id as the run id and the allocation id as the
+/// lease id.
+pub fn results(life: &Lifecycle) -> Vec<RunResult> {
+    life.held_jobs()
+        .into_iter()
+        .filter_map(|job| job.result)
+        .map(|result| RunResult {
+            run_id: result.job_id,
+            lease_id: result.allocation_id,
+            outcome: result.outcome,
+            exit_code: result.exit_code,
+            detail: result.detail,
+            log_tail: result.log_tail,
+        })
+        .collect()
 }
 
 /// The lifecycle's configuration under `dir`: four CPUs, 8 GiB and GPUs 0 and 1, a
@@ -321,7 +347,6 @@ pub fn job(run_id: &str) -> JobSpec {
         labels: std::collections::BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: 0,
         bundle: None,
         native: None,
         network: Default::default(),

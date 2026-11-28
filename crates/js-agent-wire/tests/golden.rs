@@ -136,12 +136,12 @@ fn welcome_and_hello_reply_wire_forms() {
     assert_eq!((old.field, old.reason), (None, None));
 }
 
-/// Asserts the exact JSON of a start command, tag included. It catches a changed
-/// `start` tag, a renamed job or limits field, and a lost `snake_case` on isolation.
+/// Asserts the exact JSON of a job spec, and that it decodes back to the value. It catches a
+/// renamed job or limits field, a lost `snake_case` on isolation, and a `valid_for_ms` written
+/// into a spec that no longer has the field.
 #[test]
-fn start_command_wire_form() {
+fn job_spec_wire_form() {
     let expected = json!({
-        "type": "start",
         "run_id": "run-1",
         "lease_id": "1-1",
         "image": "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -156,30 +156,28 @@ fn start_command_wire_form() {
         "mounts": [{"root_name": "cache", "rel": "inputs/a", "ro": true}],
         "isolation": "host",
         "labels": {"team": "infra"},
-        "heartbeat_seq": 7,
-        "valid_for_ms": 10000
+        "heartbeat_seq": 7
     });
-    let command = Command::Start(Box::new(job()));
-    assert_eq!(serde_json::to_value(&command).unwrap(), expected);
-    let decoded: Command = serde_json::from_value(expected).unwrap();
-    assert_eq!(decoded, command);
+    let spec = job();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), expected);
+    let decoded: JobSpec = serde_json::from_value(expected).unwrap();
+    assert_eq!(decoded, spec);
     let contained = serde_json::to_value(Isolation::Contained).unwrap();
     assert_eq!(contained, json!("contained"));
 }
 
-/// Asserts the exact JSON of a start that pins a bundle: `bundle` is a plain string beside
-/// `image`, and it is absent (see `start_command_wire_form`) when there is none. It catches
+/// Asserts the exact JSON of a job spec that pins a bundle: `bundle` is a plain string beside
+/// `image`, and it is absent (see `job_spec_wire_form`) when there is none. It catches
 /// a renamed field or a bundle written as an object.
 #[test]
-fn start_command_with_bundle_wire_form() {
+fn job_spec_with_bundle_wire_form() {
     let mut spec = job();
     spec.image = String::new();
     spec.bundle = Some(
         "toolchain:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .into(),
     );
-    let value = serde_json::to_value(Command::Start(Box::new(spec.clone()))).unwrap();
-    assert_eq!(value["type"], json!("start"));
+    let value = serde_json::to_value(&spec).unwrap();
     assert_eq!(value["image"], json!(""));
     assert_eq!(
         value["bundle"],
@@ -187,9 +185,9 @@ fn start_command_with_bundle_wire_form() {
             "toolchain:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         )
     );
-    assert_eq!(value.as_object().unwrap().len(), 13);
-    let decoded: Command = serde_json::from_value(value).unwrap();
-    assert_eq!(decoded, Command::Start(Box::new(spec)));
+    assert_eq!(value.as_object().unwrap().len(), 11);
+    let decoded: JobSpec = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded, spec);
 }
 
 /// Asserts the exact text of a start in the one job definition: an image with a `run`
@@ -222,11 +220,11 @@ fn one_job_start_wire_form() {
     assert_eq!(text, ONE_JOB_START);
     let decoded: JobSpec = serde_json::from_str(ONE_JOB_START).unwrap();
     assert_eq!(decoded, spec);
-    assert_eq!(Command::Start(Box::new(spec)).validate(), Ok(()));
+    assert_eq!(spec.validate(), Ok(()));
 }
 
 /// The text `one_job_start_wire_form` expects.
-const ONE_JOB_START: &str = r#"{"run_id":"run-1","lease_id":"1-1","image":"ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","run":{"program":"@bundle/tool","args":["--version"],"env":{"LANG":"C"},"cwd":"work","inputs":[{"type":"stage","stage_id":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","dest":"in","placement":"read_only"}],"outputs":[{"path":"out","kind":"dir"}],"network":"loopback"},"os":"macos","arch":"arm64","args":[],"limits":{"cpu_millis":2000,"memory_bytes":1073741824,"pids":512,"wall_ms":60000},"gpu_indices":[0],"mounts":[{"root_name":"cache","rel":"inputs/a","ro":true}],"isolation":"host","labels":{"team":"infra"},"heartbeat_seq":7,"valid_for_ms":10000}"#;
+const ONE_JOB_START: &str = r#"{"run_id":"run-1","lease_id":"1-1","image":"ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","run":{"program":"@bundle/tool","args":["--version"],"env":{"LANG":"C"},"cwd":"work","inputs":[{"type":"stage","stage_id":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","dest":"in","placement":"read_only"}],"outputs":[{"path":"out","kind":"dir"}],"network":"loopback"},"os":"macos","arch":"arm64","args":[],"limits":{"cpu_millis":2000,"memory_bytes":1073741824,"pids":512,"wall_ms":60000},"gpu_indices":[0],"mounts":[{"root_name":"cache","rel":"inputs/a","ro":true}],"isolation":"host","labels":{"team":"infra"},"heartbeat_seq":7}"#;
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -276,23 +274,22 @@ fn heartbeat_with_result_wire_form() {
     );
 }
 
-/// Asserts the exact JSON of a reply with a start, a stop, a cancel, an acknowledgement
+/// Asserts the exact JSON of a reply with a job stop, an unknown command, an acknowledgement
 /// and a taint acknowledgement, and the spelling of every verdict. It catches a renamed
 /// reply field, command tag or verdict.
 #[test]
 fn heartbeat_reply_wire_form() {
     let reply = HeartbeatReply {
         commands: vec![
-            Command::Stop {
-                run_id: "r1".into(),
+            Command::JobStop {
+                job_id: "j1".into(),
+                reason: None,
             },
-            Command::Cancel {
-                run_id: "r2".into(),
-            },
+            Command::Unknown,
         ],
         result_acks: vec![ResultAck {
             run_id: "r1".into(),
-            ack: Ack::UnknownLease,
+            ack: Ack::Unknown,
         }],
         taint_ack: true,
         taint_cleared_ack: false,
@@ -308,10 +305,10 @@ fn heartbeat_reply_wire_form() {
         serde_json::to_value(&reply).unwrap(),
         json!({
             "commands": [
-                {"type": "stop", "run_id": "r1"},
-                {"type": "cancel", "run_id": "r2"}
+                {"type": "job_stop", "job_id": "j1"},
+                {"type": "unknown"}
             ],
-            "result_acks": [{"run_id": "r1", "ack": "UNKNOWN_LEASE"}],
+            "result_acks": [{"run_id": "r1", "ack": "UNKNOWN"}],
             "taint_ack": true
         })
     );
@@ -319,12 +316,12 @@ fn heartbeat_reply_wire_form() {
         Ack::Accepted,
         Ack::Duplicate,
         Ack::Stale,
-        Ack::UnknownLease,
         Ack::Mismatch,
+        Ack::Unknown,
     ];
     assert_eq!(
         serde_json::to_string(&verdicts).unwrap(),
-        r#"["ACCEPTED","DUPLICATE","STALE","UNKNOWN_LEASE","MISMATCH"]"#
+        r#"["ACCEPTED","DUPLICATE","STALE","MISMATCH","UNKNOWN"]"#
     );
 }
 

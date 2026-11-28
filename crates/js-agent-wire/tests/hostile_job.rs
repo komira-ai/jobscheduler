@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{broken, expect, job, long, map};
+use common::{broken, expect, job, job_start, long, map};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{Command, JobSpec, Mount, Rule, WireShape};
@@ -14,7 +14,7 @@ fn check(edit: impl FnOnce(&mut JobSpec)) -> js_agent_wire::ValidationError {
 }
 
 /// A label under the scheduler's prefix on a start is refused with its own code, for
-/// every spelling of the prefix a map can hold, through a command too. It catches a
+/// every spelling of the prefix a map can hold, through `validate` too. It catches a
 /// caller forging a tenant, run or instance label that the scheduler writes itself.
 #[test]
 fn reserved_label_on_a_start_is_refused() {
@@ -28,7 +28,7 @@ fn reserved_label_on_a_start_is_refused() {
     }
     let mut spec = job();
     spec.labels = map(&[("jobscheduler.dev/tenant", "x")]);
-    let err = Command::Start(Box::new(spec)).validate().unwrap_err();
+    let err = spec.validate().unwrap_err();
     assert_eq!(err.code(), refusal::RESERVED_LABEL);
     let upper = check(|j| j.labels = map(&[("JobScheduler.dev/tenant", "x")]));
     expect(upper, "labels", Rule::BadChars, refusal::INVALID_JOB);
@@ -330,11 +330,11 @@ fn caps_leave_room_to_sum() {
     assert!(MAX_WALL_MS.checked_mul(1 << 18).is_some());
 }
 
-/// Duplicate GPU indices, more indices than the cap, and `valid_for_ms` above its cap are
+/// Duplicate GPU indices, more indices than the cap and an index above the cap are
 /// refused; the cap passes. It catches one device handed to a job twice and an unbounded
-/// validity window.
+/// device list.
 #[test]
-fn gpu_indices_and_validity_are_bounded() {
+fn gpu_indices_are_bounded() {
     let err = check(|j| j.gpu_indices = vec![1, 2, 1]);
     expect(err, "gpu_indices", Rule::Duplicate, refusal::INVALID_JOB);
     let err = check(|j| j.gpu_indices = (0..=MAX_GPUS as u32).collect());
@@ -343,14 +343,10 @@ fn gpu_indices_and_validity_are_bounded() {
         let err = check(|j| j.gpu_indices = vec![index]);
         expect(err, "gpu_indices", Rule::OutOfRange, refusal::INVALID_JOB);
     }
-    let err = check(|j| j.valid_for_ms = MAX_VALID_FOR_MS + 1);
-    expect(err, "valid_for_ms", Rule::OutOfRange, refusal::INVALID_JOB);
     let mut spec = job();
     spec.gpu_indices = (0..MAX_GPUS as u32).collect();
     assert_eq!(spec.gpu_indices.last(), Some(&(MAX_GPUS as u32 - 1)));
-    spec.valid_for_ms = MAX_VALID_FOR_MS;
     assert_eq!(spec.validate(), Ok(()));
-    spec.valid_for_ms = 0;
     spec.gpu_indices.clear();
     assert_eq!(spec.validate(), Ok(()));
 }
@@ -387,44 +383,41 @@ fn limits_are_checked_against_a_shape() {
     }
 }
 
-/// A stop or cancel with a bad run id is refused, an unknown command passes, and a start
-/// is held to the job rules. It catches commands that skip validation.
+/// A job stop with a bad job id is refused, an unknown command passes, and a job start is
+/// held to the job start rules. It catches commands that skip validation.
 #[test]
 fn commands_are_validated() {
     for command in [
-        Command::Stop {
-            run_id: "../x".into(),
+        Command::JobStop {
+            job_id: "../x".into(),
+            reason: None,
         },
-        Command::Cancel {
-            run_id: String::new(),
+        Command::JobStop {
+            job_id: String::new(),
+            reason: None,
         },
-        Command::Stop {
-            run_id: long(MAX_ID_LEN + 1),
+        Command::JobStop {
+            job_id: long(MAX_ID_LEN + 1),
+            reason: None,
         },
     ] {
         let err = command.validate().unwrap_err();
         assert_eq!(
             (err.field(), err.code()),
-            ("run_id", refusal::INVALID_REPLY)
+            ("job_id", refusal::INVALID_REPLY)
         );
     }
     assert_eq!(Command::Unknown.validate(), Ok(()));
     assert_eq!(
-        Command::Stop {
-            run_id: "r1".into()
+        Command::JobStop {
+            job_id: "j1".into(),
+            reason: None
         }
         .validate(),
         Ok(())
     );
-    assert_eq!(
-        Command::Cancel {
-            run_id: "r1".into()
-        }
-        .validate(),
-        Ok(())
-    );
-    assert_eq!(Command::Start(Box::new(job())).validate(), Ok(()));
-    let mut spec = job();
+    assert_eq!(Command::JobStart(Box::new(job_start())).validate(), Ok(()));
+    let mut spec = job_start();
     spec.image = "--x".into();
-    assert!(Command::Start(Box::new(spec)).validate().is_err());
+    assert!(Command::JobStart(Box::new(spec)).validate().is_err());
 }

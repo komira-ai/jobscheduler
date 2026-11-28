@@ -62,7 +62,8 @@ fn starts_the_worker_had_no_room_for_are_held_handed_over_at_its_room_then_ackno
     assert!(worker.handle().settle());
     assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
     assert!(worker.handle().settle());
-    assert_eq!(jobs(&worker), ["j1", "j2"]);
+    // `r0` is the start that held the worker inside its create while the queue was full.
+    assert_eq!(jobs(&worker), ["r0", "j1", "j2"]);
     assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
 
     let bodies = polls(&sent);

@@ -1,11 +1,10 @@
-//! Work sent down to the agent: [`Command`] and the [`JobSpec`] a start carries.
+//! Work sent down to the agent: [`Command`], and the [`JobSpec`] the agent makes of a job start and hands its runtimes.
 
 use std::collections::BTreeMap;
 
 use js_types::{Arch, JobNetwork, Os, PortMap};
 use serde::{Deserialize, Serialize};
 
-use crate::caps::ONE_JOB_CAPABILITY;
 use crate::check::{self, At};
 use crate::error::{Rule, ValidationError};
 use crate::files::{self, RunFile};
@@ -168,7 +167,8 @@ impl Mount {
     }
 }
 
-/// The body of a start: one job.
+/// One job as the agent's runtimes take it: the form the agent makes of a
+/// [`crate::JobStartSpec`]. No wire command carries it.
 ///
 /// A job is named one way on both platforms: a non-empty `image`, pinned by digest, with an
 /// optional `run` that says what runs from it, and the `os` and `arch` of the manifest the
@@ -179,14 +179,12 @@ impl Mount {
 /// (`image-unsupported-here`), and one whose image is on no `--image-allow` entry
 /// (`image-not-allowed`). The legacy forms, a container job without `run`
 /// and a `native` body with an optional `bundle` and an empty `image`, are read and checked
-/// as before for this release; [`JobSpec::downgrade_for`] writes a start in them for a host
-/// that did not report the `one-job` capability.
+/// as before for this release.
 ///
 /// Fields the design gives a start that are not here yet: the booking, the deadline,
 /// named assignments beyond `gpu_indices`, and environment by reference. The run-delivery
 /// change adds them, as optional fields. The fence is the job start's pair of job id and
-/// allocation id ([`crate::JobStartSpec`], [`crate::START_FENCE_CAPABILITY`]); a run start
-/// is fenced by its run id alone, as before.
+/// allocation id ([`crate::JobStartSpec`], [`crate::START_FENCE_CAPABILITY`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobSpec {
     /// The run's id; the key of every idempotent step.
@@ -210,9 +208,9 @@ pub struct JobSpec {
     /// `image` (one without is refused `invalid-image`) and never beside `native` (refused
     /// `invalid-job` naming `run`); the job's own `args` are then empty. The program may be
     /// `@bundle/<entrypoint>`, an entrypoint of the bundle the image resolves to. An agent
-    /// from before the field ignores it, so a per-run start carries it only to a host that
-    /// reported the `one-job` capability ([`crate::ONE_JOB_CAPABILITY`]); the server sends
-    /// no per-run start, and its job start carries the image and `run` ([`crate::JobStartSpec`]).
+    /// from before the field ignores it, so a server sends a `run` only to a host that
+    /// reported the `one-job` capability ([`crate::ONE_JOB_CAPABILITY`]), in a job start
+    /// ([`crate::JobStartSpec`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
     /// The operating system of the image manifest the digest pins (`linux`, `macos`).
@@ -260,10 +258,6 @@ pub struct JobSpec {
     /// The heartbeat the server had taken when it queued the start.
     #[serde(default)]
     pub heartbeat_seq: u64,
-    /// How long after the agent received the start it may still be acted on, measured
-    /// on the agent's clock alone; 0 means no bound.
-    #[serde(default)]
-    pub valid_for_ms: u64,
     /// A darwin bundle the job pins: `name[:tag]@sha256:<manifest digest>`, at most one. A
     /// legacy form, read and checked as before for this release and removed in a later one:
     /// a `run` names its bundle by the job's `image`.
@@ -307,9 +301,9 @@ impl JobSpec {
     /// Checks that the image is pinned by a `sha256:` digest, after [`JobSpec::validate`]
     /// has passed. A tag-only image is refused with [`refusal::IMAGE_DIGEST_REQUIRED`]
     /// naming `image`, and a tag-only bundle with [`refusal::BUNDLE_DIGEST_REQUIRED`]
-    /// naming `bundle`; `name:tag@sha256:...` passes. The server calls it with `validate`
-    /// before it queues a start and the agent before it acts on one, so no host pulls an
-    /// image whose content can move.
+    /// naming `bundle`; `name:tag@sha256:...` passes. No command carries a [`JobSpec`]: a job
+    /// start is checked by [`JobStartSpec::require_pinned`], which holds the same rule for
+    /// its image.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
         // The bundle first: a native job returns early below and must not skip it.
         if let Some(bundle) = &self.bundle {
@@ -364,53 +358,9 @@ impl JobSpec {
         Ok(())
     }
 
-    /// The start as a host that reported the capabilities `host_caps` reads it. Called after
-    /// [`JobSpec::validate`] and [`JobSpec::require_pinned`] have passed.
-    ///
-    /// A host that reported `one-job` ([`crate::ONE_JOB_CAPABILITY`]) as `true` gets the
-    /// start unchanged. Any other host gets it in the legacy forms: without `os` and
-    /// `arch`, and a `run` beside an image built for `macos` (a bundle) becomes the `native`
-    /// body with that image as its `bundle` and an empty `image`. A start without a `run` is
-    /// already a legacy one and keeps everything else.
-    ///
-    /// # Errors
-    ///
-    /// [`refusal::INVALID_JOB`] when the start has no legacy form: a `run` beside an image
-    /// that is not named as built for `macos` (a container image, which an older agent
-    /// would run without the run, so it is never sent to one), naming `run`; and a `run`
-    /// whose native form the legacy checks refuse (beside `mounts`, `gpu_indices` or a host
-    /// isolation), naming that field.
-    pub fn downgrade_for(
-        &self,
-        host_caps: &BTreeMap<String, String>,
-    ) -> Result<JobSpec, ValidationError> {
-        if host_caps.get(ONE_JOB_CAPABILITY).map(String::as_str) == Some("true") {
-            return Ok(self.clone());
-        }
-        let mut legacy = self.clone();
-        (legacy.os, legacy.arch) = (None, None);
-        let Some(run) = legacy.run.take() else {
-            return Ok(legacy);
-        };
-        if self.os != Some(Os::Macos) {
-            return Err(ValidationError::new(
-                "run",
-                Rule::Inconsistent,
-                refusal::INVALID_JOB,
-            ));
-        }
-        legacy.bundle = Some(std::mem::take(&mut legacy.image));
-        legacy.native = Some(NativeSpec::from(run));
-        // The run passed the checks the native body shares with it, so what the legacy
-        // checks can still refuse is a job-level field a native job leaves unused, which is
-        // `invalid-job`.
-        legacy.validate()?;
-        Ok(legacy)
-    }
-
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
-    /// indices, mounts, files, labels and declared ports. The server calls it before it queues
-    /// a start and the agent before it acts on one.
+    /// indices, mounts, files, labels and declared ports. No command carries a [`JobSpec`]: a job
+    /// start is checked by [`JobStartSpec::validate`].
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;
@@ -438,13 +388,7 @@ impl JobSpec {
         check::distinct(mounts, places)?;
         files::validate_files(&self.files)?;
         network::check_ports(&network::JOB_PORTS, &self.ports)?;
-        check::labels(at.field("labels"), &self.labels)?;
-        check::range(
-            at.field("valid_for_ms"),
-            self.valid_for_ms,
-            0,
-            limits::MAX_VALID_FOR_MS,
-        )
+        check::labels(at.field("labels"), &self.labels)
     }
 
     /// A bundle is the toolchain of a native job: without a native body the job is a
@@ -493,28 +437,11 @@ impl JobSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    /// Start one job. Idempotent on the run id.
-    Start(Box<JobSpec>),
-    /// Stop one run: a retained intent, resent until the run leaves the held list.
-    Stop {
-        /// The run to stop.
-        run_id: String,
-    },
-    /// Stop one run the server holds no live record of, and do not report it.
-    ///
-    /// The server sends it for every run the agent lists that the server has no live
-    /// record of. That is a run of a lease that has ended, and also a run whose record the
-    /// server lost (a server restart forgets its runs, and the lease can still hold the
-    /// host). In both cases the work is lost: the agent kills the run and sends no result,
-    /// so nothing tells the server or the lease holder what became of it.
-    Cancel {
-        /// The run to cancel.
-        run_id: String,
-    },
     /// Start one job, keyed by its job id: the allocation's booked resources and the job's
     /// own wall limit, no lease (see [`crate::per_job`]). Idempotent on the job id. Sent
     /// only to an agent that reported [`crate::PER_JOB_CAPABILITY`]; an agent from before it
-    /// reads it as [`Command::Unknown`].
+    /// reads it as [`Command::Unknown`]. A `start`, `stop` or `cancel` an older server sends
+    /// also reads as [`Command::Unknown`].
     JobStart(Box<JobStartSpec>),
     /// Stop one job: a retained intent, resent until the job leaves the agent's `jobs`
     /// listing or its id is in `retired_jobs`. An agent that does not hold the job retires
@@ -536,16 +463,12 @@ pub enum Command {
 }
 
 impl Command {
-    /// Checks the command: a start by [`JobSpec::validate`], a job start by
-    /// [`JobStartSpec::validate`], each with its `require_pinned`, a stop or cancel by its
-    /// run id and a job stop by its job id. An unknown command passes; the agent skips it.
+    /// Checks the command: a job start by [`JobStartSpec::validate`] with its
+    /// `require_pinned`, and a job stop by its job id. An unknown command passes; the agent
+    /// skips it.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::Start(spec) => spec.validate().and_then(|()| spec.require_pinned()),
             Self::JobStart(spec) => spec.validate().and_then(|()| spec.require_pinned()),
-            Self::Stop { run_id } | Self::Cancel { run_id } => {
-                check::ident(At::new("run_id", refusal::INVALID_REPLY), run_id)
-            }
             Self::JobStop { job_id, .. } => {
                 check::ident(At::new("job_id", refusal::INVALID_REPLY), job_id)
             }

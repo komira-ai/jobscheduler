@@ -155,7 +155,7 @@ fn a_lease_directory_that_cannot_be_made_refuses_the_run() {
     );
     assert!(h.fake.created().is_empty(), "no container");
     assert!(spy.seen().is_empty(), "nothing was bound");
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("scratch-failed"));
 }

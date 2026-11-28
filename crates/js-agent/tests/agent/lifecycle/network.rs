@@ -66,7 +66,7 @@ fn a_job_above_the_ceiling_is_refused_with_a_code_naming_it() {
                 .all(|call| !call.starts_with("create"))
         );
         assert_eq!(h.fake.ceiling_asks(), 1);
-        let results = h.life.results();
+        let results = super::results(&h.life);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].outcome, Outcome::FailedToStart);
         assert_eq!(

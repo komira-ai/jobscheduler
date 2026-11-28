@@ -1,33 +1,21 @@
 //! The one job definition: a start named by its image, with a `run`, an `os` and an
 //! `arch`, read the same way for both platforms; the refusals of the new fields; the
-//! platform check against an image's config; and the legacy form a server writes for a host
-//! that did not report `one-job`.
+//! platform check against an image's config.
 
 mod common;
 
 use std::collections::BTreeMap;
 
-use common::{expect, job, long};
+use common::{expect, job, job_start, long};
 use js_agent_wire::limits::{MAX_ARGS, MAX_ENV, MAX_PROGRAM_LEN};
 use js_agent_wire::{
-    Command, HeartbeatReply, ImagePlatform, InputRef, Isolation, JobSpec, Mount, NativeSpec,
-    NetworkLevel, ONE_JOB_CAPABILITY, OutputKind, OutputSpec, Placement, Rule, RunSpec,
-    check_platform, refusal,
+    Command, HeartbeatReply, ImagePlatform, InputRef, Isolation, JobSpec, NativeSpec, NetworkLevel,
+    OutputKind, OutputSpec, Placement, Rule, RunSpec, check_platform, refusal,
 };
 use js_types::{Arch, Os};
 use serde_json::{Value, json};
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-/// The starts the previous release sends, one compact JSON object a line: a container
-/// start, a native start and a native start with a bundle.
-const PREVIOUS: &str = include_str!("data/previous_release_starts.jsonl");
-
-fn previous(line: usize) -> (String, JobSpec) {
-    let text = PREVIOUS.lines().nth(line).unwrap().to_owned();
-    let spec = serde_json::from_str(&text).unwrap();
-    (text, spec)
-}
 
 fn run() -> RunSpec {
     RunSpec {
@@ -52,10 +40,6 @@ fn start(os: Os, arch: Arch) -> JobSpec {
     spec
 }
 
-fn no_caps() -> BTreeMap<String, String> {
-    BTreeMap::new()
-}
-
 /// Asserts that one image-and-run start, decoded once with `os: linux` and once with
 /// `os: macos`, validates and pins in both and round-trips, that `@bundle/tool` and an
 /// absolute program are accepted on both, and that a run naming no platform is checked the
@@ -77,7 +61,8 @@ fn a_start_with_an_image_parses_on_both_platforms() {
         assert_eq!(spec.os.map(Os::name), Some(os));
         assert_eq!(spec.run.as_ref().unwrap().program, "@bundle/tool");
         assert_eq!(spec.native, None);
-        assert_eq!(Command::Start(Box::new(spec.clone())).validate(), Ok(()));
+        assert_eq!(spec.validate(), Ok(()));
+        assert_eq!(spec.require_pinned(), Ok(()));
         let text = serde_json::to_string(&spec).unwrap();
         assert_eq!(serde_json::from_str::<JobSpec>(&text).unwrap(), spec);
         let mut absolute = spec.clone();
@@ -413,25 +398,28 @@ fn an_aarch64_start_decodes_and_reencodes_as_arm64() {
 
 /// Asserts that an `os` or `arch` this version cannot name fails to decode, and inside a
 /// reply reads as an unknown command while the stop beside it still arrives; an image
-/// start without either decodes as a legacy one. Catches a start for a platform the agent
+/// spec without either decodes as a legacy one. Catches a start for a platform the agent
 /// cannot name that runs anyway, and one that costs the commands beside it.
 #[test]
 fn an_unknown_platform_reads_as_an_unknown_command() {
     for (key, value) in [("os", "windows"), ("arch", "amd64"), ("os", "Linux")] {
-        let mut wire =
-            serde_json::to_value(Command::Start(Box::new(start(Os::Linux, Arch::X86_64)))).unwrap();
+        let mut spec = serde_json::to_value(start(Os::Linux, Arch::X86_64)).unwrap();
+        spec[key] = json!(value);
+        assert!(serde_json::from_value::<JobSpec>(spec).is_err());
+        let mut wire = serde_json::to_value(Command::JobStart(Box::new(job_start()))).unwrap();
         wire[key] = json!(value);
-        assert!(serde_json::from_value::<JobSpec>(wire.clone()).is_err());
+        assert!(serde_json::from_value::<Command>(wire.clone()).is_err());
         let reply: HeartbeatReply = serde_json::from_value(json!({
-            "commands": [wire, {"type": "stop", "run_id": "r2"}]
+            "commands": [wire, {"type": "job_stop", "job_id": "r2"}]
         }))
         .unwrap();
         assert_eq!(
             reply.commands,
             [
                 Command::Unknown,
-                Command::Stop {
-                    run_id: "r2".into()
+                Command::JobStop {
+                    job_id: "r2".into(),
+                    reason: None
                 }
             ],
             "{key}={value}"
@@ -442,88 +430,6 @@ fn an_unknown_platform_reads_as_an_unknown_command() {
     assert!(legacy.get("run").is_none());
     let decoded: JobSpec = serde_json::from_value(legacy).unwrap();
     assert_eq!((decoded.os, decoded.arch, decoded.run), (None, None, None));
-}
-
-/// Asserts that for a host without `one-job` a run beside an image built for `macos`
-/// becomes exactly the previous release's native start with a bundle (the frozen fixture,
-/// byte for byte); that a host that reported `one-job` as `true` gets the start unchanged
-/// and one that reported another value does not; that every previous-release start passes
-/// unchanged and an image start without a run only loses `os` and `arch`; and that a start
-/// with no legacy spelling is refused `invalid-job`: a run beside a `linux` image or one that
-/// names no `os`, naming `run`, and a run beside a mount, naming `mounts`. Catches a run
-/// sent to an older agent that would run the image's own command instead, and a downgrade
-/// that changes a legacy start.
-#[test]
-fn downgrade_for_a_host_without_one_job_uses_the_legacy_form() {
-    let (bundle_text, bundle_start) = previous(2);
-    let mut new = bundle_start.clone();
-    new.image = new.bundle.take().unwrap();
-    new.run = Some(RunSpec::from(new.native.take().unwrap()));
-    (new.os, new.arch) = (Some(Os::Macos), Some(Arch::Arm64));
-    assert_eq!(new.validate(), Ok(()));
-    assert_eq!(new.require_pinned(), Ok(()));
-    let down = new.downgrade_for(&no_caps()).unwrap();
-    assert_eq!(serde_json::to_string(&down).unwrap(), bundle_text);
-    assert_eq!(down, bundle_start);
-    let one_job = |value: &str| BTreeMap::from([(ONE_JOB_CAPABILITY.to_owned(), value.to_owned())]);
-    assert_eq!(new.downgrade_for(&one_job("true")), Ok(new.clone()));
-    assert_eq!(new.downgrade_for(&one_job("yes")), Ok(bundle_start));
-    for line in 0..3 {
-        let (_, spec) = previous(line);
-        assert_eq!(
-            spec.downgrade_for(&no_caps()),
-            Ok(spec.clone()),
-            "line {line}"
-        );
-    }
-    let (_, container) = previous(0);
-    let mut named = container.clone();
-    (named.os, named.arch) = (Some(Os::Linux), Some(Arch::X86_64));
-    assert_eq!(named.downgrade_for(&no_caps()), Ok(container));
-    let mut linux = new.clone();
-    linux.os = Some(Os::Linux);
-    let mut unnamed = new.clone();
-    unnamed.os = None;
-    assert_eq!(linux.downgrade_for(&one_job("true")), Ok(linux.clone()));
-    for spec in [linux, unnamed] {
-        assert_eq!(spec.validate(), Ok(()));
-        expect(
-            spec.downgrade_for(&no_caps()).unwrap_err(),
-            "run",
-            Rule::Inconsistent,
-            refusal::INVALID_JOB,
-        );
-    }
-    let mut mounted = new.clone();
-    mounted.mounts = vec![Mount {
-        root_name: "cache".into(),
-        rel: "sdk".into(),
-        ro: true,
-    }];
-    assert_eq!(mounted.validate(), Ok(()));
-    expect(
-        mounted.downgrade_for(&no_caps()).unwrap_err(),
-        "mounts",
-        Rule::Inconsistent,
-        refusal::INVALID_JOB,
-    );
-    let mut host = new.clone();
-    host.isolation = Isolation::Host;
-    expect(
-        host.downgrade_for(&no_caps()).unwrap_err(),
-        "isolation",
-        Rule::Inconsistent,
-        refusal::INVALID_JOB,
-    );
-    let mut gpus = new.clone();
-    gpus.gpu_indices = vec![0];
-    assert_eq!(gpus.validate(), Ok(()));
-    expect(
-        gpus.downgrade_for(&no_caps()).unwrap_err(),
-        "gpu_indices",
-        Rule::Inconsistent,
-        refusal::INVALID_JOB,
-    );
 }
 
 /// A run with every field set: environment, a working directory, both kinds of input,
@@ -564,12 +470,12 @@ fn full_run() -> RunSpec {
 }
 
 /// Asserts that a run with every field set keeps every field through both conversions
-/// (to the native body and back, and the same JSON either way) and through the downgrade,
-/// whose native body is exactly the run's, written out in full. Catches a conversion or a
-/// downgrade that resets the environment, working directory, inputs, outputs or network,
-/// which a fixture with only defaults cannot see.
+/// (to the native body and back, and the same JSON either way), and that the native body's
+/// JSON is the run's, written out in full. Catches a conversion that resets the
+/// environment, working directory, inputs, outputs or network, which a fixture with only
+/// defaults cannot see.
 #[test]
-fn a_populated_run_keeps_every_field_through_conversion_and_downgrade() {
+fn a_populated_run_keeps_every_field_through_conversion() {
     let run = full_run();
     let native = NativeSpec::from(run.clone());
     assert_eq!(native.program, run.program);
@@ -589,13 +495,8 @@ fn a_populated_run_keeps_every_field_through_conversion_and_downgrade() {
         (Vec::new(), Vec::new(), Isolation::Contained);
     spec.run = Some(run);
     assert_eq!(spec.validate(), Ok(()));
-    let down = spec.downgrade_for(&no_caps()).unwrap();
-    assert_eq!(down.native, Some(native));
-    assert_eq!(down.bundle.as_deref(), Some(spec.image.as_str()));
-    assert_eq!((down.image.as_str(), down.run.is_none()), ("", true));
-    assert_eq!(down.validate(), Ok(()));
     assert_eq!(
-        serde_json::to_value(&down).unwrap()["native"],
+        serde_json::to_value(&native).unwrap(),
         json!({
             "program": "@bundle/cc",
             "args": ["-c", "a.c"],
@@ -670,28 +571,37 @@ fn a_run_body_decodes_its_defaults_and_refuses_what_it_cannot_read() {
         ),
         ("not an object", json!("make")),
     ];
-    let base =
-        serde_json::to_value(Command::Start(Box::new(start(Os::Linux, Arch::X86_64)))).unwrap();
+    let spec_base = serde_json::to_value(start(Os::Linux, Arch::X86_64)).unwrap();
+    let base = serde_json::to_value(Command::JobStart(Box::new(job_start()))).unwrap();
     for (why, body) in unreadable {
+        let mut spec = spec_base.clone();
+        spec["run"] = body.clone();
+        assert!(serde_json::from_value::<JobSpec>(spec).is_err(), "{why}");
         let mut wire = base.clone();
         wire["run"] = body;
         assert!(
-            serde_json::from_value::<JobSpec>(wire.clone()).is_err(),
+            serde_json::from_value::<Command>(wire.clone()).is_err(),
             "{why}"
         );
         let reply: HeartbeatReply = serde_json::from_value(json!({
-            "commands": [{"type": "stop", "run_id": "r0"}, wire, {"type": "cancel", "run_id": "r2"}]
+            "commands": [
+                {"type": "job_stop", "job_id": "r0"},
+                wire,
+                {"type": "job_stop", "job_id": "r2"}
+            ]
         }))
         .unwrap();
         assert_eq!(
             reply.commands,
             [
-                Command::Stop {
-                    run_id: "r0".into()
+                Command::JobStop {
+                    job_id: "r0".into(),
+                    reason: None
                 },
                 Command::Unknown,
-                Command::Cancel {
-                    run_id: "r2".into()
+                Command::JobStop {
+                    job_id: "r2".into(),
+                    reason: None
                 }
             ],
             "{why}"

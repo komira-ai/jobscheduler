@@ -37,8 +37,8 @@ fn a_start_or_a_cleanup_under_way_keeps_the_jobs_from_being_handed_over() {
     );
     gate.release_removal("c1");
     h.life.step();
-    assert_eq!(h.life.results().len(), 1);
-    assert!(h.life.held().iter().all(|run| run.run_id == "r1"));
+    assert_eq!(super::results(&h.life).len(), 1);
+    assert!(super::held(&h.life).iter().all(|run| run.run_id == "r1"));
     assert!(quiet(&h.life), "only its result is held");
 }
 

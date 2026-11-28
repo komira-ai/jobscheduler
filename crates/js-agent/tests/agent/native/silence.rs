@@ -33,14 +33,16 @@ fn a_silence_kills_every_native_run_once() {
     h.clock.advance(299_999);
     h.life.step();
     assert!(
-        h.life.results().is_empty(),
+        crate::lifecycle::results(&h.life).is_empty(),
         "nothing is stopped short of the bound"
     );
     assert_eq!(h.life.busy_slots().len(), 2);
 
     h.clock.advance(1);
-    h.until(|life| life.results().len() == 2 && life.held().len() == 2);
-    for result in h.life.results() {
+    h.until(|life| {
+        crate::lifecycle::results(life).len() == 2 && crate::lifecycle::held(life).len() == 2
+    });
+    for result in crate::lifecycle::results(&h.life) {
         assert_eq!(result.outcome, Outcome::Killed, "{}", result.run_id);
         assert_eq!(result.detail.as_deref(), Some(detail::SILENCE_STOP));
     }
@@ -53,8 +55,12 @@ fn a_silence_kills_every_native_run_once() {
 
     h.clock.advance(300_000);
     h.life.step();
-    assert_eq!(h.life.results().len(), 2, "stopped once for the silence");
-    for result in h.life.results() {
+    assert_eq!(
+        crate::lifecycle::results(&h.life).len(),
+        2,
+        "stopped once for the silence"
+    );
+    for result in crate::lifecycle::results(&h.life) {
         assert_eq!(result.detail.as_deref(), Some(detail::SILENCE_STOP));
     }
 }

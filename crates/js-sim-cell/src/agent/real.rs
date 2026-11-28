@@ -3,10 +3,11 @@
 //! [`js_conformance::agent::memory`], with a clock whose time is the kernel's.
 //!
 //! The process hands it each heartbeat reply whole ([`RealAgent::apply`]) and builds each
-//! heartbeat from what it holds ([`RealAgent::held`], [`RealAgent::results`]); it takes a
-//! step on every tick, as the real agent does. A run ends when the process's end timer
-//! fires: its container exits with status 0 ([`RealAgent::run_ends`]), and the lifecycle
-//! reports the result at its next step. What the agent runs is read from the runtime.
+//! heartbeat from what it holds ([`RealAgent::held_jobs`], [`RealAgent::retired_jobs`]); it
+//! takes a step on every tick, as the real agent does. A job ends when the process's end
+//! timer fires: its container exits with status 0 ([`RealAgent::run_ends`]), and the
+//! lifecycle reports the result at its next step. What the agent runs is read from the
+//! runtime.
 //!
 //! The lifecycle is set up as an agent with no host jobs, no mounts, no run files, no
 //! bundle store, no scratch quota and no post-job checks, offering the host's capacity
@@ -19,11 +20,11 @@
 //! It is for small host counts: each process writes its held list into its state root at
 //! every step. The fake is the agent a cell runs by the hundred.
 //!
-//! The lifecycle books GPU devices by index, and a run that asks for GPUs names the indices
-//! `0..gpus`, so on a host of more than one GPU a second run that asks for one is refused
-//! `no-capacity` where the fake runs it. The cell's hosts have one GPU. The lifecycle
-//! speaks the per-job messages as well, as the per-run ones (`real_jobs.rs`): what the
-//! cell writes down of them is the fake's.
+//! The lifecycle books GPU devices by index, and a job that asks for GPUs names the indices
+//! `0..gpus`, so on a host of more than one GPU a second job that asks for one is refused
+//! `no-capacity` where the fake runs it. The cell's hosts have one GPU. The cell writes
+//! down what the lifecycle does with the per-job messages in `real_jobs.rs`, as it does for
+//! the fake.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -34,7 +35,7 @@ use std::time::Duration;
 use js_agent::lifecycle::{
     Capacity, Config, Lifecycle, MountRoots, NoChecks, ScratchRoot, StateRoot, hold,
 };
-use js_agent_wire::{HeartbeatReply, HeldJob, HeldRun, RunResult};
+use js_agent_wire::{HeartbeatReply, HeldJob};
 use js_conformance::agent::memory::{Memory, Time};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
@@ -126,16 +127,6 @@ impl RealAgent {
         self.time.0.set(now.as_millis());
     }
 
-    /// The runs the lifecycle holds, for a hello or a heartbeat.
-    pub(crate) fn held(&self) -> Vec<HeldRun> {
-        self.life.held()
-    }
-
-    /// The results not yet acknowledged, for a heartbeat.
-    pub(crate) fn results(&self) -> Vec<RunResult> {
-        self.life.results()
-    }
-
     /// The jobs the lifecycle holds, for a heartbeat's `jobs`, each with its result once it
     /// has ended.
     pub(crate) fn held_jobs(&self) -> Vec<HeldJob> {
@@ -148,13 +139,7 @@ impl RealAgent {
         self.life.retired_jobs()
     }
 
-    /// The run ids of the results not yet acknowledged.
-    pub(crate) fn owed(&self) -> BTreeSet<String> {
-        let results = self.life.results().into_iter();
-        results.map(|result| result.run_id).collect()
-    }
-
-    /// The runs whose containers run now, read from the runtime.
+    /// The ids of the jobs whose containers run now, read from the runtime.
     pub(crate) fn running(&self) -> BTreeSet<String> {
         self.runtime.running()
     }
@@ -164,7 +149,7 @@ impl RealAgent {
         self.life.step();
     }
 
-    /// Hands `reply` to the lifecycle and lets it take a step; returns the run id of each
+    /// Hands `reply` to the lifecycle and lets it take a step; returns the job id of each
     /// container it created meanwhile, in order.
     pub(crate) fn apply(&mut self, reply: &HeartbeatReply) -> Vec<String> {
         let before = self.runtime.created().len();
@@ -173,10 +158,10 @@ impl RealAgent {
         self.runtime.created().into_iter().skip(before).collect()
     }
 
-    /// The run's own time ran out: when its container still runs it exits with status 0,
+    /// The job's own time ran out: when its container still runs it exits with status 0,
     /// and the lifecycle takes a step. Returns whether it still ran.
-    pub(crate) fn run_ends(&mut self, run: &str) -> bool {
-        let ran = self.runtime.exit(run, SUCCEEDED);
+    pub(crate) fn run_ends(&mut self, job: &str) -> bool {
+        let ran = self.runtime.exit(job, SUCCEEDED);
         self.life.step();
         ran
     }

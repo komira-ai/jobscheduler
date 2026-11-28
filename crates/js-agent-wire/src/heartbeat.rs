@@ -1,5 +1,8 @@
-//! Keeping a session: [`Heartbeat`] up, [`HeartbeatReply`] down, and the results that
-//! ride in the heartbeat until the server acknowledges them.
+//! Keeping a session: [`Heartbeat`] up, [`HeartbeatReply`] down, and the job results that
+//! ride in the heartbeat until the server acknowledges them. The run lists (`held`,
+//! `results`, `result_acks`) stay on the wire because every previous release sends and
+//! reads them; an agent of this release sends them empty and a server of this release
+//! answers `result_acks` empty.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -34,7 +37,8 @@ pub enum HeldState {
     Unknown,
 }
 
-/// A run the agent holds. A run stays listed until its container and scratch are gone
+/// A run the agent holds, as every previous release lists it. An agent of this release
+/// holds no run and sends none. A run stays listed until its container and scratch are gone
 /// and its result is acknowledged, so the server never sees a gap that would make it
 /// requeue running work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,7 +70,8 @@ pub enum Outcome {
     Unknown,
 }
 
-/// The result of one run, resent in every heartbeat until a [`ResultAck`] names it.
+/// The result of one run, resent in every heartbeat until a [`ResultAck`] names it. An
+/// agent of this release sends none; a job's result travels in `jobs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunResult {
     /// The run's id.
@@ -220,10 +225,14 @@ pub struct Heartbeat {
     pub session: String,
     /// The host's phase.
     pub phase: Phase,
-    /// Every run the agent holds, results not yet acknowledged included.
+    /// Every run the agent holds, results not yet acknowledged included. It stays on the
+    /// wire because every previous release sends and reads it; an agent of this release
+    /// always sends it empty and lists its jobs in `jobs`.
     #[serde(default)]
     pub held: Vec<HeldRun>,
-    /// Results the server has not yet acknowledged.
+    /// Run results the server has not yet acknowledged. It stays on the wire because every
+    /// previous release sends and reads it; an agent of this release always sends it empty
+    /// and carries each job's result in `jobs`.
     #[serde(default)]
     pub results: Vec<RunResult>,
     /// The taint report, until the server acknowledges it.
@@ -313,20 +322,18 @@ pub enum Ack {
     Accepted,
     /// The result was recorded earlier.
     Duplicate,
-    /// The lease has moved on, or the server holds no record of the run (it forgot it at a
-    /// restart, while the lease can still hold the host); the result is dropped either
-    /// way. The two are not told apart.
+    /// The allocation has moved on, or the server holds no record of the job; the result is
+    /// dropped either way. The two are not told apart.
     Stale,
-    /// The server holds no such lease.
-    UnknownLease,
-    /// The result does not match the lease it names (another host's, or another run's).
+    /// The result does not match the allocation it names (another host's, or another job's).
     Mismatch,
     /// A verdict this version does not know. The agent keeps the result and resends it.
     #[serde(other)]
     Unknown,
 }
 
-/// The server's acknowledgement of one result; the agent then drops it.
+/// The server's acknowledgement of one run result; the agent then drops it. A server of
+/// this release sends none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultAck {
     /// The run the result was for.
@@ -342,7 +349,8 @@ pub struct HeartbeatReply {
     /// What the agent is to do now.
     #[serde(default, deserialize_with = "commands_or_unknown")]
     pub commands: Vec<Command>,
-    /// The results the server has dealt with.
+    /// The run results the server has dealt with. It stays on the wire because every
+    /// previous release sends and reads it; a server of this release always sends it empty.
     #[serde(default)]
     pub result_acks: Vec<ResultAck>,
     /// Whether the taint report was recorded; the agent then stops sending it.
@@ -581,12 +589,12 @@ pub struct RefusedCommand {
 
 /// What [`HeartbeatReply::validate`] found, command by command.
 ///
-/// **The agent acts on every command in `commands`, and on every `Stop` and `Cancel`
-/// among them even when a `Start` of the same reply is in `refused`.** One bad command
-/// never costs the commands beside it: a stop is retained intent the server resends only
-/// until the run leaves the held list, and a reply with a start the agent cannot accept
-/// (an over-long image, or one cap a newer server has raised) must still stop the run
-/// the stop names.
+/// **The agent acts on every command in `commands`, and on every `JobStop` among them even
+/// when a `JobStart` of the same reply is in `refused`.** One bad command never costs the
+/// commands beside it: a stop is retained intent the server resends only until the job
+/// leaves the agent's listing, and a reply with a start the agent cannot accept (an
+/// over-long image, or one cap a newer server has raised) must still stop the job the stop
+/// names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyCheck<'a> {
     /// The commands that passed, in the order the reply lists them. An unknown command
@@ -594,9 +602,10 @@ pub struct ReplyCheck<'a> {
     pub commands: Vec<&'a Command>,
     /// The commands that did not pass: refused one by one, never acted on.
     pub refused: Vec<RefusedCommand>,
-    /// Whether the acknowledgements are acceptable (at most [`limits::MAX_RESULTS`], each
-    /// with a good run id, none twice). When this is an error the agent ignores
-    /// `result_acks` and still acts on `commands`.
+    /// Whether `result_acks` is acceptable (at most [`limits::MAX_RESULTS`], each with a good
+    /// run id, none twice). A server of this release sends none; an older server's are
+    /// still checked. When this is an error the agent ignores `result_acks` and still acts
+    /// on `commands`.
     pub acks: Result<(), ValidationError>,
     /// Whether the lease id of `exclusive` is acceptable. When this is an error the agent
     /// does not prepare and still acts on `commands`.
@@ -631,11 +640,10 @@ pub struct ReplyCheck<'a> {
 impl HeartbeatReply {
     /// Checks the reply the way the agent must before it acts on it.
     ///
-    /// Every command is checked on its own ([`Command::validate`]); a start that names a
-    /// run id or a GPU index an earlier accepted start of the reply already names is
-    /// refused too (a job start likewise for its job id, and a GPU index is one whichever
-    /// kind of start named it), and so is every command at an index of [`limits::MAX_COMMANDS`] or
-    /// more (the first [`limits::MAX_COMMANDS`] are still read, so a `Stop` early in a
+    /// Every command is checked on its own ([`Command::validate`]); a job start that names a
+    /// job id or a GPU index an earlier accepted job start of the reply already names is
+    /// refused too, and so is every command at an index of [`limits::MAX_COMMANDS`] or
+    /// more (the first [`limits::MAX_COMMANDS`] are still read, so a `JobStop` early in a
     /// reply from a server with a higher cap is not lost). See [`ReplyCheck`] for what
     /// the agent does with the answer.
     pub fn validate(&self) -> ReplyCheck<'_> {
@@ -687,29 +695,23 @@ impl HeartbeatReply {
     }
 }
 
-/// The run ids, job ids and GPU indices the accepted starts of a reply name.
+/// The job ids and GPU indices the accepted job starts of a reply name.
 #[derive(Default)]
 struct Taken<'a> {
-    runs: BTreeSet<&'a str>,
     jobs: BTreeSet<&'a str>,
     gpus: BTreeSet<u32>,
 }
 
 impl<'a> Taken<'a> {
-    /// Checks one command and, when it is a start or a job start, records what it names.
+    /// Checks one command and, when it is a job start, records what it names.
     fn admit(&mut self, at: At, command: &'a Command) -> Result<(), ValidationError> {
         command.validate()?;
-        let (ids, id, gpus) = match command {
-            Command::Start(spec) => (&mut self.runs, spec.run_id.as_str(), &spec.gpu_indices),
-            Command::JobStart(spec) => (
-                &mut self.jobs,
-                spec.job_id.as_str(),
-                &spec.booked.gpu_indices,
-            ),
-            _ => return Ok(()),
+        let Command::JobStart(spec) = command else {
+            return Ok(());
         };
+        let gpus = &spec.booked.gpu_indices;
         let gpu_taken = gpus.iter().any(|gpu| self.gpus.contains(gpu));
-        if gpu_taken || !ids.insert(id) {
+        if gpu_taken || !self.jobs.insert(spec.job_id.as_str()) {
             return Err(at.fail(Rule::Duplicate));
         }
         self.gpus.extend(gpus.iter().copied());

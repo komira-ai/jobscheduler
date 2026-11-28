@@ -52,7 +52,7 @@ fn a_quota_that_fails_in_a_row_and_fails_its_check_stops_taking_runs_until_it_re
     assert!(h.fake.created().is_empty());
     assert!(!h.scratch_of("d").exists());
     assert_eq!(
-        h.life.results().last().unwrap().detail.as_deref(),
+        super::results(&h.life).last().unwrap().detail.as_deref(),
         Some("quota-unavailable")
     );
     assert!(!h.life.is_tainted());

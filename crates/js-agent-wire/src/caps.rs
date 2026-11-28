@@ -15,10 +15,9 @@ use crate::refusal;
 
 /// The capability an agent reports, as `true`, when it reads the one job definition: a
 /// start whose `image` carries a `run` and names its `os` and `arch` ([`crate::JobSpec::run`]).
-/// A per-run start carries those fields only to a host that reported it, and to every other
-/// host the legacy forms ([`crate::JobSpec::downgrade_for`]); the server sends no per-run
-/// start, and its job start ([`crate::JobStartSpec`]) has no legacy form. The `bundle`
-/// capability beside it says which bundles a Mac holds ([`bundle_capability`]).
+/// A server sends those fields only to a host that reported it, and its job start
+/// ([`crate::JobStartSpec`]) has no legacy form; the `bundle` capability beside it says
+/// which bundles a Mac holds ([`bundle_capability`]).
 pub const ONE_JOB_CAPABILITY: &str = "one-job";
 
 /// The capability an agent reports, as `true`, when it uploads its jobs' output to an object

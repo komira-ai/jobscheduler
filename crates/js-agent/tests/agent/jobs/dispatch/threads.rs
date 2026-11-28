@@ -408,7 +408,14 @@ fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room()
         driver.finish();
     });
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().jobs[0].job_id, "j1");
+    // The first job is `r0`, the start `fill` held inside its create; the one handed over is next.
+    let held: Vec<String> = worker
+        .snapshot()
+        .jobs
+        .into_iter()
+        .map(|job| job.job_id)
+        .collect();
+    assert_eq!(held, ["r0", "j1"]);
 }
 
 /// A session over a scripted transport and `worker`, telling `cell` its welcomes.

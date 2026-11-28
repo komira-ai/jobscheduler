@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{Quiet, Restored};
 use js_agent::{Answer, HEARTBEAT_PATH, Note, PREPARE_TIMEOUT, Quiesce, Session, Step, Transport};
-use js_agent_wire::{Command, HeartbeatReply, RefusalReason, refusal};
+use js_agent_wire::{Command, HeartbeatReply, JobStartSpec, RefusalReason, refusal};
 use serde_json::{Value, json};
 
+use crate::jobs::job_start;
 use crate::lifecycle::fake::ManualClock;
 use crate::lifecycle::{Harness, Options, job};
 use crate::support::{Reply, Script, Sent, beat_ok, hello, lowest, reply, welcome};
@@ -155,13 +156,13 @@ impl Quiesce for Wired {
     }
 }
 
-/// Acknowledges the results of `runs`, in a reply that keeps naming the lease.
+/// Acknowledges the results of the jobs `runs`, in a reply that keeps naming the lease.
 fn ack_all(harness: &Rc<RefCell<Harness>>, runs: &[&str]) {
     let acks: Vec<Value> = runs
         .iter()
-        .map(|run| json!({ "run_id": run, "ack": "ACCEPTED" }))
+        .map(|run| json!({ "job_id": run, "ack": "ACCEPTED" }))
         .collect();
-    let body = json!({ "exclusive": LEASE, "result_acks": acks });
+    let body = json!({ "exclusive": LEASE, "job_acks": acks });
     let ack: HeartbeatReply = serde_json::from_value(body).unwrap();
     harness.borrow_mut().life.apply(&ack);
 }
@@ -180,7 +181,7 @@ fn ack_all(harness: &Rc<RefCell<Harness>>, runs: &[&str]) {
 fn the_whole_sequence_over_the_real_lifecycle() {
     let harness = Rc::new(RefCell::new(Harness::new("sess-sequence")));
     harness.borrow_mut().start(job("a"));
-    let other = Command::Start(Box::new(job("b")));
+    let other = Command::JobStart(Box::new(job_start("b")));
     let replies = vec![
         welcome(1),
         granted(Some(LEASE), vec![other]),
@@ -214,7 +215,7 @@ fn the_whole_sequence_over_the_real_lifecycle() {
     {
         let h = harness.borrow();
         assert_eq!(h.fake.created().len(), 1, "only the run that was running");
-        let results = h.life.results();
+        let results = crate::lifecycle::results(&h.life);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].run_id, "b");
         assert_eq!(results[0].detail.as_deref(), Some(refusal::NO_CAPACITY));
@@ -699,11 +700,18 @@ fn a_restart_while_ready_reports_ready_and_never_refuses() {
         spec.lease_id = LEASE.to_owned();
         spec
     };
+    let for_lease = |job_id: &str| JobStartSpec {
+        allocation_id: LEASE.to_owned(),
+        ..job_start(job_id)
+    };
     harness.borrow_mut().start(own("a"));
     harness.borrow_mut().restart().unwrap();
     let replies = vec![
         welcome(1),
-        granted(Some(LEASE), vec![Command::Start(Box::new(own("b")))]),
+        granted(
+            Some(LEASE),
+            vec![Command::JobStart(Box::new(for_lease("b")))],
+        ),
         names(LEASE),
         names(LEASE),
         names(LEASE),

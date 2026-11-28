@@ -14,12 +14,11 @@ use js_agent::lifecycle::{Event, Runtime};
 use js_agent::native::{
     Ceiling, Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags, ProvisionError,
 };
-use js_agent_wire::{Command, JobSpec, NetworkLevel};
+use js_agent_wire::{JobSpec, NetworkLevel};
 
 use super::lifecycle::{Native, job};
 use super::{FakeAccounts, FakeLauncher, Rig, TERM, config, open_pool, pool_settings};
 use crate::lifecycle::fake::{FakeRuntime, Log, ManualClock};
-use crate::lifecycle::reply;
 use crate::support::Scratch;
 
 /// How a pf anchor can fail to be enforced.
@@ -101,7 +100,7 @@ pub(super) fn job_at(run_id: &str, level: NetworkLevel) -> JobSpec {
 
 /// The events of one start.
 fn start(h: &mut Native, spec: JobSpec) -> Vec<Event> {
-    h.life.apply(&reply(vec![Command::Start(Box::new(spec))]))
+    h.life.start_spec(&spec)
 }
 
 /// Asserts that a start that asks for the network is refused as `egress-unchecked`, with the
@@ -140,7 +139,7 @@ fn a_network_job_is_refused_for_each_way_the_anchor_is_not_enforced() {
         let scratch = fs::canonicalize(h.dir.path("scratch")).unwrap();
         assert!(!scratch.join("r1").exists(), "{verdict:?}");
         assert_eq!(h.life.free().cpu_millis, 4000, "{verdict:?}");
-        let result = &h.life.results()[0];
+        let result = &crate::lifecycle::results(&h.life)[0];
         assert_eq!(result.detail.as_deref(), Some("egress-unchecked"));
     }
 }

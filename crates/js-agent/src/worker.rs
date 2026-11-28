@@ -9,15 +9,14 @@
 //! - **Replies go in through a bounded queue** ([`QUEUE`] orders). [`Worker::try_deliver`]
 //!   never waits: when the worker is busy and the queue is full the reply is dropped and
 //!   the caller says so. Nothing is lost for good: the server resends a start until the
-//!   run (or job) is listed, a stop until it leaves the held list (or the job listing, or
-//!   its id is in `retired_jobs`), a cancel for as long as the host
-//!   lists the run, the acknowledgement of every result the heartbeat still carries and
+//!   job is listed, a stop until it leaves the job listing (or its id is in
+//!   `retired_jobs`), the acknowledgement of every result the heartbeat still carries and
 //!   the acknowledgement of every heartbeat that carries the taint. The dispatch poller
 //!   does not drop what the queue refused: it holds the messages and hands them over again
 //!   when the worker takes an order and so makes room (module `delivery`).
 //! - **State comes out as a snapshot.** After every order and every step the worker
-//!   publishes the held runs, the results not yet acknowledged, the jobs a job start began
-//!   and the retired job ids, the taint to report and whether the host is tainted at all
+//!   publishes the jobs a job start began (with their results until acknowledged) and the
+//!   retired job ids, the taint to report and whether the host is tainted at all
 //!   ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to swap it,
 //!   never across a runtime call.
 //! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
@@ -37,9 +36,10 @@
 //!   bound does not outlast ([`Worker::check_grace`]).
 //! - **The runtime is made on the worker thread**, by the [`Machine`] of the plan, so it
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
-//!   process left are adopted) before [`Worker::start`] returns, so the first hello can
-//!   list them.
-//! - **The worker samples the usage** of the leases that run, once per heartbeat interval,
+//!   process left are adopted) before [`Worker::start`] returns, so the first heartbeat lists
+//!   the jobs taken over.
+//! - **The worker samples the usage** of the node, once per heartbeat interval (no lease is
+//!   sampled, because no run is held, so the load carries no lease minutes),
 //!   when `--actions-cgroup` is given on Linux, and always on a Mac (the host's own counters):
 //!   after a step it calls [`Collector::step`], which takes the per-second sample when
 //!   `--host-second-samples` is on and says whether a window has passed; if so, the worker
@@ -50,12 +50,12 @@
 //!   restore order without waiting and reads the last answer the worker published, which
 //!   is tagged with the lease it is about. An answer for another lease is never handed
 //!   back; the worker drops its answers when its lifecycle follows a different lease. The
-//!   hook runs here, once for each grant (and again after an agent restart that holds no run
-//!   of the lease, which prepares it afresh; a lease taken over with a run held runs none).
+//!   hook runs here, once for each grant (and again after an agent restart that holds no job
+//!   of the lease, which prepares it afresh; a lease taken over with a job held runs none).
 //!   Because the hook runs on the worker's thread it holds the worker for as long as it
 //!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
-//!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
-//!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
+//!   starts, stops and acknowledgements wait in the queue, and replies beyond the queue are
+//!   dropped and sent again.
 //!   Heartbeats go on. The watchdog allows the worker that long for the hook, only while the
 //!   hook runs: its limit grows by the bound when the hook is about to start, and when the hook
 //!   returns it is the order's plain limit moved later by the time the hook really took
@@ -109,7 +109,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
+use js_agent_wire::{HeartbeatReply, HeldJob, HeldState, Taint};
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
@@ -369,10 +369,6 @@ impl Rescue {
 /// What the next heartbeat carries of the jobs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Every run the agent holds.
-    pub held: Vec<HeldRun>,
-    /// The results the server has not acknowledged.
-    pub results: Vec<RunResult>,
     /// The taint to report, until the server acknowledges it.
     pub taint: Option<Taint>,
     /// The taint to report cleared, until the server acknowledges that.
@@ -390,15 +386,13 @@ pub struct Snapshot {
     pub jobs: Vec<HeldJob>,
     /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
     pub retired_jobs: Vec<String>,
-    /// The ids among `held` and `jobs` whose checks found the taint: they leave with it alone.
+    /// The ids among `jobs` whose checks found the taint: they leave with it alone.
     pub blocked: Vec<String>,
 }
 
 impl Snapshot {
     fn of(life: &Lifecycle) -> Self {
         Self {
-            held: life.held(),
-            results: life.results(),
             taint: life.pending_taint(),
             taint_cleared: life.pending_taint_clear(),
             tainted: Some(life.is_tainted()),
@@ -409,23 +403,14 @@ impl Snapshot {
         }
     }
 
-    /// Whether a run, or a job a job start began, is in the running state.
+    /// Whether a job a job start began is in the running state.
     pub fn running(&self) -> bool {
-        let run = self.held.iter().map(|run| run.state);
-        let job = self.jobs.iter().map(|job| job.state);
-        run.chain(job).any(|state| state == HeldState::Running)
+        self.jobs.iter().any(|job| job.state == HeldState::Running)
     }
 
     /// Whether the agent holds nothing and owes nothing.
     pub fn is_empty(&self) -> bool {
-        [
-            self.held.is_empty(),
-            self.results.is_empty(),
-            self.jobs.is_empty(),
-            self.retired_jobs.is_empty(),
-        ]
-        .into_iter()
-        .all(|empty| empty)
+        self.jobs.is_empty() && self.retired_jobs.is_empty()
     }
 }
 
@@ -468,7 +453,7 @@ struct Published {
 struct Shared {
     published: Mutex<Published>,
     changed: Condvar,
-    /// The agent takes no new job: a `Start` is not acted on.
+    /// The agent takes no new job: a job start is not acted on.
     closed: AtomicBool,
     /// Stop every run the agent holds, once.
     stop_all: AtomicBool,
@@ -715,8 +700,7 @@ impl Worker {
         })
     }
 
-    /// From now on a `Start` or `JobStart` is not acted on. Stops, cancels, job stops and
-    /// acknowledgements still are.
+    /// From now on a `JobStart` is not acted on. Job stops and acknowledgements still are.
     pub fn close(&self) {
         self.handle.shared.closed.store(true, Ordering::SeqCst);
         let _ = self.handle.orders.try_send(Order::Nudge);
@@ -890,9 +874,9 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
-        // A run or job held may cost three calls (a stop, then an inspect, the read of its
-        // log and a remove).
-        let held = life.held().len().saturating_add(life.held_jobs().len());
+        // A job held may cost three calls (a stop, then an inspect, the read of its log and a
+        // remove).
+        let held = life.held_jobs().len();
         let calls = held.saturating_mul(3).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls);
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
@@ -956,7 +940,8 @@ fn work(
             .and_then(|collector| collector.step().then_some(collector))
             .map(|collector| {
                 let mut said = life.find_cgroups();
-                said.extend(collector.run(&life.running()));
+                // No run is held, so no lease is sampled: the load carries the node alone.
+                said.extend(collector.run(&[]));
                 said
             });
         lines.extend(sampled.into_iter().flatten());

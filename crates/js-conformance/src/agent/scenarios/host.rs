@@ -1,7 +1,7 @@
 //! The scenarios of what a run leaves on its host: the cleanup, the checks and the taint,
 //! a restart of the agent, and a host held whole for one lease.
 
-use super::{Notes, UNBOUNDED, sends};
+use super::{Notes, sends};
 use crate::agent::{AgentHarness, Cleanup, Delivery, HostCheck};
 
 /// The steps of the cleanup the agent reported for `lease`, in order.
@@ -20,7 +20,7 @@ enum End {
 }
 
 pub(super) fn cleanup_frees_the_slot_last<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("clean", UNBOUNDED, 0);
+    harness.start("clean");
     harness.complete("clean");
     notes.expect(
         cleanup_of(harness, "clean")
@@ -36,7 +36,7 @@ pub(super) fn cleanup_frees_the_slot_last<H: AgentHarness>(harness: &mut H, note
         "a run whose cleanup passed leaves the host untainted",
     );
     harness.remove_fails("stuck");
-    harness.start("stuck", UNBOUNDED, 0);
+    harness.start("stuck");
     harness.complete("stuck");
     let steps = cleanup_of(harness, "stuck");
     notes.expect(
@@ -98,7 +98,7 @@ pub(super) fn host_job_taints<H: AgentHarness>(make: &impl Fn() -> H, notes: &mu
 pub(super) fn tainting_checks<H: AgentHarness>(make: &impl Fn() -> H, notes: &mut Notes) {
     for check in [HostCheck::LeftoverProcess, HostCheck::CannotRun] {
         let harness = &mut make();
-        harness.start("job", UNBOUNDED, 0);
+        harness.start("job");
         harness.check_finds("job", check);
         harness.complete("job");
         let seen = harness.observed();
@@ -151,7 +151,7 @@ pub(super) fn taint_is_kept<H: AgentHarness>(harness: &mut H, notes: &mut Notes)
         seen.tainted,
         "a restart, and the answer to its first heartbeat, leave the host tainted",
     );
-    harness.start("after", UNBOUNDED, 0);
+    harness.start("after");
     let seen = harness.observed();
     notes.expect(
         !seen.launches.contains_key("after"),
@@ -164,8 +164,8 @@ pub(super) fn taint_is_kept<H: AgentHarness>(harness: &mut H, notes: &mut Notes)
 }
 
 pub(super) fn restart_keeps<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("running", UNBOUNDED, 0);
-    harness.start("ended", UNBOUNDED, 0);
+    harness.start("running");
+    harness.start("ended");
     harness.complete("ended");
     let before = sends(harness, "ended");
     harness.restart();
@@ -185,7 +185,7 @@ pub(super) fn restart_keeps<H: AgentHarness>(harness: &mut H, notes: &mut Notes)
 }
 
 pub(super) fn whole_node_waits<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("before", UNBOUNDED, 0);
+    harness.start("before");
     notes.expect(
         harness.hold_whole("whole") == Delivery::Delivered,
         "the hold of the host is delivered",
@@ -195,7 +195,7 @@ pub(super) fn whole_node_waits<H: AgentHarness>(harness: &mut H, notes: &mut Not
         "a host is not ready for a whole-node lease while a run is held on it",
     );
     harness.start_whole("early");
-    harness.start("beside", UNBOUNDED, 0);
+    harness.start("beside");
     let seen = harness.observed();
     notes.expect(
         !seen.launches.contains_key("early"),
@@ -214,7 +214,7 @@ pub(super) fn whole_node_waits<H: AgentHarness>(harness: &mut H, notes: &mut Not
         "a host is ready for its whole-node lease once nothing is held on it",
     );
     harness.start_whole("whole-run");
-    harness.start("other", UNBOUNDED, 0);
+    harness.start("other");
     let seen = harness.observed();
     notes.expect(
         seen.running.contains("whole-run"),

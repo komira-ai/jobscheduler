@@ -6,7 +6,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{broken, expect, hello, job};
+use common::{broken, expect, hello, job, job_start};
 use js_agent_wire::limits::{
     MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN, MAX_PORTS, capability_value_max,
 };
@@ -19,7 +19,7 @@ use js_types::{JobNetwork, PortMap};
 use serde::Deserialize;
 use serde_json::json;
 
-/// A start as the release before the fields wrote it, saved literally: no `network`, no
+/// A run start as the release before the fields wrote it, saved literally: no `network`, no
 /// `ports`.
 const PREVIOUS_START: &str = concat!(
     r#"{"type":"start","run_id":"run-1","lease_id":"1-1","#,
@@ -76,48 +76,59 @@ fn port(host: u16, container: u16) -> PortMap {
     PortMap { host, container }
 }
 
+/// `spec` as the text a `start` command of the previous release carried: its tag and its
+/// fields.
+fn as_previous_start(spec: &JobSpec) -> String {
+    let mut value = serde_json::to_value(spec).unwrap();
+    value["type"] = json!("start");
+    value.to_string()
+}
+
 /// Proves the fields are additive both ways (rule B8). A start saved from the previous
-/// release (no `network`, no `ports`) decodes as `none` with no port and encodes back to the
-/// same bytes. A new start with `none` and no port carries neither key, so the previous
-/// release decodes it; a new start with `open` and a port decodes in the previous release's
-/// shape too, the new fields skipped. Catches a field that is always written (an older
-/// agent's text would change) or required (every start of an older server would be
-/// unreadable).
+/// release (no `network`, no `ports`) reads as an unknown command, and as a job spec it
+/// decodes as `none` with no port and encodes back to the same text without its `start` tag
+/// and its `valid_for_ms`. A new spec with `none` and no port carries neither key, so the
+/// previous release decodes it as a start; a new spec with `open` and a port decodes in the
+/// previous release's shape too, the new fields skipped. Catches a field that is always
+/// written (an older agent's text would change) or required (every start of an older server
+/// would be unreadable).
 #[test]
 fn previous_wire_start_without_network_still_parses() {
     let decoded: Command = serde_json::from_str(PREVIOUS_START).unwrap();
-    let Command::Start(spec) = &decoded else {
-        panic!("not a start: {decoded:?}");
-    };
+    assert_eq!(decoded, Command::Unknown);
+    let spec: JobSpec = serde_json::from_str(PREVIOUS_START).unwrap();
     assert_eq!(spec.network, JobNetwork::None);
     assert!(spec.ports.is_empty());
-    assert_eq!(**spec, job());
-    assert_eq!(serde_json::to_string(&decoded).unwrap(), PREVIOUS_START);
+    assert_eq!(spec, job());
+    let expected = PREVIOUS_START
+        .replacen("\"type\":\"start\",", "", 1)
+        .replacen(",\"valid_for_ms\":10000", "", 1);
+    assert_eq!(serde_json::to_string(&spec).unwrap(), expected);
 
-    let none = serde_json::to_string(&Command::Start(Box::new(job()))).unwrap();
+    let none = serde_json::to_string(&job()).unwrap();
     assert!(!none.contains("\"network\""), "{none}");
     assert!(!none.contains("\"ports\""), "{none}");
-    let PreviousCommand::Start(old) = serde_json::from_str(&none).unwrap();
+    let PreviousCommand::Start(old) = serde_json::from_str(&as_previous_start(&job())).unwrap();
     assert_eq!(old.run_id, "run-1");
 
     let mut open = job();
     open.network = JobNetwork::Open;
     open.ports = vec![port(8080, 80)];
-    let text = serde_json::to_string(&Command::Start(Box::new(open.clone()))).unwrap();
+    let text = serde_json::to_string(&open).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["network"], json!("open"));
     assert_eq!(value["ports"], json!([{"host": 8080, "container": 80}]));
-    let PreviousCommand::Start(old) = serde_json::from_str(&text).unwrap();
+    let PreviousCommand::Start(old) = serde_json::from_str(&as_previous_start(&open)).unwrap();
     assert_eq!((old.run_id.as_str(), old.limits.wall_ms), ("run-1", 60_000));
-    let back: Command = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, Command::Start(Box::new(open)));
+    let back: JobSpec = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, open);
     let allow = serde_json::to_value(JobNetwork::AllowList).unwrap();
     assert_eq!(allow, json!("allow-list"));
 }
 
-/// Proves a level this version does not know is a decode error and not a level: the start
-/// alone does not decode, and inside a reply it reads as an unknown command while the stop
-/// beside it arrives. Catches a level that fails open (read as `none` or `open`), which would
+/// Proves a level this version does not know is a decode error and not a level: the spec and
+/// the job start alone do not decode, and inside a reply the job start reads as an unknown
+/// command while the job stop beside it arrives. Catches a level that fails open (read as `none` or `open`), which would
 /// run a job at a level it did not name.
 #[test]
 fn an_unknown_network_level_fails_to_decode() {
@@ -125,16 +136,20 @@ fn an_unknown_network_level_fails_to_decode() {
     body["network"] = json!("wide");
     let err = serde_json::from_value::<JobSpec>(body.clone()).unwrap_err();
     assert!(err.is_data(), "{err}");
-    let mut start = json!({"type": "start"});
-    start
-        .as_object_mut()
-        .unwrap()
-        .extend(body.as_object().unwrap().clone());
-    let stop = json!({"type": "stop", "run_id": "r"});
+    let mut start = serde_json::to_value(Command::JobStart(Box::new(job_start()))).unwrap();
+    start["network"] = json!("wide");
+    assert!(serde_json::from_value::<Command>(start.clone()).is_err());
+    let stop = json!({"type": "job_stop", "job_id": "r"});
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [start, stop]})).unwrap();
     assert_eq!(
         reply.commands,
-        vec![Command::Unknown, Command::Stop { run_id: "r".into() }]
+        vec![
+            Command::Unknown,
+            Command::JobStop {
+                job_id: "r".into(),
+                reason: None
+            }
+        ]
     );
     for known in ["none", "allow-list", "open"] {
         body["network"] = json!(known);

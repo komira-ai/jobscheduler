@@ -6,7 +6,7 @@
 //! The runtime and the view are made on the worker thread (see [`crate::worker`]), by the
 //! machine the worker was given, so neither needs to be `Send`. The clock is the one
 //! thing both threads read: the session thread stamps a reply with it when the reply
-//! arrives, and the lifecycle counts the reply's `valid_for_ms` from that stamp.
+//! arrives, and the lifecycle takes that stamp as the moment the reply was received.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

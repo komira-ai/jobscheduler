@@ -4,8 +4,9 @@
 //! is the test's, so nothing here waits or measures time.
 
 use js_agent::lifecycle::code;
-use js_agent_wire::{Command, HeldRun, HeldState, Isolation, JobSpec, Outcome};
+use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome};
 
+use super::per_job::{job_start, start};
 use super::{Harness, Options, cleanup, job, names};
 
 const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
@@ -18,8 +19,7 @@ fn cold(run_id: &str) -> JobSpec {
 }
 
 fn held(h: &Harness) -> Vec<(String, HeldState)> {
-    h.life
-        .held()
+    super::held(&h.life)
         .into_iter()
         .map(|HeldRun { run_id, state }| (run_id, state))
         .collect()
@@ -63,7 +63,7 @@ fn a_run_whose_image_is_being_pulled_waits_as_starting_and_creates_nothing() {
     }
     assert!(h.fake.created().is_empty());
     assert!(!h.scratch_of("r1").exists());
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
 }
 
 /// With the image here the container is created at the next step and the run is held as
@@ -108,7 +108,7 @@ fn the_wall_clock_begins_when_the_container_is_created_not_while_the_image_is_pu
     assert!(h.fake.stops().is_empty());
     h.clock.advance(1);
     assert_eq!(names(&h.life.step())[0], "result r1");
-    assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::TimedOut);
 }
 
 /// A slow pull does not hold up another run: in one reply, the run whose image is here
@@ -119,10 +119,9 @@ fn the_wall_clock_begins_when_the_container_is_created_not_while_the_image_is_pu
 fn a_slow_pull_does_not_hold_up_another_run() {
     let mut h = Harness::new("prepare-others");
     h.fake.pull_pending(COLD);
-    let events = h.apply(vec![
-        Command::Start(Box::new(cold("slow"))),
-        Command::Start(Box::new(job("quick"))),
-    ]);
+    let mut slow = start("slow");
+    slow.image = COLD.to_owned();
+    let events = h.apply(vec![job_start(slow), job_start(start("quick"))]);
     assert_eq!(names(&events), ["started quick"]);
     assert_eq!(
         held(&h),
@@ -174,9 +173,7 @@ fn an_image_that_cannot_be_had_ends_the_run_failed_to_start() {
         ]
     );
     for run in ["early", "late"] {
-        let result = h
-            .life
-            .results()
+        let result = super::results(&h.life)
             .into_iter()
             .find(|result| result.run_id == run)
             .expect("a result");
@@ -188,24 +185,17 @@ fn an_image_that_cannot_be_had_ends_the_run_failed_to_start() {
 }
 
 /// A `Stop` while the image is pulled ends the run `killed` without ever making a
-/// container, and a `Cancel` ends it reporting nothing; the slot comes back, and the
-/// image arriving later creates nothing.
+/// container; the slot comes back, and the image arriving later creates nothing.
 #[test]
-fn a_stop_or_cancel_while_the_image_is_pulled_ends_the_run_without_a_container() {
+fn a_stop_while_the_image_is_pulled_ends_the_run_without_a_container() {
     let mut h = Harness::new("prepare-stop");
     h.fake.pull_pending(COLD);
     h.start(cold("stopped"));
-    h.start(cold("cancelled"));
     h.stop("stopped");
-    h.cancel("cancelled");
     let events = names(&h.life.step());
     assert!(events.contains(&"result stopped".to_owned()), "{events:?}");
-    assert!(
-        !events.contains(&"result cancelled".to_owned()),
-        "{events:?}"
-    );
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
+    assert_eq!(super::results(&h.life).len(), 1);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Killed);
     h.life.step();
     h.fake.pull_done(COLD);
     h.life.step();
@@ -242,9 +232,7 @@ fn every_run_that_waited_on_a_failed_fetch_ends() {
     h.start(cold("r2"));
     h.fake.pull_fails(COLD, "registry down");
     h.life.step();
-    let mut ended: Vec<_> = h
-        .life
-        .results()
+    let mut ended: Vec<_> = super::results(&h.life)
         .into_iter()
         .map(|result| (result.run_id, result.outcome))
         .collect();
@@ -258,29 +246,6 @@ fn every_run_that_waited_on_a_failed_fetch_ends() {
     );
 }
 
-/// A run that waited for its image is held to the end of its lease: a start that
-/// is valid for 30 s and asks for a minute, whose image arrives after 20 s, gets 10 s, not
-/// a fresh minute. (A start that names no lease end gets its whole limit: that half is in
-/// the wall-clock test above.)
-#[test]
-fn a_run_that_waited_never_outlives_its_lease() {
-    let mut h = Harness::new("prepare-lease");
-    h.fake.pull_pending(COLD);
-    let mut spec = cold("r1");
-    spec.limits.wall_ms = 60_000;
-    spec.valid_for_ms = 30_000;
-    h.start(spec);
-    h.clock.advance(20_000);
-    h.fake.pull_done(COLD);
-    assert_eq!(names(&h.life.step()), ["started r1"]);
-    h.clock.advance(9_999);
-    assert!(h.life.step().is_empty());
-    assert!(h.fake.stops().is_empty());
-    h.clock.advance(1);
-    assert_eq!(names(&h.life.step())[0], "result r1");
-    assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
-}
-
 /// A stop that lands in the same step as the image creates nothing: the stop is looked at
 /// before the image is asked for.
 #[test]
@@ -292,27 +257,5 @@ fn a_stop_and_the_image_in_the_same_step_create_nothing() {
     h.fake.pull_done(COLD);
     assert_eq!(names(&h.life.step())[0], "result r1");
     assert!(h.fake.created().is_empty());
-    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
-}
-
-/// A run whose lease ends while it waits for its image is not created, however late the
-/// image comes: it ends `killed` at the first step past the lease end, with no scratch
-/// directory and no container, and the image arriving then creates nothing.
-#[test]
-fn a_run_whose_lease_ended_while_it_waited_is_not_created() {
-    let mut h = Harness::new("prepare-lease-gone");
-    h.fake.pull_pending(COLD);
-    let mut spec = cold("r1");
-    spec.valid_for_ms = 30_000;
-    h.start(spec);
-    h.clock.advance(29_999);
-    assert!(h.life.step().is_empty());
-    h.clock.advance(1);
-    h.fake.pull_done(COLD);
-    assert_eq!(names(&h.life.step())[0], "result r1");
-    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
-    h.life.step();
-    assert!(h.fake.created().is_empty());
-    assert!(!h.scratch_of("r1").exists());
-    assert!(h.life.busy_slots().is_empty());
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Killed);
 }

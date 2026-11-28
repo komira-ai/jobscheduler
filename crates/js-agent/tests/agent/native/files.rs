@@ -15,14 +15,13 @@ use clap::Parser as _;
 use js_agent::Cli;
 use js_agent::lifecycle::{DirLayout, Local, Runtime as _};
 use js_agent::native::HandOver;
-use js_agent_wire::{Command, JobSpec, Outcome, OutputKind, OutputSpec, RunFile};
+use js_agent_wire::{JobSpec, Outcome, OutputKind, OutputSpec, RunFile};
 use js_testkit::dir::TestDir;
 use serde_json::Value;
 
 use super::agent::{hello_on, native_flags, private};
 use super::lifecycle::{Native, job};
 use super::{Rig, native, param};
-use crate::lifecycle::reply;
 use crate::support::{Scratch, code, mac_host, welcome};
 
 /// What the files of the tests hold: no log line, error or `Debug` may show it.
@@ -246,14 +245,14 @@ fn file_contents_never_appear_in_debug_output() {
             })
             .collect();
         printed.push(format!("{spec:?}"));
-        let mut events = h.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
+        let mut events = h.life.start_spec(&spec);
         let exec = h.home_of(0).join("exec");
         fs::write(exec.join("out.txt"), MARKER).unwrap();
         let grant = root_of(&h).join("r1").join("grant");
         std::os::unix::fs::symlink(&grant, exec.join("link")).unwrap();
         events.extend(h.until(|life| life.busy_slots().is_empty()));
         printed.push(format!("{events:?}"));
-        printed.push(format!("{:?}", h.life.results()));
+        printed.push(format!("{:?}", crate::lifecycle::results(&h.life)));
 
         let rig = Rig::new("files-debug-rt");
         let dir = rig.dir.path("files-r1");
@@ -335,7 +334,7 @@ fn a_failed_staging_ends_the_start_with_a_code() {
     let spec = carrying(job("r1", "/bin/cat"), &[("grant", "token")]);
     let events = h.start(spec);
     assert_eq!(events, ["finding r1 scratch-failed", "result r1"]);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("scratch-failed"));
     nothing_left(&h);
@@ -350,7 +349,7 @@ fn a_failed_staging_ends_the_start_with_a_code() {
     let mut h = Native::with_files("files-hand-fail", |_| {}, Some(refusing_files()));
     let spec = carrying(job("r1", "/bin/cat"), &[("grant", "token")]);
     assert_eq!(h.start(spec), ["finding r1 start-failed", "result r1"]);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("runtime-failed"));
     nothing_left(&h);
@@ -399,7 +398,7 @@ fn a_native_start_with_files_and_no_files_root_is_refused_files_unsupported() {
     assert!(lease_lines(&h.dir).is_empty());
     assert!(!h.scratch_of("r1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.detail.as_deref(), Some("files-unsupported"));
 }
 
