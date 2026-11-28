@@ -44,11 +44,9 @@ fn the_payload_holds_the_programs_the_plists_and_two_directories() {
         .collect();
     let want: BTreeSet<&str> = [
         "Library/Application Support/js-agent/bin/js-agent",
-        "Library/Application Support/js-agent/bin/js-mac-session",
         "Library/Application Support/js-agent/bin/js-mac-provision",
         "Library/Application Support/js-agent/LICENSE",
         "Library/LaunchDaemons/js-agent.plist",
-        "Library/LaunchDaemons/js-agent.session.plist",
         "Library/LaunchDaemons/js-agent.pf-pool.plist",
     ]
     .into_iter()
@@ -60,6 +58,28 @@ fn the_payload_holds_the_programs_the_plists_and_two_directories() {
     ] {
         assert_eq!(entry(&all, dir).kind, Kind::Dir, "{dir}");
     }
+}
+
+/// The package carries no root helper: no `js-mac-session` program and no `js-agent.session`
+/// plist, so a host the package is installed on has no second root job beside the agent and the
+/// pf daemon.
+#[test]
+fn the_payload_holds_no_root_helper_and_no_helper_plist() {
+    for e in entries() {
+        assert!(!e.path.contains("session"), "{}", e.path);
+    }
+    let plists: BTreeSet<String> = entries()
+        .into_iter()
+        .filter(|e| e.path.starts_with("Library/LaunchDaemons/"))
+        .map(|e| e.path)
+        .collect();
+    assert_eq!(
+        plists,
+        BTreeSet::from([
+            "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
+            "Library/LaunchDaemons/js-agent.plist".to_owned(),
+        ])
+    );
 }
 
 #[test]
@@ -75,15 +95,11 @@ fn the_payload_list_and_the_errors_can_be_copied_compared_and_printed() {
 fn programs_are_0755_data_is_0644_and_the_hooks_state_directory_is_0700() {
     let all = entries();
     let prefix = "Library/Application Support/js-agent";
-    for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
+    for program in ["js-agent", "js-mac-provision"] {
         assert_eq!(entry(&all, &format!("{prefix}/bin/{program}")).mode, 0o755);
     }
     assert_eq!(entry(&all, &format!("{prefix}/LICENSE")).mode, 0o644);
-    for plist in [
-        "js-agent.plist",
-        "js-agent.session.plist",
-        "js-agent.pf-pool.plist",
-    ] {
+    for plist in ["js-agent.plist", "js-agent.pf-pool.plist"] {
         assert_eq!(
             entry(&all, &format!("Library/LaunchDaemons/{plist}")).mode,
             0o644
@@ -138,11 +154,10 @@ fn the_payload_holds_no_release_tree_and_no_link() {
 #[test]
 fn the_plists_programs_are_payload_files() {
     let all = entries();
-    for daemon in [Daemon::agent(), Daemon::session("x")] {
-        let path = daemon.program.trim_start_matches('/');
-        assert_eq!(entry(&all, path).kind, Kind::File, "{path}");
-        assert_eq!(entry(&all, path).mode, 0o755);
-    }
+    let agent = Daemon::agent();
+    let path = agent.program.trim_start_matches('/');
+    assert_eq!(entry(&all, path).kind, Kind::File, "{path}");
+    assert_eq!(entry(&all, path).mode, 0o755);
     let pf_pool = program_arguments(&pf_pool_plist());
     let path = pf_pool[0].trim_start_matches('/');
     assert_eq!(entry(&all, path).kind, Kind::File, "{path}");
@@ -178,12 +193,12 @@ fn sources(name: &str) -> Sources {
     let at = dir.path().to_path_buf();
     let bin = at.join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
+    for program in ["js-agent", "js-mac-provision"] {
         std::fs::write(bin.join(program), format!("bytes of {program}")).unwrap();
         std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o600))
             .unwrap();
     }
-    for file in ["LICENSE", "agent.plist", "session.plist", "pf-pool.plist"] {
+    for file in ["LICENSE", "agent.plist", "pf-pool.plist"] {
         std::fs::write(at.join(file), format!("bytes of {file}")).unwrap();
     }
     let args = Stage::parse_from([
@@ -196,8 +211,6 @@ fn sources(name: &str) -> Sources {
         at.join("LICENSE").to_str().unwrap(),
         "--agent-plist",
         at.join("agent.plist").to_str().unwrap(),
-        "--session-plist",
-        at.join("session.plist").to_str().unwrap(),
         "--pf-pool-plist",
         at.join("pf-pool.plist").to_str().unwrap(),
         "--out",
@@ -242,7 +255,7 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
         assert_eq!(mode_of(&root.join(&e.path)), e.mode, "{}", e.path);
     }
     let bin = root.join("Library/Application Support/js-agent/bin");
-    for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
+    for program in ["js-agent", "js-mac-provision"] {
         assert_eq!(
             std::fs::read_to_string(bin.join(program)).unwrap(),
             format!("bytes of {program}")
@@ -251,10 +264,6 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
     for (from, to) in [
         ("LICENSE", "Library/Application Support/js-agent/LICENSE"),
         ("agent.plist", "Library/LaunchDaemons/js-agent.plist"),
-        (
-            "session.plist",
-            "Library/LaunchDaemons/js-agent.session.plist",
-        ),
         (
             "pf-pool.plist",
             "Library/LaunchDaemons/js-agent.pf-pool.plist",
@@ -287,10 +296,10 @@ fn staging_refuses_an_output_directory_that_exists_and_a_source_that_does_not() 
     assert!(err.to_string().contains("exists"), "{err}");
 
     let s = sources("macpkg-stage-missing");
-    std::fs::remove_file(s.args.bin_dir.join("js-mac-session")).unwrap();
+    std::fs::remove_file(s.args.bin_dir.join("js-mac-provision")).unwrap();
     let err = stage(&s.args).unwrap_err();
     assert!(matches!(err, Error::Io(_)), "{err}");
-    assert!(err.to_string().contains("js-mac-session"), "{err}");
+    assert!(err.to_string().contains("js-mac-provision"), "{err}");
 }
 
 #[test]
@@ -305,8 +314,6 @@ fn the_program_stages_the_package_when_asked_to() {
         .arg(&a.license)
         .arg("--agent-plist")
         .arg(&a.agent_plist)
-        .arg("--session-plist")
-        .arg(&a.session_plist)
         .arg("--pf-pool-plist")
         .arg(&a.pf_pool_plist)
         .arg("--out")
@@ -380,12 +387,12 @@ fn a_file_missing_from_the_bill_of_materials_is_named() {
     p.bom = p
         .bom
         .lines()
-        .filter(|l| !l.contains("js-mac-session\t"))
+        .filter(|l| !l.contains("js-mac-provision\t"))
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(
         refused(&p),
-        ["missing from the package: Library/Application Support/js-agent/bin/js-mac-session"]
+        ["missing from the package: Library/Application Support/js-agent/bin/js-mac-provision"]
     );
 }
 
@@ -686,17 +693,6 @@ fn the_agents_plist_names_flags_the_agent_accepts_with_a_flags_file_expanded() {
         Some(Path::new("/var/db/js-agent/accounts"))
     );
     assert_eq!(cli.os.native_account_range.as_deref(), Some("700-799"));
-}
-
-#[test]
-fn the_helpers_plist_names_flags_the_helper_accepts() {
-    let plist = Daemon::session("cdhash H\"abc\"").render();
-    let words = program_arguments(&plist);
-    assert_eq!(words[0], format!("{BIN_DIR}/js-mac-session"));
-    js_mac_session::start::Args::try_parse_from(
-        std::iter::once("js-mac-session".to_owned()).chain(words.into_iter().skip(1)),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// The pf daemon's plist parses as a command line of the `js-mac-provision` the package carries,

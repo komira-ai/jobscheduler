@@ -33,8 +33,8 @@ pub use super::step_rig_state::{end_state, marks, pre_stop};
 pub const UNIT: &str = "js-agent-crun.service";
 /// The launchd label of the agent on a Mac: the service's name, as hostkeeper requires.
 pub const MAC_UNIT: &str = "js-agent";
-/// The launchd label of the agent's root helper on a Mac.
-pub const MAC_HELPER: &str = "js-agent.session";
+/// The launchd label of the root helper job that releases before the one-program agent carried.
+pub const MAC_RETIRED: &str = "js-agent.session";
 /// The launchd label of the job that keeps the pool's pf anchor loaded on a Mac.
 pub const MAC_PF: &str = "js-agent.pf-pool";
 pub const HOST: &str = "burst-1";
@@ -66,6 +66,20 @@ mod systemctl;
 use kill::Shared;
 pub use kill::{Kill, as_root};
 pub use systemctl::{OnSignal, SYSTEMD_257, SYSTEMD_258};
+
+/// What a Mac's release directories carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tree {
+    /// An archive release (`units/`, `bin/`): the layout of the Linux tests.
+    Archive,
+    /// A native package tree (`tree/`) with the agent's plist only.
+    Agent,
+    /// A native package tree with the agent's plist and the pf job's, which the params name.
+    AgentAndPf,
+    /// Native package trees; the previous release's carries the retired helper's plist besides
+    /// the agent's, the staged release's does not.
+    PreviousHasHelper,
+}
 
 /// The tree of one test.
 pub struct Rig {
@@ -101,79 +115,50 @@ impl Rig {
     /// The same update on a Mac: the launchd label for the unit, the params naming the
     /// `native` runtime, and an agent whose hello says `sandbox-exec`.
     pub fn mac(name: &str) -> Rig {
-        Rig::build_for(
-            name,
-            true,
-            LEASE_SECS,
-            MAX_SECS,
-            Some(MAC_UNIT),
-            false,
-            false,
-        )
+        Rig::mac_tree(name, true, Tree::Archive)
     }
 
-    /// The same update on a Mac whose package carries a root helper job: the releases are
-    /// native package trees (`tree/`), each with the plists of the agent and of the helper, and
-    /// the params name the helper.
-    pub fn mac_with_helper(name: &str) -> Rig {
-        Rig::build_for(
-            name,
-            true,
-            LEASE_SECS,
-            MAX_SECS,
-            Some(MAC_UNIT),
-            true,
-            false,
-        )
+    /// The same update on a Mac whose package is a native tree (`tree/`) carrying the agent's
+    /// plist only, as the one-program package does.
+    pub fn mac_package(name: &str) -> Rig {
+        Rig::mac_tree(name, true, Tree::Agent)
     }
 
-    /// The same update on a Mac whose package carries the helper and the job that keeps the pool's
-    /// pf anchor loaded, as the macOS package does: the params name both.
-    pub fn mac_with_helper_and_pf(name: &str) -> Rig {
-        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true, true)
+    /// The same update on a Mac whose package carries the job that keeps the pool's pf anchor
+    /// loaded beside the agent's, as the macOS package does: the params name it.
+    pub fn mac_with_pf(name: &str) -> Rig {
+        Rig::mac_tree(name, true, Tree::AgentAndPf)
     }
 
-    /// The first install on a Mac whose package carries a helper job.
-    pub fn mac_first_install_with_helper(name: &str) -> Rig {
-        Rig::build_for(
-            name,
-            false,
-            LEASE_SECS,
-            MAX_SECS,
-            Some(MAC_UNIT),
-            true,
-            false,
-        )
+    /// The same update on a Mac whose running release is one from before the one-program agent:
+    /// its tree carries the plist of the root helper job beside the agent's, and the staged
+    /// release's tree does not.
+    pub fn mac_from_two_daemon_release(name: &str) -> Rig {
+        Rig::mac_tree(name, true, Tree::PreviousHasHelper)
     }
 
-    /// The first install on a Mac whose package carries the helper and the pf job.
-    pub fn mac_first_install_with_helper_and_pf(name: &str) -> Rig {
-        Rig::build_for(
-            name,
-            false,
-            LEASE_SECS,
-            MAX_SECS,
-            Some(MAC_UNIT),
-            true,
-            true,
-        )
+    /// The first install on a Mac whose package is a native tree carrying the agent's plist only.
+    pub fn mac_first_install_package(name: &str) -> Rig {
+        Rig::mac_tree(name, false, Tree::Agent)
+    }
+
+    /// The first install on a Mac whose package carries the pf job too.
+    pub fn mac_first_install_with_pf(name: &str) -> Rig {
+        Rig::mac_tree(name, false, Tree::AgentAndPf)
     }
 
     /// The first install on a Mac.
     pub fn mac_first_install(name: &str) -> Rig {
-        Rig::build_for(
-            name,
-            false,
-            LEASE_SECS,
-            MAX_SECS,
-            Some(MAC_UNIT),
-            false,
-            false,
-        )
+        Rig::mac_tree(name, false, Tree::Archive)
+    }
+
+    /// An update on a Mac with the default cordon times, its releases laid out as `tree` says.
+    fn mac_tree(name: &str, previous: bool, tree: Tree) -> Rig {
+        Rig::build_for(name, previous, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), tree)
     }
 
     fn build(name: &str, previous: bool, lease_secs: u64, max_secs: u64) -> Rig {
-        Rig::build_for(name, previous, lease_secs, max_secs, None, false, false)
+        Rig::build_for(name, previous, lease_secs, max_secs, None, Tree::Archive)
     }
 
     fn build_for(
@@ -182,8 +167,7 @@ impl Rig {
         lease_secs: u64,
         max_secs: u64,
         mac: Option<&str>,
-        helper: bool,
-        pf: bool,
+        tree: Tree,
     ) -> Rig {
         let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let root = tmp.path().to_owned();
@@ -196,14 +180,14 @@ impl Rig {
         let unit = mac.unwrap_or(UNIT);
         let text = if mac.is_some() { PLIST_TEXT } else { UNIT_TEXT };
         for release in [&staged, &old] {
-            if helper || pf {
+            if tree != Tree::Archive {
                 let jobs = release.join("tree/Library/LaunchDaemons");
                 fs::create_dir_all(&jobs).unwrap();
                 fs::write(jobs.join(manager.file_name(unit)), text).unwrap();
-                if helper {
-                    fs::write(jobs.join(manager.file_name(MAC_HELPER)), text).unwrap();
+                if tree == Tree::PreviousHasHelper && release == &old {
+                    fs::write(jobs.join(manager.file_name(MAC_RETIRED)), text).unwrap();
                 }
-                if pf {
+                if tree == Tree::AgentAndPf {
                     fs::write(jobs.join(manager.file_name(MAC_PF)), text).unwrap();
                 }
             } else {
@@ -219,13 +203,9 @@ impl Rig {
         let runtime = if mac.is_some() { "native" } else { "crun" };
         let token = root.join("token");
         fs::write(&token, "tok-0123456789\n").unwrap();
-        let mut helper_line = if helper {
-            format!("helper_unit = \"{MAC_HELPER}\"\n")
-        } else {
-            String::new()
-        };
-        if pf {
-            helper_line.push_str(&format!("pf_unit = \"{MAC_PF}\"\n"));
+        let mut jobs_line = String::new();
+        if tree == Tree::AgentAndPf {
+            jobs_line.push_str(&format!("pf_unit = \"{MAC_PF}\"\n"));
         }
         let previous = if previous {
             format!(
@@ -241,7 +221,7 @@ impl Rig {
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
-                "unit = \"{unit}\"\n{helper_line}state_dir = \"{root}/state\"\nruntime = \"{runtime}\"\n",
+                "unit = \"{unit}\"\n{jobs_line}state_dir = \"{root}/state\"\nruntime = \"{runtime}\"\n",
                 "flags_file = \"{root}/flags\"\ntoken_file = \"{token}\"\n",
                 "state_root = \"{root}/world/state\"\n",
                 "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\n",
@@ -260,7 +240,7 @@ impl Rig {
             previous = previous,
             release_link = release_link,
             unit = unit,
-            helper_line = helper_line,
+            jobs_line = jobs_line,
             root = root.display(),
             runtime = runtime,
             token = token.display(),
@@ -286,6 +266,22 @@ impl Rig {
             unit: unit.to_owned(),
             manager,
         }
+    }
+
+    /// Where the retired helper job's plist lies in the system's launch daemons directory, in the
+    /// rig's tree (nothing is made there until [`Rig::leave_retired_plist`]).
+    pub fn retired_plist(&self) -> PathBuf {
+        self.tmp
+            .path()
+            .join("Library/LaunchDaemons/js-agent.session.plist")
+    }
+
+    /// The host has the retired helper job's plist in its launch daemons directory, as a host
+    /// that ran a release with the helper does.
+    pub fn leave_retired_plist(&self) {
+        let plist = self.retired_plist();
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(plist, PLIST_TEXT).unwrap();
     }
 
     pub fn state_dir(&self) -> PathBuf {
@@ -490,6 +486,9 @@ pub struct Spy<'a> {
     /// The copy of the file system table an earlier release's host setup left, which the host
     /// setup removes: `etc/fstab.js-agent` in the rig's tree (no `etc` is made).
     pub fstab_leftover: PathBuf,
+    /// The retired helper job's plist in the launch daemons directory, which a Mac's cutover
+    /// removes: [`Rig::retired_plist`].
+    pub retired_plist: PathBuf,
 }
 
 /// The certificate file a flags file names in the tests that give the host an identity.
@@ -545,6 +544,7 @@ impl<'a> Spy<'a> {
                 }
             }),
             fstab_leftover: rig.tmp.path().join("etc/fstab.js-agent"),
+            retired_plist: rig.retired_plist(),
             token,
             host_identity: None,
             egress: Cell::new(false),
@@ -691,6 +691,7 @@ impl<'a> Spy<'a> {
             stat,
             look: &*self.look_fn,
             fstab_leftover: &self.fstab_leftover,
+            retired_helper_plist: &self.retired_plist,
         }
     }
 
@@ -740,7 +741,7 @@ impl Units for Spy<'_> {
     fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
         self.act(format!("units.stop({unit})"));
         self.port_check(match unit {
-            MAC_HELPER => "stop-helper",
+            MAC_RETIRED => "stop-retired",
             MAC_PF => "stop-pf",
             _ => "stop",
         })?;
@@ -755,8 +756,9 @@ impl Units for Spy<'_> {
 
     fn start(&self, unit: &str) -> Result<(), PortError> {
         self.act(format!("units.start({unit})"));
-        if unit == MAC_HELPER {
-            // The helper says no hello: it only runs (or does not, when the test says so).
+        if unit == MAC_RETIRED {
+            // The helper of a release that had one says no hello: it only runs (or does not,
+            // when the test says so).
             self.port_check("start")?;
             self.world.seed_unit(unit, "active", "running");
             return Ok(());
@@ -895,9 +897,9 @@ impl CommandRunner for Spy<'_> {
             return answer;
         }
         if program == LAUNCHCTL {
-            // Only the bootstraps of the helper and the pf job are run through the runner: the
-            // plist is the file the release carries, and the job is loaded (not yet running) when
-            // it is bootstrapped.
+            // Only the bootstraps of the pf job and of a previous release's helper are run
+            // through the runner: the plist is the file the release carries, and the job is
+            // loaded (not yet running) when it is bootstrapped.
             let plist = args.last().copied().unwrap_or("");
             self.act(format!("launchctl.bootstrap({plist})"));
             let call = if plist.ends_with(&format!("/{MAC_PF}.plist")) {

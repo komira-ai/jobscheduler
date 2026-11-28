@@ -14,7 +14,7 @@
 //! feature, that no crate read names with `features = [...]` or in a `crate/feature` entry
 //! of its own features (the walk repeats until that set stops growing). A build of the agent
 //! links such a dependency only through something outside these manifests, which the test
-//! `the_agent_and_the_helper_do_not_link_the_job_client` refuses for the job client
+//! `the_agent_and_the_spawner_do_not_link_the_job_client` refuses for the job client
 //! (`js-client`'s `jobs`). A manifest that cannot be read is an
 //! error.
 //!

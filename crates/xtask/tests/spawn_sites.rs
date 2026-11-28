@@ -860,12 +860,12 @@ fn resolved_features(package: &str, dependency: &str) -> Option<Vec<String>> {
         })
 }
 
-/// Asserts that a build of `js-agent` or of `js-mac-session`, each on its own, resolves
+/// Asserts that a build of `js-agent` or of `js-mac-session` (the spawner library), each on its own, resolves
 /// `js-client` without its `jobs` feature and has no `js-proto` at all, while js-cli
 /// resolves the feature. The spawn-site check leaves the job client out because it is
 /// off for them; this catches a dependency of theirs that turns it on.
 #[test]
-fn the_agent_and_the_helper_do_not_link_the_job_client() {
+fn the_agent_and_the_spawner_do_not_link_the_job_client() {
     for package in ["js-agent", "js-mac-session"] {
         let features = resolved_features(package, "js-client").unwrap_or_default();
         assert!(

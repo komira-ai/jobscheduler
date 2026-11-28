@@ -313,11 +313,11 @@ fn the_jobs_that_hold_the_token_run_only_the_prebuilt_xtask() {
 }
 
 /// Asserts that the `release` job builds on the farm and archives what the hosted build does: the
-/// same five `package:binary` entries (`BUILDS`, read from `build-macos`), `BINS` the binaries
-/// of those entries, which the five literal `--output` flags the verb fetches name and `release
+/// same four `package:binary` entries (`BUILDS`, read from `build-macos`), `BINS` the binaries
+/// of those entries, which the four literal `--output` flags the verb fetches name and `release
 /// pack --bins` archives, the deployment target and the floor both 11.0, and the artifact
 /// `dist-aarch64-apple-darwin` uploaded as `build-macos` uploads it, which `sums` expects the
-/// five archives of. Catches an output the pack step does not archive, an archive of a file the
+/// four archives of. Catches an output the pack step does not archive, an archive of a file the
 /// verb does not fetch, a binary dropped from one of the two builds, and an artifact `sums`
 /// would not find.
 #[test]
@@ -349,7 +349,7 @@ fn the_release_job_fetches_what_it_packs_and_uploads_what_sums_downloads() {
         )),
         "{run}"
     );
-    assert_eq!(run.matches("--output").count(), 5, "{run}");
+    assert_eq!(run.matches("--output").count(), 4, "{run}");
     let pack = step(release, "Pack the archives").join("\n");
     assert!(
         pack.contains(r#"run: tools/xtask release pack --bins "$BINS" --target "$TARGET" --version "$VERSION" --mtime-of "$COMMIT" --out dist"#),
@@ -428,7 +428,6 @@ fn the_package_jobs_upload_what_the_hosted_package_jobs_upload() {
             "dist/js-agent-$VERSION-macos-arm64.pkg",
             "dist/SHA256SUMS",
             "target/release/js-agent",
-            "target/release/js-mac-session",
             "target/release/js-mac-provision",
             "target/release/PROGRAMS.SHA256SUMS",
             "target/debug/xtask",

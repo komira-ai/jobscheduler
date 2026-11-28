@@ -653,7 +653,7 @@ tree must be readable and the rest of the mount must not:
 
 - The mount's root is a **read deny** of every run. The agent adds the canonicalised `--tierstore-fs` to
   `NativeConfig.read_denies` itself, in the step that canonicalises the other denies (`native/settings.rs:139-151`);
-  none of today's denies (the state and scratch roots, the helper's socket directory, `--native-deny-read`,
+  none of today's denies (the state and scratch roots, the agent's account state directory, `--native-deny-read`,
   `kcpassword`) covers it. `Profile::render` emits the read denies at `profile.rs:124-128`. So no run can read another
   run's tree by its digest, nor a view.
 - Each tree of the run is granted by a **new policy item emitted after the read denies and before the floor**:
@@ -706,18 +706,18 @@ The lifecycle builds the result when `poll` sees the run's main process exit, be
 processes at that moment (`kill_uid` runs only in `remove`, `native/mod.rs:723-744`); after the detach, a stray process
 that looks up a name of the tree fails, which is harmless since the job has ended and `remove` kills it next.
 
-`remove` then kills the user's processes (`kill_uid`), collects declared outputs, and returns the pool user to the pool
-(`user_delete`, a reset: `docs/design/mac-lease-teardown.md`). The agent sends its second detach **after `kill_uid` and
-before `user_delete`**: after, so that no process of the run still reads the tree; before, so that the pool user,
-which another lease will be lent next, holds no attachment. This corrects one assumption of tierstore 6.8, which says
-jobscheduler creates a fresh user for each run: it lends a pool user per lease and resets it after, so the uid that a
-view's server-side check compares with is reused. Under option (c) the order above is what keeps a view from outliving
+`remove` then kills the account's processes (`kill_uid`), collects declared outputs, and retires the run's account
+(`user_delete`: the account is deleted and its slot's uid freed once it is proven gone, `docs/design/mac-account-per-job.md`,
+step 2). The agent sends its second detach **after `kill_uid` and before `user_delete`**: after, so that no process of the
+run still reads the tree; before, so that the slot's uid, which a later job's account will hold next, holds no attachment.
+tierstore 6.8 says jobscheduler creates a fresh user for each run: it makes a fresh account per job, but on a fixed slot
+uid, so the uid that a view's server-side check compares with is reused. Under option (c) the order above is what keeps a view from outliving
 its run's use of the uid; under (a) and (b) there is no per-uid check in the server, and the order only keeps the
 attachments tidy.
 
 After a restart the agent adopts the runs its journal holds a run record for (`native/adopt.rs`), and sends
 `detach-all-except` with those run ids before it admits a tree job. A lease with no run record (a start that died
-before the helper started its process) is ended by the rescue's `reclaim`, and its attachment is dropped by the same
+before the job's supervisor started its process) is ended by the rescue's `reclaim`, and its attachment is dropped by the same
 call, since its id is not listed.
 
 macOS has no integrity check (`integrity/mod.rs`, "macOS"), so 3.7 has no macOS counterpart.
@@ -1099,8 +1099,8 @@ Each was not decided by the tierstore design, and is decided here; the owner may
 - **TI12. An unanswered detach after a failed job is an input failure** (section 5).
 - **TI13. On macOS, one policy item after the read denies grants the trees under both read models** (4.2), rather than
   moving the agent to the allow-list model, which it does not use today.
-- **TI14. On macOS, the second detach is between `kill_uid` and `user_delete`**, since pool users and their uids are
-  reused (4.4).
+- **TI14. On macOS, the second detach is between `kill_uid` and `user_delete`**, since slot uids are reused by the
+  accounts of later jobs (4.4).
 - **TI15. The tierstore client is a module of `js-agent`**, not a crate: it has one user (R9).
 - **TI16. Run ids go to tierstore with a `js.` prefix** (3.3, section 12), so that this agent's `detach-all-except`
   cannot touch another client's attachments on the same node.

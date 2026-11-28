@@ -18,6 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub(super) use as_account::AsAccount;
+pub(crate) use sys::account;
 pub(super) use sys::{clear_user_flags, rename_excl, strip_acl};
 
 use super::Account;

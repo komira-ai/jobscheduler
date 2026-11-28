@@ -1,4 +1,4 @@
-//! The signing table of the macOS programs of js-agent: the three programs the installer
+//! The signing table of the macOS programs of js-agent: the two programs the installer
 //! package lays down, the identifier each is signed under, the identity and team that sign
 //! them, and the designated requirement each then has.
 //!
@@ -48,14 +48,10 @@ pub struct Program {
 }
 
 /// The programs of the package, in the order the workflow signs them.
-pub const PROGRAMS: [Program; 3] = [
+pub const PROGRAMS: [Program; 2] = [
     Program {
         name: "js-agent",
         identifier: "com.komira.js-agent",
-    },
-    Program {
-        name: "js-mac-session",
-        identifier: "com.komira.js-agent.session",
     },
     Program {
         name: "js-mac-provision",

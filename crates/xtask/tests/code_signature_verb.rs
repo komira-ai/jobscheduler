@@ -115,23 +115,24 @@ fn refused_with(fake: &Fake, name: &str, says: &str) {
 
 // ---- the table ----
 
-/// The table holds the three programs of the package under the identifiers the signed programs
+/// The table holds the two programs of the package under the identifiers the signed programs
 /// carry, and the program of the grant is one of them.
 ///
 /// Catches an identifier that changes or collides (a requirement names it, and so does the
 /// profile), and a grant holder that is not a program of the package.
 #[test]
-fn the_table_names_the_three_programs_by_distinct_identifiers() {
+fn the_table_names_the_two_programs_by_distinct_identifiers() {
     let table: Vec<(&str, &str)> = PROGRAMS.iter().map(|p| (p.name, p.identifier)).collect();
     assert_eq!(
         table,
         [
             ("js-agent", "com.komira.js-agent"),
-            ("js-mac-session", "com.komira.js-agent.session"),
             ("js-mac-provision", "com.komira.js-agent.provision"),
         ]
     );
-    assert_eq!(mac_programs::program("js-mac-session"), Some(PROGRAMS[1]));
+    assert_eq!(mac_programs::program("js-mac-provision"), Some(PROGRAMS[1]));
+    assert_eq!(PROGRAMS.len(), 2);
+    assert_eq!(mac_programs::program("js-mac-session"), None);
     assert_eq!(mac_programs::program("js-vmm"), None);
     assert_eq!(mac_programs::grant_holder().name, FULL_DISK_ACCESS_PROGRAM);
     assert_eq!(FULL_DISK_ACCESS_PROGRAM, "js-agent");
@@ -173,7 +174,7 @@ fn the_table_agrees_with_the_package_and_the_team() {
 fn the_requirement_names_the_identifier_the_chain_and_the_team_and_no_hash() {
     assert_eq!(
         PROGRAMS[1].requirement(),
-        "identifier \"com.komira.js-agent.session\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X"
+        "identifier \"com.komira.js-agent.provision\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X"
     );
     for p in PROGRAMS {
         let r = p.requirement();
@@ -276,11 +277,11 @@ fn each_way_a_signature_differs_from_the_releases_is_refused_and_named() {
             "the signature is ad hoc",
         ),
         (
-            good.replace("Identifier=com.komira.js-agent.session", "Identifier=js-mac-session"),
-            "the identifier is js-mac-session, not com.komira.js-agent.session",
+            good.replace("Identifier=com.komira.js-agent.provision", "Identifier=js-mac-provision"),
+            "the identifier is js-mac-provision, not com.komira.js-agent.provision",
         ),
         (
-            good.replace("Identifier=com.komira.js-agent.session\n", ""),
+            good.replace("Identifier=com.komira.js-agent.provision\n", ""),
             "the identifier is absent",
         ),
         (
@@ -369,7 +370,7 @@ fn each_way_a_signature_differs_from_the_releases_is_refused_and_named() {
     ));
     wrong_requirement(format!(
         "designated => {}\n",
-        want.replace("com.komira.js-agent.session", "com.komira.js-agent")
+        want.replace("com.komira.js-agent.provision", "com.komira.js-agent")
     ));
     wrong_requirement(format!("designated => {want} and cdhash H\"0123\"\n"));
     wrong_requirement("designated => cdhash H\"0123456789\"\n".to_owned());
@@ -404,8 +405,8 @@ fn a_program_signed_under_another_programs_identifier_is_refused() {
     fake.display = Ok(display_of(PROGRAMS[0].identifier));
     refused_with(
         &fake,
-        "js-mac-session",
-        "the identifier is com.komira.js-agent, not com.komira.js-agent.session",
+        "js-mac-provision",
+        "the identifier is com.komira.js-agent, not com.komira.js-agent.provision",
     );
 }
 
@@ -569,6 +570,8 @@ fn the_profile_grants_full_disk_access_to_the_agent_alone() {
     assert!(text.contains("<string>identifier \"com.komira.js-agent\" and anchor apple generic"));
     assert!(!text.contains("js-agent.session"));
     assert!(!text.contains("bin/js-mac-session"));
+    assert!(!text.contains("js-agent.provision"));
+    assert!(!text.contains("bin/js-mac-provision"));
     assert!(text.contains("<key>IdentifierType</key>\n\t\t\t\t\t\t<string>path</string>"));
     assert!(text.contains("<key>Authorization</key>\n\t\t\t\t\t\t<string>Allow</string>"));
     assert!(text.contains("<key>StaticCode</key>\n\t\t\t\t\t\t<false/>"));
@@ -600,9 +603,9 @@ fn each_way_a_profile_differs_is_named() {
         (
             text.replace(
                 "identifier \"com.komira.js-agent\"",
-                "identifier \"com.komira.js-agent.session\"",
+                "identifier \"com.komira.js-agent.provision\"",
             ),
-            "com.komira.js-agent.session\\\" and anchor",
+            "com.komira.js-agent.provision\\\" and anchor",
         ),
         (
             text.replace(" and anchor apple generic", " and cdhash H\"0123456789012345678901234567890123456789\" and anchor apple generic"),
@@ -613,8 +616,8 @@ fn each_way_a_profile_differs_is_named() {
             "/tmp/js-agent",
         ),
         (
-            text.replace(&holder.install_path(), "/Library/Application Support/js-agent/bin/js-mac-session"),
-            "bin/js-mac-session<",
+            text.replace(&holder.install_path(), "/Library/Application Support/js-agent/bin/js-mac-provision"),
+            "bin/js-mac-provision<",
         ),
         (
             text.replace("SystemPolicyAllFiles", "SystemPolicyDesktopFolder"),

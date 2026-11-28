@@ -1,6 +1,6 @@
 # Starting programs on macOS: disclaimed by default, kept for a job
 
-How `js-agent` and `js-mac-session` start every program on macOS, in two kinds of start, why each is built the way it is, and how the rule is kept. A start disclaims the privacy (TCC) responsibility by default. A native job and its supervisor are started without the disclaim: they keep the responsibility. The code is `crates/js-mac-session/src/disclaim.rs` and its modules (`plan.rs`, `darwin.rs`); the check is `crates/xtask/src/spawn_sites.rs`.
+How `js-agent` and `js-mac-provision` start every program on macOS, through the library crate `js-mac-session`, in two kinds of start, why each is built the way it is, and how the rule is kept. A start disclaims the privacy (TCC) responsibility by default. A native job and its supervisor are started without the disclaim: they keep the responsibility. The code is `crates/js-mac-session/src/disclaim.rs` and its modules (`plan.rs`, `darwin.rs`); the check is `crates/xtask/src/spawn_sites.rs`.
 
 ## The problem
 
@@ -16,7 +16,7 @@ What keeps a job from using the rest of the grant is the slot user it runs as (U
 
 The table below says which start is which.
 
-The native runtime (`crates/js-agent/src/native`) starts every native job through the supervisor (`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`), which is the code that keeps the responsibility: the agent's launcher (`launch.rs`) starts it with `Kept::Supervisor`, and it starts the job with `Kept::Job` (`run.rs`). The root helper `js-mac-session` starts no native job of the agent's any more.
+The native runtime (`crates/js-agent/src/native`) starts every native job through the supervisor (`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`), which is the code that keeps the responsibility: the agent's launcher (`launch.rs`) starts it with `Kept::Supervisor`, and it starts the job with `Kept::Job` (`run.rs`). The root helper that once started the agent's native jobs is retired (`mac-one-program.md`, section 13): `js-mac-session` is a library crate, and `disclaim` is its module.
 
 ### Which program keeps its responsibility
 
@@ -27,10 +27,8 @@ The native runtime (`crates/js-agent/src/native`) starts every native job throug
 | A job's own children | the job | follow their parent (answer for the agent) |
 | Host probes (`sw_vers`, `sysctl`), `pfctl`, `launchctl`, `ioreg` | `js-agent` | disclaimed |
 | `getconf` as the lease user | `js-agent` | disclaimed, so a slot-user process the agent starts for itself never carries the grant |
-| The `sandbox-exec` self-test (`native/profile.rs`) | `js-agent` | disclaimed; goes away with the helper path |
 | The agent re-executing itself in place (`in_place.rs`) | `js-agent` | unchanged: the same process |
 | The VM launcher (`vm/helper.rs`, the `js-vmm` lease) | `js-agent` | not decided; stays disclaimed. Disclaimed, it answers for itself by its own signature and entitlement and has no Full Disk Access; kept, it answers for the agent |
-| The GUI-session path (`macos/gui.rs`: `launchctl asuser`, then `disclaim::exec`) | `js-agent` | not decided, not measured; stays disclaimed. launchd starts it in the user's session, so keeping it is not simply a flag. After an unattended restart a Mac has no logged-in user, so a start that needs a user's graphical session cannot happen until someone logs in. |
 
 Not measured: what macOS does with the responsible process when the agent that started a supervisor exits (a restart or an update while a job runs). Nothing is claimed about it.
 
@@ -86,7 +84,7 @@ Options considered:
    - the files to try: the program itself when it holds a `/`, otherwise the program joined to each directory of the environment's `PATH` (`/usr/bin:/bin` when there is none), in order, an empty directory being `.`. Nothing is looked at in the parent: a relative file is tried by the child, in the directory it has entered;
    - for each file, the vector that runs it through `/bin/sh`;
    - the `posix_spawn` attributes: `POSIX_SPAWN_SETEXEC` (execute in the caller's place) and the disclaim. A call that fails ends the start with its error, and nothing is started.
-2. **In the child**, the standard library does its set-up (streams, ids, working directory, process group); the caller's steps run (the helper's `fchdir` into the lease directory, the close-on-exec pass, the limits); then, in place of `execvp`, the child tries the files with `posix_spawn` and those attributes. Each attempt that succeeds replaces the child with the program, disclaimed; each one that fails returns an error number and leaves the child as it was, so the next can be tried.
+2. **In the child**, the standard library does its set-up (streams, ids, working directory, process group); the caller's steps run (a `fchdir` into the run directory, the close-on-exec pass, the limits); then, in place of `execvp`, the child tries the files with `posix_spawn` and those attributes. Each attempt that succeeds replaces the child with the program, disclaimed; each one that fails returns an error number and leaves the child as it was, so the next can be tried.
 3. **The search decides as `execvp` does** (Apple's `execvP`):
    - `ENOEXEC` (an executable text file with no `#!` line) runs the file through `/bin/sh` with the same arguments, and that answer is final;
    - in a `PATH` search, `ENOENT`, `ENOTDIR`, `ELOOP` and `ENAMETOOLONG` pass to the next file, and `EACCES` does too but is remembered; any other error ends the search with it; when every file was passed over the answer is `EACCES` if one was refused so, `ENOENT` otherwise;
@@ -94,7 +92,7 @@ Options considered:
 
 A `Program` is used once: a second start, after a first that succeeded or failed, is refused. What the first start made is the child's, and the parent never makes it twice for one command.
 
-The helper's `as-user` mode (the last step of a run in a GUI session, executed by `launchctl asuser`) executes the program in its own place with `disclaim::exec`: the same plan and attributes, from the process's own environment, with no fork.
+`disclaim::exec` executes a program in the calling process's own place: the same plan and attributes, from the process's own environment, with no fork. The agent's re-execution of itself in place (`crates/js-agent/src/in_place.rs`) calls it; its other caller, the helper's `as-user` mode (the last step of a run in a GUI session), went with the helper.
 
 What the disclaim gives: the program is its own responsible process, and what it starts answers for it. What it does not do: it does not take away a grant that the program itself already has (a grant given to that app by someone); it only stops the daemon's grants from reaching it. A start that keeps the responsibility (`Program::keep_responsibility(Kept::Job)` or `Kept::Supervisor`) makes none of the above: the child does the standard library's set-up and the caller's steps, and the standard library executes the program, as it does off macOS. The default stays disclaimed.
 
@@ -114,8 +112,6 @@ Added, in `js-mac-session` (a workspace crate, not published):
 - `disclaim::Kept`, `Job` or `Supervisor`: which of the two starts that keep the responsibility a start is.
 - `disclaim::exec(program, args) -> io::Error` and `disclaim::responsible_pid(pid) -> io::Result<u32>`, macOS only.
 
-Changed: `macos::gui::command(uid, gid, program, args) -> io::Result<Command>` became `macos::gui::argv(uid, gid, program, args) -> io::Result<(&'static str, Vec<OsString>)>`, the vector `launchctl asuser` is started with, so the start goes through `Program`.
-
 Added, in `xtask` (used by its `spawn_sites` test only): the module `spawn_sites`, with `check(&Path) -> Result<Vec<Site>, Error>`, `check_with_keepers(&Path, &[&str]) -> Result<Vec<Site>, Error>` (the same check with the given files as the keepers, for the tests) and `crates(&Path) -> Result<BTreeSet<String>, Error>` (both borrow the repository root and return owned results); `Site` (file, line, what); `Error`, whose variants each carry the file and the cause (`Read`, `Parse`, `Manifest`, `NoModule`, `PathAttribute`, `ConditionalPath`, `Include`, `NoRoot`, `NoSpawner`, `NoKeeper`); and the constants `START_CRATES`, `SPAWNER`, `EXECUTORS`, `KEEPERS`.
 
 No CLI, flag, configuration key, wire message or file format changes.
@@ -123,5 +119,5 @@ No CLI, flag, configuration key, wire message or file format changes.
 ## What is tested where
 
 - The rules that need no system call (the vectors byte for byte, the search, the order and cleanup of the attribute calls, the pid conversions) and `Program` as the standard library's command run on Linux, in `js-mac-session`'s own tests.
-- On the macOS CI runner, `crates/js-agent/tests/agent/native/disclaim.rs` starts real jobs through the helper's `spawn` and through `Program` and reads each process's responsible process back (`responsibility_get_pid_responsible_for_pid`): jobs, a job under `sandbox-exec`, a job's child and grandchild, the agent's `pfctl`, jobs started at the same moment, and a control started the usual way. It also checks the search and the environment on a real system: relative and empty `PATH` directories in the job's own directory, a non-executable and an unreadable candidate passed over, a script without `#!`, a `PATH` only the job has, and the environment byte for byte.
-- Not proven on the hosted runner, which has no grant to give: a protected read refused while the helper holds a grant; nor the GUI-session path (`launchctl asuser`, the drop to the lease user and the in-process `disclaim::exec`), which needs root and a logged-in user. Its `exec` shares the plan, the search and the attributes with the `Program` start the runner does test; what only it does is build the plan from its own environment and call the search without a fork. The check by hand is in `packaging/js-agent-macos/README.md`.
+- On the macOS CI runner, `crates/js-agent/tests/agent/native/disclaim.rs` starts real jobs through `Program` and a stand-in for the supervisor, and reads each process's responsible process back (`responsibility_get_pid_responsible_for_pid`): jobs, a job under `sandbox-exec`, a job's child and grandchild, the agent's `pfctl`, jobs started at the same moment, and a control started the usual way. It also checks the search and the environment on a real system: relative and empty `PATH` directories in the job's own directory, a non-executable and an unreadable candidate passed over, a script without `#!`, a `PATH` only the job has, and the environment byte for byte.
+- Not proven on the hosted runner, which has no grant to give: a protected read refused while the program holds a grant. The in-process `disclaim::exec` shares the plan, the search and the attributes with the `Program` start the runner does test; what only it does is build the plan from its own environment and call the search without a fork. The check by hand is in `packaging/js-agent-macos/README.md`.

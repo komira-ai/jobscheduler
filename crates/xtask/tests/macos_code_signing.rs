@@ -2,7 +2,7 @@
 //! (`.github/workflows/js-agent-macos-pkg.yml`) that signs the programs before the package is
 //! made of them. The table, the verb and the profile are in code_signature_verb.rs.
 //!
-//! The workflow is read as it is in the repository. `build` builds the three programs and holds
+//! The workflow is read as it is in the repository. `build` builds the two programs and holds
 //! no secret. `sign-code` runs under the signing condition (macos_pkg_workflow/signing_run.rs) in
 //! the environment `pkg-signing`, signs them with the team's Developer ID Application identity,
 //! and nothing built from the repository runs in it; macos_sign_code_run.rs runs its signing
@@ -119,7 +119,7 @@ const IMPORT: &str = r#"          imported=true
 
 /// One line per way the workflow `text` and the package action `action` are not the signing of
 /// the programs before the package: the signing job holds the only application secrets, signs
-/// the three programs under the table's identifiers with the hardened runtime and a timestamp,
+/// the two programs under the table's identifiers with the hardened runtime and a timestamp,
 /// runs nothing built from the repository, and the package job holds no secret and checks each
 /// staged program.
 fn signing_problems(text: &str, action: &str) -> Vec<String> {
@@ -303,9 +303,7 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
             && sign_text.contains("name: js-agent-macos-programs-signed")
             && build.contains("name: js-agent-macos-programs-unsigned")
             && build.contains("target/release/PROGRAMS.SHA256SUMS")
-            && build.contains(
-                "shasum -a 256 js-agent js-mac-session js-mac-provision > PROGRAMS.SHA256SUMS",
-            ),
+            && build.contains("shasum -a 256 js-agent js-mac-provision > PROGRAMS.SHA256SUMS"),
         "the programs do not go build -> sign-code -> package as the two artifacts",
     );
     want(
@@ -325,8 +323,8 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
         "the action does not check the staged programs after staging and before the package is built",
     );
     want(
-        action_code.contains("for bin in js-agent js-mac-session js-mac-provision; do\n          cargo xtask release check-code-signature \"stage/root/Library/Application Support/js-agent/bin/$bin\" --program \"$bin\"\n        done"),
-        "the action does not check each of the three staged programs against the table",
+        action_code.contains("for bin in js-agent js-mac-provision; do\n          cargo xtask release check-code-signature \"stage/root/Library/Application Support/js-agent/bin/$bin\" --program \"$bin\"\n        done"),
+        "the action does not check each of the two staged programs against the table",
     );
     want(
         action_code
@@ -502,8 +500,8 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
             "not signed with the identity, the identifier, the hardened runtime and a timestamp",
         ),
         (
-            "          js-mac-session com.komira.js-agent.session\n",
-            "          js-mac-session com.komira.js-agent\n",
+            "          js-mac-provision com.komira.js-agent.provision\n",
+            "          js-mac-provision com.komira.js-agent\n",
             "the programs and identifiers signed are not the table's",
         ),
         (
@@ -544,7 +542,7 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
         (
             "--program \"$bin\"\n        done",
             "--program js-agent\n        done",
-            "does not check each of the three staged programs",
+            "does not check each of the two staged programs",
         ),
         (
             "      if: ${{ inputs.programs == '' }}\n",

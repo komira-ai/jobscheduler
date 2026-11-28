@@ -73,7 +73,7 @@ jobs:
         # on a hosted runner of its own architecture (no cross linker, no emulation), so the
         # check step below runs every binary on the kind of host it is for. The lease server
         # and js-mdm are Linux-only; the client, the agent, the js-bundle CLI and the Mac host
-        # tools (js-mac-session, js-mac-provision) also build for Apple silicon, in
+        # tool (js-mac-provision) also build for Apple silicon, in
         # `build-macos` or `macos-farm` below. `deb` is the platform `release deb` makes the
         # Debian package of js-agent for, and `deb_arch` the architecture its file name carries.
         include:
@@ -238,7 +238,7 @@ jobs:
     env:
       TARGET: aarch64-apple-darwin
       VERSION: ${{ inputs.version }}
-      BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
+      BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-provision:js-mac-provision
       # The oldest macOS the binaries must run on; a newer runner image must not raise it
       # (`release macos-leg` reads each binary's minos).
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -321,7 +321,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-aarch64-unknown-linux-musl.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-aarch64-unknown-linux-musl.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent_${VERSION}_amd64.deb js-agent_${VERSION}_arm64.deb js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-aarch64-unknown-linux-musl.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-aarch64-unknown-linux-musl.oci.tar js-lease-server-$VERSION-aarch64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.oci.tar js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz js-mdm-$VERSION-aarch64-unknown-linux-musl.tar.gz js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-aarch64-unknown-linux-musl.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-aarch64-unknown-linux-musl.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent_${VERSION}_amd64.deb js-agent_${VERSION}_arm64.deb js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-aarch64-unknown-linux-musl.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-aarch64-unknown-linux-musl.oci.tar js-lease-server-$VERSION-aarch64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.oci.tar js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mdm-$VERSION-aarch64-unknown-linux-musl.tar.gz js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"

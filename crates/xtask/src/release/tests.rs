@@ -599,7 +599,6 @@ fn this_repositorys_shipped_crates() {
         "js-cli",
         "js-agent",
         "js-bundle-cli",
-        "js-mac-session",
         "js-mac-provision",
         "js-mdm",
     ]);
@@ -616,6 +615,7 @@ fn this_repositorys_shipped_crates() {
         "js-bundle-cli",
         "js-client",
         "js-lease-server",
+        "js-mac-session",
         "js-mdm",
         "js-mdm-core",
         "js-host-step",
@@ -671,7 +671,7 @@ fn a_binary_of_another_version_is_refused_by_name() {
 }
 
 /// Pins the crates `release plan` treats as shipped binaries by default: the lease server,
-/// `js`, the agent, `js-bundle` and the two Mac host tools. A binary the release workflow
+/// `js`, the agent, `js-bundle` and the Mac host tools. A binary the release workflow
 /// builds but this list omits would never trigger a release when only it changes.
 #[test]
 fn the_default_ship_roots_are_the_released_binaries_crates() {
@@ -688,7 +688,6 @@ fn the_default_ship_roots_are_the_released_binaries_crates() {
             "js-cli",
             "js-agent",
             "js-bundle-cli",
-            "js-mac-session",
             "js-mac-provision",
             "js-mdm"
         ]

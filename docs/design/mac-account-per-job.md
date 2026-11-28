@@ -1,8 +1,8 @@
 # A new account per native job on a Mac
 
-Status: steps 1 and 3 are built (the release signs the macOS programs, a privacy profile grants `js-agent` Full Disk Access, the agent reports whether it holds the grant and refuses native jobs without it). Step 2, a new account for every native job that is deleted afterwards, is built in another shape than the one designed here: slot accounts in `crates/js-agent/src/mac_accounts`, with the native runtime running each job as one of them (`mac-one-program.md`, sections 11 and 13).
+Status: steps 1 and 3 are built (the release signs the macOS programs, a privacy profile grants `js-agent` Full Disk Access, the agent reports whether it holds the grant and refuses native jobs without it). Step 2, a new account for every native job that is deleted afterwards, is built in another shape than the one designed here: slot accounts in `crates/js-agent/src/mac_accounts`, with the native runtime running each job as one of them (`mac-one-program.md`, sections 11 and 13). Step 5 is built: the pool, its adoption and the reset in place went with the root helper `js-mac-session`, which is no longer a program (the text of steps 2 and 4 below says "the helper" where the built code is `mac_accounts` in `js-agent`; `mac-lease-teardown.md` has what the teardown does now).
 
-Before step 2, a native job ran as one of a fixed pool of hidden accounts (`kbf-lease-pool-<slot>`), which the root helper `js-mac-session` resets in place after the job and lends again (`mac-lease-teardown.md`). The pool's helper is still in the package until the not-built items of `mac-one-program.md`, section 13, land. The pool exists because macOS 27 refuses root, without the privacy grant Full Disk Access, the deletion of an account record, of an account's home and of the per-user folders the system placed for it, so nothing of an account could be removed. A reset in place empties what it can and keeps the rest: an empty `~/Library/Preferences` that the system guards, the `/var/folders/<xx>/<hash>` entry with its `0`, `C` and `T`, the record itself and every attribute of it root may not write. A job leaves behind whatever the reset does not reach, and the next job of the same slot inherits it.
+Before step 2, a native job ran as one of a fixed pool of hidden accounts (`kbf-lease-pool-<slot>`), which the root helper `js-mac-session` reset in place after the job and lent again. That helper and its pool are retired and are no longer in the package (step 5, below). The pool existed because macOS 27 refuses root, without the privacy grant Full Disk Access, the deletion of an account record, of an account's home and of the per-user folders the system placed for it, so nothing of an account could be removed. A reset in place empties what it can and keeps the rest: an empty `~/Library/Preferences` that the system guards, the `/var/folders/<xx>/<hash>` entry with its `0`, `C` and `T`, the record itself and every attribute of it root may not write. A job leaves behind whatever the reset does not reach, and the next job of the same slot inherits it.
 
 The aim is that no job inherits anything of an account: each job gets an account that did not exist before it, and the account, its home and its per-user folders are gone, and shown gone, before its uid can be given to anyone again.
 
@@ -10,7 +10,7 @@ The aim is that no job inherits anything of an account: each job gets an account
 
 | | Before | After this change (steps 1 and 3) | After step 2 (as designed here; built in another shape, see the status) |
 |---|---|---|---|
-| Signature of `js-agent`, `js-mac-session`, `js-mac-provision` | the linker's ad hoc signature, an identifier that changes with every build | Developer ID Application, team `U7RTX4XD3X`, fixed identifiers, hardened runtime, trusted timestamp | same |
+| Signature of `js-agent`, `js-mac-provision` (and, before step 5, `js-mac-session`) | the linker's ad hoc signature, an identifier that changes with every build | Developer ID Application, team `U7RTX4XD3X`, fixed identifiers, hardened runtime, trusted timestamp | same |
 | Full Disk Access | held by nothing | granted to `js-agent` alone by a profile the owner installs through device management | same |
 | What the host list says | nothing | the host's capability `full-disk-access`: `granted`, `not-granted` or `undetermined` | same |
 | A native job on a Mac without the grant | runs as a pool account that is reset in place | refused before anything is made, `no-full-disk-access` | same |
@@ -22,7 +22,7 @@ What does not change: the Seatbelt profile every job runs under, the kill of the
 
 ### The program that holds it
 
-The account operations move into `js-agent` with the helper's work (`mac-one-program.md`, komira-ai/jobscheduler#991), so the program that deletes accounts is `js-agent`, a launchd daemon of its own (`js-agent`). macOS's privacy control judges an access by the responsible process, and a launchd daemon is its own, so the grant names the agent. The profile names `js-agent` already, ahead of the switch release, so the owner installs it once and it holds through the switch: a profile names a program by its path and its signature, not its version. Until the switch the helper `js-mac-session` holds no grant, and the pool's reset in place, which it does, needs none. Everything the agent starts for itself (its probes, `pfctl`, `launchctl`, `getconf` as the lease user) is started disclaimed (`spawn-disclaim.md`): the started program answers for itself. A native job and its supervisor are started without the disclaim, so they answer for the agent and hold the grant too; the slot user and the Seatbelt profile are what keep a job from using it beyond the build trees (`mac-one-program.md`). Today the helper starts every job, disclaimed, and holds no grant. The profile names that one program and no other.
+The account operations move into `js-agent` with the helper's work (`mac-one-program.md`, komira-ai/jobscheduler#991), so the program that deletes accounts is `js-agent`, a launchd daemon of its own (`js-agent`). macOS's privacy control judges an access by the responsible process, and a launchd daemon is its own, so the grant names the agent. The profile names `js-agent` already, ahead of the switch release, so the owner installs it once and it holds through the switch: a profile names a program by its path and its signature, not its version. Everything the agent starts for itself (its probes, `pfctl`, `launchctl`, `getconf` as the lease user) is started disclaimed (`spawn-disclaim.md`): the started program answers for itself. A native job and its supervisor are started without the disclaim, so they answer for the agent and hold the grant too; the slot user and the Seatbelt profile are what keep a job from using it beyond the build trees (`mac-one-program.md`). The profile names that one program and no other.
 
 ### Signing
 
@@ -31,7 +31,6 @@ On a push to main the package workflow (`.github/workflows/js-agent-macos-pkg.ym
 | Program | Identifier |
 |---|---|
 | `js-agent` | `com.komira.js-agent` |
-| `js-mac-session` | `com.komira.js-agent.session` |
 | `js-mac-provision` | `com.komira.js-agent.provision` |
 
 `cargo xtask release check-code-signature <binary> --program <name>` reads a program back and refuses it unless its designated requirement is exactly the pinned one, `identifier "<id>" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X`, signed with the hardened runtime and a trusted timestamp. The package job runs it on every staged program before the package is built. The requirement names no hash, so every release meets it.
@@ -42,7 +41,7 @@ On a push to main the package workflow (`.github/workflows/js-agent-macos-pkg.ym
 
 ### Knowing
 
-The agent lists the privacy database's directory (`/Library/Application Support/com.apple.TCC`) itself, which only a process with Full Disk Access may list: success is `granted`, a refusal is `not-granted`, any other error `undetermined` (logged). It opens no file and reads no database. The agent does this at its start, before its first hello, and reports the answer as the detected capability `full-disk-access`, which the job service's host list (`GET /v1/hosts`) shows. The helper still answers its verb `full-disk-access` for itself (it holds no grant); the agent no longer asks it.
+The agent lists the privacy database's directory (`/Library/Application Support/com.apple.TCC`) itself, which only a process with Full Disk Access may list: success is `granted`, a refusal is `not-granted`, any other error `undetermined` (logged). It opens no file and reads no database. The agent does this at its start, before its first hello, and reports the answer as the detected capability `full-disk-access`, which the job service's host list (`GET /v1/hosts`) shows.
 
 The agent looks once per start: a profile installed while the agent runs takes effect at the agent's next start (an update, or `launchctl kickstart -k system/js-agent`).
 
@@ -95,7 +94,7 @@ A deletion that fails at any step, or whose proof fails, leaves the lease live a
 - With the account made and the job running or ended: the boot reset deletes it as above (a lease the server still holds for the node is kept until the server lets it go, as the boot reset keeps a held lease today).
 - After the record is deleted and before `deleted` is written: the delete is repeated (deleting a missing record is not an error), then the proof, then `deleted`.
 - A `kbf-lease-*` account in the range whose lease the ledger does not know (a lost ledger): the boot reset records it as `created` and deletes it.
-- The pool's own accounts (`kbf-lease-pool-<n>`) left by a release before step 2: the first boot reset with the grant deletes each the same way.
+- The pool's own accounts (`kbf-lease-pool-<n>`) left by a release before step 2: nothing deletes them now. The agent leaves alone a record it did not make (its slots must not overlap their uids, `mac-one-program.md`, section 11), and the helper whose boot reset would have deleted them is retired; an administrator removes them by hand.
 
 ## Step 4: what it costs
 
@@ -105,25 +104,28 @@ Accounts made ahead of time (a few, each used once and then deleted) would take 
 
 ## Step 5: what goes and what stays
 
-Goes, with step 2:
+Built, with the retirement of the helper program (komira-ai/jobscheduler#1163, `mac-one-program.md`, section 13).
 
-- the pool: its file, `pool-create`, `pool-status`, the slots, the adoption of left accounts;
-- the reset in place: emptying the home and the per-user folders while keeping them, the list of places kept, and the record write-back (setting the shell, the hidden flag and the primary group back, and refusing a record whose uid or home differs).
+Went, with step 2:
+
+- the pool: its file, `pool-create`, `pool-status`, the slots as lent users, the adoption of left accounts;
+- the reset in place: emptying the home and the per-user folders while keeping them, the list of places kept, and the record write-back (setting the shell, the hidden flag and the primary group back, and refusing a record whose uid or home differs);
+- the helper's `full-disk-access` verb, with its socket: the agent checks its own grant in-process (`crates/js-mac-session/src/full_disk_access.rs`, a library module the agent calls).
 
 Stays:
 
-- the Seatbelt profile every job runs under: a new account does not change what a job may reach while it runs;
-- `kill-uid` and its judgment of what is left;
-- the sweep of the shared places and the IPC removal, which reach what the job left outside its account;
-- the leak scan after each job and the taint it sets: a login item, a Background Task Management entry or a launch daemon a job left outside its account is not undone by deleting the account.
+- the Seatbelt profile every job runs under: a new account does not change what a job may reach while it runs (`crates/js-agent/src/native/fence.rs`);
+- the kill of the uid and the judgment of what is left (`crates/js-agent/src/mac_accounts/teardown.rs`, `crates/js-agent/src/mac_sweep`);
+- the sweep of the shared places and the IPC removal, which reach what the job left outside its account (`crates/js-agent/src/mac_accounts/tree.rs`, `crates/js-agent/src/mac_accounts/ipc.rs`);
+- the leak check after each job and the taint it sets, in `crates/js-agent/src/leak_scan.rs`: a login item, a Background Task Management entry or a launch daemon a job left outside its account is not undone by deleting the account. It is not wired in: a Mac agent's post-job check is `NoChecks`, and the helper's scan that fed it is gone.
 
-It fits the one-program design: no new daemon, and no new helper verb: the agent checks its own grant in-process, and the helper's `full-disk-access` verb, which the agent no longer asks, goes with the socket when the helper's work moves into the agent.
+It fits the one-program design: no new daemon, and no new helper verb: the agent checks its own grant in-process.
 
 ## Step 6: the proof
 
 The isolation probe's two-phase persistence half (a job leaves a marker of every kind it may make; a later job looks for each) judges a new account per job: the `find` job runs as another account by construction, and every marker kind must come back `gone`. One row stays open: a POSIX named semaphore outlives every account change until the Mac restarts, because macOS has no interface that lists or removes another process's semaphores by owner; the profile cannot deny creating one without breaking Python's `multiprocessing` locks. A semaphore holds a count, not data.
 
-The tests of the change run on Linux against the helper's fakes (the account's shape, the uid choice, each step's failure, each crash point, the ledger read by the previous release). The root test that installs the package on the hosted macOS runner proves the side it can: the runner's agent is unsigned and holds no grant, so the host list says `not-granted`. A deletion with the grant can only be shown on a Mac with the profile.
+The tests of the change run on Linux against the fake account host of `js-agent`'s tests (the account's shape, the uid choice, each step's failure, each crash point, the ledger read by the previous release). The root test that installs the package on the hosted macOS runner proves the side it can: the runner's agent is unsigned and holds no grant, so the host list says `not-granted`. A deletion with the grant can only be shown on a Mac with the profile.
 
 ## Step 7: the owner's steps
 

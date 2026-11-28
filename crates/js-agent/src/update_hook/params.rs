@@ -4,20 +4,17 @@
 //! is a scalar and writes the table to a file. The file is TOML, a flat table of scalars. The
 //! updater adds reserved keys ([`PROMOTION_CEILING_KEY`], the staged and previous release, the
 //! versions and [`ARTIFACT_DIGEST_KEY`]). The keys the manifest gives are [`KEYS`]; every one is
-//! required, and any other scalar key is ignored:
+//! required, and any other scalar key is ignored (so a table of an earlier release that still
+//! names `helper_unit` or `socket_group`, the retired root helper's job and socket group, is
+//! read as it is without them):
 //!
 //! - `unit`, `state_dir`, `runtime` and the five `*_timeout_secs` and `verify_deadline_secs`:
 //!   the [`Settings`] (the unit the hook manages, its record's directory, the runtime the agent
 //!   must have, and the updater's bound on each step);
-//! - `helper_unit` (optional, launchd only): the label of the agent's root helper job, which the
-//!   package's release tree carries as `tree/Library/LaunchDaemons/<helper_unit>.plist`; the hook
-//!   boots it out and bootstraps it again with each agent start (a file name: no `/`);
 //! - `pf_unit` (optional, launchd only): the label of the job that keeps the pool's pf anchor
 //!   loaded, carried as `tree/Library/LaunchDaemons/<pf_unit>.plist`; `cutover` boots it out,
 //!   loads the anchor of the host's flags file with the staged release's `js-mac-provision` and
 //!   bootstraps it again before the agent starts (a file name: no `/`);
-//! - `socket_group` (optional, launchd only): the group the root helper gives its socket, which
-//!   `prepare` makes when the host has none (a name of letters, digits, `_`, `-` and `.`);
 //! - `scratch_root` (optional, launchd only): the agent's `--scratch-root`, which `prepare` makes
 //!   on a volume of its own, mounted on the scratch root's parent when that shares the state
 //!   root's file system (an absolute path of plain components with no white space, that is not
@@ -100,14 +97,8 @@ pub const FLAGS_FILE_KEY: &str = "flags_file";
 /// The key of the unit the hook manages.
 pub const UNIT_KEY: &str = "unit";
 
-/// The key of the launchd job of the agent's root helper (optional).
-pub const HELPER_UNIT_KEY: &str = "helper_unit";
-
 /// The key of the launchd job that keeps the pool's pf anchor loaded (optional).
 pub const PF_UNIT_KEY: &str = "pf_unit";
-
-/// The key of the group the root helper gives its socket (optional).
-pub const SOCKET_GROUP_KEY: &str = "socket_group";
 
 /// The key of the agent's scratch root, as the agent's `--scratch-root` (optional).
 pub const SCRATCH_ROOT_KEY: &str = "scratch_root";
@@ -211,14 +202,10 @@ pub enum ParamsError {
     /// `unit` is empty.
     #[error("params key {0:?} must not be empty")]
     Empty(String),
-    /// `helper_unit` or `pf_unit` is not a plain file name: it becomes part of the path of a plist
-    /// in the release tree.
+    /// `pf_unit` is not a plain file name: it becomes part of the path of a plist in the release
+    /// tree.
     #[error("params key {0:?} must be a plain file name: not empty, not . or .., no /")]
     NotFileName(String),
-    /// `socket_group` is not a group name: empty, or with a character other than an ASCII
-    /// letter, a digit, `_`, `-` or `.`.
-    #[error("params key {0:?} must be a group name: ASCII letters, digits, _, - and .")]
-    NotGroupName(String),
     /// `scratch_root` is not an absolute path of plain components without white space: the
     /// form of a mount point the hook accepts.
     #[error("params key {0:?} must be an absolute path of plain components with no white space")]
@@ -396,15 +383,6 @@ fn scratch_root_of(table: &toml::Table, state_root: &Path) -> Result<Option<Path
     Ok(Some(root))
 }
 
-/// Whether `name` is a group name the hook makes: not empty, and only ASCII letters, digits,
-/// `_`, `-` and `.`.
-fn is_group_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-}
-
 /// The table of a params file's text: TOML, a flat table of scalars.
 ///
 /// # Errors
@@ -452,15 +430,7 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
         return Err(ParamsError::NotPlain(STATE_DIR_KEY.to_owned()));
     }
     let unit = unit_of(table)?;
-    let helper_unit = file_name_of(table, HELPER_UNIT_KEY)?;
     let pf_unit = file_name_of(table, PF_UNIT_KEY)?;
-    let socket_group = string_of(table, SOCKET_GROUP_KEY)?;
-    if socket_group
-        .as_deref()
-        .is_some_and(|name| !is_group_name(name))
-    {
-        return Err(ParamsError::NotGroupName(SOCKET_GROUP_KEY.to_owned()));
-    }
     let runtime = string_of(table, RUNTIME_KEY)?.ok_or(ParamsError::Missing(RUNTIME_KEY))?;
     if !RUNTIMES.contains(&runtime.as_str()) {
         return Err(ParamsError::UnknownRuntime(runtime));
@@ -485,9 +455,7 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
     Ok(Settings {
         state_dir,
         unit,
-        helper_unit,
         pf_unit,
-        socket_group,
         runtime,
         timeouts,
         verify_deadline_secs,

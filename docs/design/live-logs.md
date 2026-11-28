@@ -253,8 +253,8 @@ chunks and markers it put. The record is written before the first put and replac
 
 ### 3.7 The macOS native runtime
 
-A native job has no supervisor and no capture pipe: the agent makes its standard output and error as two files in the run's scratch
-directory (which only the agent can enter) and the helper gives them to the job, which writes them itself
+A native job has no capture pipe: the agent makes its standard output and error as two files in the run's scratch
+directory (which only the agent can enter) and the job's supervisor (`js-agent __supervise-native`) gives them to the job, which writes them itself
 (`js-agent/src/native/logs.rs`). Each file holds the whole stream, up to the run's file-size limit (`--native-max-file-mib`), whether
 or not an agent runs. The uploader of a run whose start carried a sink is the same as `crun`'s (same requests, keys, offsets, chunk
 loop and end), started once the program has started, with two differences:
@@ -266,7 +266,7 @@ loop and end), started once the program has started, with two differences:
   stream's total; a run whose exit was never read is told it at its removal, after its processes were killed. The result never waits for the upload. The progress record is kept in the scratch directory and is stopped and
   removed before the directory is.
 
-**A restart.** The helper keeps a native run's process while no agent runs, and the job keeps writing its files; the next agent
+**A restart.** The job's supervisor keeps a native run's process while no agent runs, and the job keeps writing its files; the next agent
 adopts the run (`js-agent/src/native/adopt.rs`) with its scratch directory. A run whose directory holds a progress record has its
 upload go on from it as 3.5 says: a chunk in flight is put again at the same key, and the bytes written while no agent ran go out as
 ordinary chunks, their first-byte time the resuming poll. Its end is then told as any run's. Without a record it uploads nothing more.

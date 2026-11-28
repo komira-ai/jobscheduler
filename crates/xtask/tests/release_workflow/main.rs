@@ -326,10 +326,11 @@ fn gamma_is_off_by_variable_and_sets_the_lease_server_alone() {
     assert!(tool.contains("cargo build -p xtask --locked --release"));
 }
 
-/// The five binaries of the Apple silicon build, as `package:binary`, in the order the builds
-/// list them: `js`, `js-agent`, `js-bundle` and the two Mac host tools only, the lease server
-/// and js-mdm being Linux-only.
-const MACOS_BUILDS: &str = "js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision";
+/// The four binaries of the Apple silicon build, as `package:binary`, in the order the builds
+/// list them: `js`, `js-agent`, `js-bundle` and the Mac host tool `js-mac-provision` only, the
+/// lease server and js-mdm being Linux-only.
+const MACOS_BUILDS: &str =
+    "js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-provision:js-mac-provision";
 
 /// Asserts that the Apple-silicon archives are built by the job `build-macos` (a `macos-15`
 /// runner building [`MACOS_BUILDS`] only, with `cargo xtask release macos-leg`) and no longer by
@@ -385,7 +386,8 @@ fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
 /// Asserts that the `sums` job expects the `js-bundle` archive of every target (the Mac and both
 /// Linux architectures), so a build that stops making one fails before anything is attested,
 /// and that both Linux legs of the matrix and the Mac build (`build-macos`, and the farm's, which
-/// has its own test) build it. The two Mac host tools are expected for darwin only.
+/// has its own test) build it. The Mac host tool `js-mac-provision` is expected for darwin only,
+/// and no archive of the retired `js-mac-session` is.
 #[test]
 fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let text = artifacts_workflow();
@@ -399,10 +401,12 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
         let asset = format!("js-bundle-$VERSION-{target}.tar.gz");
         assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
     }
-    for tool in ["js-mac-provision", "js-mac-session"] {
-        let asset = format!("{tool}-$VERSION-aarch64-apple-darwin.tar.gz");
-        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
-    }
+    let asset = "js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz";
+    assert!(sums.contains(asset), "{asset} is not expected: {sums}");
+    assert!(
+        !sums.contains("js-mac-session"),
+        "an archive of the retired helper is expected: {sums}"
+    );
     let build = job(&jobs, "build").join("\n");
     assert_eq!(
         build.matches("js-bundle-cli:js-bundle").count(),
@@ -581,9 +585,9 @@ fn expected_assets(sums: &[String]) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()
 }
 
-/// Asserts that `sums` expects exactly the fifteen archives (each of `js-lease-server`, `js`,
+/// Asserts that `sums` expects exactly the fourteen archives (each of `js-lease-server`, `js`,
 /// `js-agent`, `js-bundle` and `js-mdm` for both Linux targets, `js`, `js-agent` and `js-bundle`
-/// and the two Mac host tools for darwin, which is also what the matrix builds), the two .debs
+/// and the Mac host tool `js-mac-provision` for darwin, which is also what the matrix builds), the two .debs
 /// of js-agent (`js-agent_<version>_amd64.deb` and `js-agent_<version>_arm64.deb`) and the two
 /// images of js-lease-server (`js-lease-server-<version>-<target>.oci.tar`); and that the
 /// list is in `LC_ALL=C` order once `$VERSION` is a version, as `ls | LC_ALL=C sort` prints the
@@ -601,13 +605,7 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
             wanted.push(format!("{bin}-$VERSION-{target}.tar.gz"));
         }
     }
-    for bin in [
-        "js",
-        "js-agent",
-        "js-bundle",
-        "js-mac-session",
-        "js-mac-provision",
-    ] {
+    for bin in ["js", "js-agent", "js-bundle", "js-mac-provision"] {
         wanted.push(format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz"));
     }
     let archives = wanted.clone();
@@ -620,7 +618,7 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
     for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
         wanted.push(format!("js-lease-server-$VERSION-{target}.oci.tar"));
     }
-    assert_eq!(expected.len(), 19, "{expected:?}");
+    assert_eq!(expected.len(), 18, "{expected:?}");
     let mut have = expected.clone();
     have.sort();
     wanted.sort();

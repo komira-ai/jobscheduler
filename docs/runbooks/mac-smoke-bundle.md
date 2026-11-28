@@ -1,6 +1,6 @@
 # Proving a Mac host with the smoke bundle
 
-The smoke bundle is a darwin bundle of one program that prints a single line: the host name, the user and uid it runs as, the macOS version and its arguments. The release publishes it, public, to GitHub's container registry (`packaging/js-smoke-bundle/README.md` says how), so a Mac host is proven with one job and no file placed by hand: the agent pulls the bundle by digest, checks every byte, places it in its store and runs the program as a pool user under Seatbelt.
+The smoke bundle is a darwin bundle of one program that prints a single line: the host name, the user and uid it runs as, the macOS version and its arguments. The release publishes it, public, to GitHub's container registry (`packaging/js-smoke-bundle/README.md` says how), so a Mac host is proven with one job and no file placed by hand: the agent pulls the bundle by digest, checks every byte, places it in its store and runs the program as an account made for the job under Seatbelt.
 
 The bundle, by digest (the tag is `1`):
 
@@ -42,10 +42,10 @@ No `--spec.constraints.exec`: a job on `macos` that names an image is started na
 What `js` prints: the job's stdout, one line, on stdout, for instance
 
 ```
-js-smoke host=mac-1.example.com user=kbf-lease-pool-3 uid=603 macos=15.6 args=proof
+js-smoke host=mac-1.example.com user=kbf-acct-3 uid=703 macos=15.6 args=proof
 ```
 
-and on stderr the job id it drew (`js: job id <id>`) and the end, `job <id> succeeded`; `js` exits 0. The `host=` field names the host that ran the job; the user is one of the host's pool users and the uid one of the helper's `--uid-range`.
+and on stderr the job id it drew (`js: job id <id>`) and the end, `job <id> succeeded`; `js` exits 0. The `host=` field names the host that ran the job; the user is the account the agent made for the job (`kbf-acct-<n>`) and the uid one of the agent's slots (`--native-account-range`).
 
 What a failure says, and what to look at:
 

@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::io;
 
 use super::*;
 
@@ -24,16 +23,16 @@ fn scanned(added: &[&str], removed: &[&str], errors: &[&str]) -> Scanned {
     }
 }
 
-fn clean() -> Result<Scanned, ClientError> {
+fn clean() -> Result<Scanned, ScanError> {
     Ok(scanned(&[], &[], &[]))
 }
 
-fn no_baseline() -> Result<Scanned, ClientError> {
-    Err(ClientError::Refused(NO_BASELINE.to_owned()))
+fn no_baseline() -> Result<Scanned, ScanError> {
+    Err(ScanError::NoBaseline)
 }
 
 /// The check over `answers`, one per scan, in order.
-fn checks(answers: Vec<Result<Scanned, ClientError>>) -> NativeChecks {
+fn checks(answers: Vec<Result<Scanned, ScanError>>) -> NativeChecks {
     let mut answers: VecDeque<_> = answers.into();
     NativeChecks::new(Box::new(move || {
         answers.pop_front().expect("the test scripted every scan")
@@ -232,18 +231,18 @@ fn an_unreadable_item_leaves_the_host_unchecked() {
     );
 }
 
-/// Catches: a scan the helper did not answer (its socket gone, a refusal other than the
-/// missing baseline, an answer of another verb) passed as clean.
+/// Catches: a scan that gave no answer (it could not run, for whatever reason it says; not the
+/// missing baseline, which is its own case) passed as clean.
 #[test]
 fn a_scan_that_cannot_run_leaves_the_host_unchecked() {
     let failures = [
         (
-            Err(ClientError::Io(io::Error::other("hung up"))),
-            "the leak scan could not run: kbf-mac-session: hung up",
+            Err(ScanError::Failed("hung up".to_owned())),
+            "the leak scan could not run: hung up",
         ),
         (
-            Err(ClientError::Refused("the disk is full".to_owned())),
-            "the leak scan could not run: kbf-mac-session refused: the disk is full",
+            Err(ScanError::Failed("the disk is full".to_owned())),
+            "the leak scan could not run: the disk is full",
         ),
     ];
     for (answer, detail) in failures {
@@ -292,7 +291,7 @@ fn an_idle_scan_that_fails_keeps_the_reference() {
     let mut checks = checks(vec![
         Ok(drift.clone()),
         Ok(scanned(&[], &[], &["dumpbtm failed"])),
-        Err(ClientError::Io(io::Error::other("hung up"))),
+        Err(ScanError::Failed("hung up".to_owned())),
         no_baseline(),
         Ok(drift),
     ]);

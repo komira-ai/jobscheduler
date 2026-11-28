@@ -1659,24 +1659,9 @@ dependencies = [
 name = "js-mac-session"
 version = "0.1.0"
 dependencies = [
- "clap",
- "core-foundation",
- "hex",
  "js-testkit",
- "js-types",
  "libc",
- "objc2",
- "objc2-foundation",
- "objc2-open-directory",
  "rustix",
- "security-framework",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "time",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4235,7 +4220,6 @@ dependencies = [
  "js-handover-check",
  "js-lease-server",
  "js-mac-provision",
- "js-mac-session",
  "js-oci",
  "js-proto",
  "js-testkit",

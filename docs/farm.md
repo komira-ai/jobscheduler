@@ -139,7 +139,7 @@ the binary is static and the check passes.
 | `js-watch` | `tests/read_only.rs` reads other members' sources and walks `crates/` |
 | `js-elastic-fake` | `tests/no_cloud_reach.rs` reads every manifest and source file of the repository |
 | `js-mac-probe` | its child tests expect an absolute `PATH` |
-| `js-mac-session` | its tests read `/etc/passwd` and need directories without other mounts; `tests/as_root.rs` holds `#[ignore]`d root tests |
+| `js-mac-session` | its tests (of `disclaim` and `full_disk_access`) are ordinary unit tests that need no root and no `/etc/passwd`: they start `/bin/sh`, `/bin/echo` and `/usr/bin/true` by absolute path and run a link to the test binary beside it, which the farm's sandbox has not been shown to hold |
 | `js-testkit` | its fake's tests read `PATH`; its dir, database and reaped targets hold `#[ignore]`d child tests |
 | `js-supervise` | its tests start stand-in supervisors (`sh`, `cat`, `true`) and expect an absolute `PATH` |
 | `js-state` | its tests need a Postgres server (`KBF_TEST_POSTGRES_URL`); `postgres_write_rate.rs` holds an `#[ignore]`d test |

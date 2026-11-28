@@ -45,9 +45,9 @@ pub use cleanup::cleanup;
 pub use cutover::cutover;
 pub(crate) use cutover::{Life, life};
 pub use drain::drain;
+pub use helper::{RETIRED_HELPER, RETIRED_HELPER_PLIST};
 pub use host_setup::{
-    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB_LEFTOVER, MOUNT_POINT_MODE, QUOTA_TENTHS,
-    SCRATCH_VOLUME,
+    DATA_VOLUME, DISKUTIL, FSTAB_LEFTOVER, MOUNT_POINT_MODE, QUOTA_TENTHS, SCRATCH_VOLUME,
 };
 pub use prepare::prepare;
 pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
@@ -88,7 +88,8 @@ pub struct Env<'a> {
     /// the kill points.
     pub ports: Ports<'a>,
     /// Runs the staged agent's `--version`, the staged `js-mac-provision` that loads the pool's
-    /// pf anchor on a Mac, `launchctl bootstrap`, and `systemctl` where the unit manager is
+    /// pf anchor on a Mac, `launchctl bootstrap` (the pf job's, and the retired helper's on a
+    /// rollback to a release that still had one), and `systemctl` where the unit manager is
     /// systemd.
     pub runner: &'a dyn CommandRunner,
     /// Which unit manager runs the agent, and so which unit file a release carries.
@@ -118,6 +119,9 @@ pub struct Env<'a> {
     /// The copy of the file system table an earlier release's host setup left beside it, which
     /// the host setup removes: [`FSTAB_LEFTOVER`] on a Mac.
     pub fstab_leftover: &'a Path,
+    /// The plist of the retired root helper job in the system's launch daemons directory, which
+    /// the cutover of a Mac removes: [`RETIRED_HELPER_PLIST`] on a Mac.
+    pub retired_helper_plist: &'a Path,
 }
 
 /// Everything `drain` and `resume` touch: the lease server's own-host routes, the hold file
@@ -196,7 +200,7 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
 /// [`open_state`] without the rules: the record as it was loaded, for `prepare` and `rollback`
 /// to judge themselves (see [`supersede`]).
 fn open_unchecked(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
-    helper::refuse_without_launchd(env, params)?;
+    host_setup::refuse_without_launchd(env, params)?;
     pf::refuse_without_launchd(env, params)?;
     let held = Held::open_or_make(&params.settings.state_dir, env.stat).map_err(state_failure)?;
     let record = held.load().map_err(state_failure)?;

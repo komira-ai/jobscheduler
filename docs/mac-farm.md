@@ -1,7 +1,7 @@
 # macOS builds on the build farm's Macs
 
 The release builds two things only a Mac can build: the Apple silicon archives (`js`, `js-agent`,
-`js-bundle`, `js-mac-session` and `js-mac-provision` for `aarch64-apple-darwin`) and the js-agent
+`js-bundle` and `js-mac-provision` for `aarch64-apple-darwin`) and the js-agent
 installer package. By default a GitHub-hosted Apple silicon runner builds them. When the repository
 variable `MACOS_ON_FARM` is `true`, a Mac of the build farm builds them instead, from a hosted Linux
 runner, and the hosted macOS jobs for them do not run. This page says how, what moved and what did
@@ -59,8 +59,8 @@ verb fetches each from the content store, holds it to the digest the farm report
 the same path below `--download-to` (the checkout's root by default). A declared output the command
 did not make fails the verb. Nothing is fetched when the command fails.
 
-The release build fetches the five binaries in `target/aarch64-apple-darwin/release/`, and the
-package build the package, its `SHA256SUMS`, the three programs with their sums and the `xtask` the
+The release build fetches the four binaries in `target/aarch64-apple-darwin/release/`, and the
+package build the package, its `SHA256SUMS`, the two programs with their sums and the `xtask` the
 Mac built (which the signing job checks the signed package with). The Linux runner then does what
 needs no Mac: `sha256sum --check` of what it fetched, the archives (`cargo xtask release pack`, which stages each archive as `release stage` does and
 writes the `tar.gz` with the options the hosted build uses, so the archives are byte for byte the

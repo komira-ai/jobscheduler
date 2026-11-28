@@ -28,8 +28,8 @@ pub(super) fn full_disk_access() -> io::Result<()> {
         .map(|_| ())
 }
 
-/// The record named `name`.
-pub(super) fn account(name: &str) -> io::Result<Option<UserRecord>> {
+/// The record named `name` (`getpwnam_r`).
+pub(crate) fn account(name: &str) -> io::Result<Option<UserRecord>> {
     let c_name = CString::new(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the name holds NUL"))?;
     // SAFETY: a zeroed passwd is a valid value for getpwnam_r to overwrite.

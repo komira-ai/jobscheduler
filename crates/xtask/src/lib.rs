@@ -122,8 +122,8 @@
 //!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
 //! - `pkg build-macos --version <X.Y.Z>` ([`macpkg::build`]): the package of a stamped checkout
-//!   built on a Mac in one command, as the `js-agent-macos-pkg` action builds it: the three
-//!   programs, their version lines and the cdhash, the plists, the stage, `pkgbuild` and
+//!   built on a Mac in one command, as the `js-agent-macos-pkg` action builds it: the two
+//!   programs, their version lines, the plists, the stage, `pkgbuild` and
 //!   `productbuild`, the read-back, and the sums of the package and of the programs.
 //! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>] [--ready-timeout <s>]` ([`site_demo`]):
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:

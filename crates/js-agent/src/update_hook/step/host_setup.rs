@@ -1,13 +1,8 @@
-//! The host setup of a Mac, part of `prepare`: what the package's two daemons need of the host
-//! and no file of a package can carry, made by the hook, which hostkeeper runs as root, for each
-//! part the params name. hostkeeper is the only way onto the Macs, so nothing here is left to an
+//! The host setup of a Mac, part of `prepare`: what the package's daemons need of the host and no
+//! file of a package can carry, made by the hook, which hostkeeper runs as root, for each part
+//! the params name. hostkeeper is the only way onto the Macs, so nothing here is left to an
 //! operator.
 //!
-//! - `socket_group`: the group the root helper gives its socket (`js-mac-session
-//!   --socket-group`). When the local directory (`dscl . -list /Groups PrimaryGroupID`) does
-//!   not list it, it is made with `dseditgroup -o create`, under the gid macOS picks. A group
-//!   with staff's gid ([`STAFF_GID`], the lease users' group, which the helper's plist leaves at
-//!   its default) is refused, as the helper refuses it at its start.
 //! - `scratch_root`: the agent's `--scratch-root`, which must be on another file system than its
 //!   `--state-root` (the agent refuses a shared `st_dev`). The scratch volume is not mounted on
 //!   the scratch root but on its parent, the scratch volume's mount point, so that the bundle
@@ -43,31 +38,28 @@
 //! the cause named: no record is written for it and the host is not cordoned, and hostkeeper
 //! orders the host again later. A system call that the system refuses (`EPERM`, which no retry
 //! changes) ends the step failed instead (1, `host_setup_refused`, class environment), naming
-//! the path and the error, so that the order fails and someone looks. A command (`dscl`,
-//! `dseditgroup`, `diskutil`) is not told apart in that way: the runner reports how it exited,
-//! not what it printed. The setup belongs to the host, not to a release: no step undoes it.
+//! the path and the error, so that the order fails and someone looks. A command (`diskutil`) is
+//! not told apart in that way: the runner reports how it exited, not what it printed. The setup
+//! belongs to the host, not to a release: no step undoes it.
+//!
+//! The setup is a launchd matter: the params of a systemd host that name the scratch root are
+//! refused by every step (`bad_params`) before anything is read or done
+//! ([`refuse_without_launchd`]).
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, chown};
 use std::path::Path;
 
-use js_mac_session::start::STAFF_GID;
 use rustix::io::Errno;
 
 use crate::lifecycle::scratch_volume::{self, VolumeError};
-use crate::update_hook::{Class, Done, Params, Reason};
+use crate::update_hook::{Class, Done, Manager, Params, Reason, SCRATCH_ROOT_KEY};
 
 pub use crate::lifecycle::scratch_volume::{DATA_VOLUME, DISKUTIL, SCRATCH_VOLUME};
 
 use super::prepare::deferred;
 use super::{Env, PathFacts, failure};
-
-/// The directory service's command line tool.
-pub const DSCL: &str = "/usr/bin/dscl";
-
-/// The tool that makes a group.
-pub const DSEDITGROUP: &str = "/usr/sbin/dseditgroup";
 
 /// The mode of the scratch volume's mount point: search only for others, so that a lease user
 /// can walk down through it to the bundle store beside the scratch root and cannot list it.
@@ -82,11 +74,23 @@ pub const QUOTA_TENTHS: u64 = 9;
 /// `/etc/fstab` and then could not rename over it: the setup removes it.
 pub const FSTAB_LEFTOVER: &str = "/etc/fstab.js-agent";
 
-/// Makes each part of the host setup the params name: the socket group, then the roots.
-pub(super) fn set_up(env: &Env<'_>, params: &Params) -> Result<(), Done> {
-    if let Some(group) = &params.settings.socket_group {
-        socket_group(env, params, group)?;
+/// Refuses a params table that names a part of a Mac's host setup (the scratch root) on a host
+/// that is not under launchd.
+pub(super) fn refuse_without_launchd(env: &Env<'_>, params: &Params) -> Result<(), Done> {
+    match (&params.scratch_root, env.manager) {
+        (Some(root), Manager::Systemd) => Err(failure(
+            Reason::BadParams,
+            format!(
+                "{SCRATCH_ROOT_KEY} {:?} is set, and only a launchd host's setup gives it a volume",
+                root.display().to_string()
+            ),
+        )),
+        _ => Ok(()),
     }
+}
+
+/// Makes each part of the host setup the params name: the roots.
+pub(super) fn set_up(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     if let Some(scratch) = &params.scratch_root {
         roots(env, params, scratch)?;
     }
@@ -121,59 +125,6 @@ fn command(env: &Env<'_>, params: &Params, program: &str, args: &[&str]) -> Resu
     env.runner
         .run(program, args)
         .map_err(|why| missing(params, format!("{program} {}: {why}", args.join(" "))))
-}
-
-/// The socket group is there, made if it was not, and not staff's.
-fn socket_group(env: &Env<'_>, params: &Params, group: &str) -> Result<(), Done> {
-    let gid = match gid_of(env, params, group)? {
-        Some(gid) => gid,
-        None => {
-            env.ports.point();
-            command(env, params, DSEDITGROUP, &["-o", "create", group])?;
-            gid_of(env, params, group)?.ok_or_else(|| {
-                missing(
-                    params,
-                    format!("the group {group} is not listed after {DSEDITGROUP} made it"),
-                )
-            })?
-        }
-    };
-    if gid == STAFF_GID {
-        return Err(missing(
-            params,
-            format!(
-                "the group {group} has gid {gid}, staff's: the helper refuses a socket group its lease users are in"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// The gid of `group` in the local directory, `None` when it lists no such group.
-fn gid_of(env: &Env<'_>, params: &Params, group: &str) -> Result<Option<u32>, Done> {
-    let listed = command(
-        env,
-        params,
-        DSCL,
-        &[".", "-list", "/Groups", "PrimaryGroupID"],
-    )?;
-    let Some(line) = listed
-        .lines()
-        .find(|line| line.split_whitespace().next() == Some(group))
-    else {
-        return Ok(None);
-    };
-    match line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|gid| gid.parse().ok())
-    {
-        Some(gid) => Ok(Some(gid)),
-        None => Err(missing(
-            params,
-            format!("{DSCL} lists the group {group} with no gid: {line:?}"),
-        )),
-    }
 }
 
 /// The state root, the scratch volume's mount point (the scratch root's parent) and the scratch
