@@ -2,10 +2,9 @@
 
 /// The jobs of the release that call a workflow, and the workflow each calls: artifacts.yml, the
 /// five workflows of the beta stage (the platforms other than Linux x86_64),
-/// the black-box tests of the macOS package, docker-swarm-updater's deploy workflow at the full
-/// commit its allow-list names, and the build farm lane, which `blackbox` calls to build the
-/// black-box tests' target.
-pub const CALLERS: [(&str, &str); 9] = [
+/// docker-swarm-updater's deploy workflow at the full commit its allow-list names, and the build
+/// farm lane, which `blackbox` calls to build the black-box tests' target.
+pub const CALLERS: [(&str, &str); 8] = [
     ("artifacts", "./.github/workflows/artifacts.yml"),
     ("beta-macos", "./.github/workflows/beta.yml"),
     (
@@ -20,10 +19,6 @@ pub const CALLERS: [(&str, &str); 9] = [
     (
         "beta-macos-isolation",
         "./.github/workflows/js-agent-native-isolation.yml",
-    ),
-    (
-        "blackbox-macos",
-        "./.github/workflows/js-agent-macos-blackbox.yml",
     ),
     (
         "cp-deploy",

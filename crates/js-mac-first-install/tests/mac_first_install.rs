@@ -36,10 +36,8 @@
 
 #[path = "mac_first_install/config_pkg.rs"]
 mod config_pkg;
-#[allow(dead_code)] // Shared with the black-box program (tests/bin/), which uses the rest of it.
 #[path = "mac_first_install/host.rs"]
 mod host;
-#[allow(dead_code)] // Shared with the black-box program (tests/bin/), which uses the rest of it.
 #[path = "mac_first_install/hostkeeper.rs"]
 mod hostkeeper;
 #[path = "mac_first_install/look.rs"]

@@ -549,9 +549,6 @@ enum ReleaseVerb {
     MacosLeg(release::macos_leg::LegArgs),
     /// Refuse a macOS program that is not signed as the release signs it (a Mac only).
     CheckCodeSignature(release::code_signature::CheckArgs),
-    /// Download one signed macOS package of js-agent from the package repository: a version's,
-    /// or that of the newest release below a version that has one.
-    MacosPkg(release::macos_pkg::MacosPkgArgs),
     /// Build the Debian package of js-agent for one Linux platform.
     Deb(release::deb::DebArgs),
     /// Build the OCI image tar of js-lease-server for one Linux target.
@@ -740,10 +737,6 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Pack(args) => release::pack::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::CheckCodeSignature(args) => release::code_signature::run(&args)?,
-            ReleaseVerb::MacosPkg(args) => release::macos_pkg::run(
-                &args,
-                &fetch::https(&fetch::host_roots(), fetch::DOWNLOAD_TIMEOUT),
-            )?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
             ReleaseVerb::Image(args) => release::server_image::run(&args)?,
             ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {

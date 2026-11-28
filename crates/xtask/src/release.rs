@@ -54,7 +54,6 @@ pub mod image_digest;
 pub mod include;
 pub mod mac_programs;
 pub mod macos_leg;
-pub mod macos_pkg;
 pub mod next_version;
 pub mod pack;
 pub mod plan;
@@ -229,43 +228,6 @@ pub enum Error {
         expected: String,
         /// The commit checked out.
         actual: String,
-    },
-    /// Flags of `release macos-pkg` that do not fit together.
-    #[error("{0}")]
-    Usage(String),
-    /// A file of the package repository could not be downloaded.
-    #[error("{url}: {why}")]
-    Download {
-        /// The file.
-        url: String,
-        /// Why not.
-        why: String,
-    },
-    /// A version's `SHA256SUMS` lists no sum of its package.
-    #[error("{url} lists no {file}")]
-    NotListed {
-        /// The `SHA256SUMS`.
-        url: String,
-        /// The package's file name.
-        file: String,
-    },
-    /// A package is not the one its `SHA256SUMS` lists.
-    #[error("{url}: its SHA-256 is {found}, not the {listed} its SHA256SUMS lists")]
-    PackageSum {
-        /// The package.
-        url: String,
-        /// Its SHA-256.
-        found: String,
-        /// The SHA-256 the sums list.
-        listed: String,
-    },
-    /// No release below a version has a package in the package repository.
-    #[error("no release below {below} has a package in the package repository: {tried}")]
-    NoEarlierPackage {
-        /// The version.
-        below: String,
-        /// The releases asked for, each with why it has none.
-        tried: String,
     },
 }
 

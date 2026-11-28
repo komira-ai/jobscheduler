@@ -4,7 +4,7 @@
 SCHEMA = 2
 RUSTC = "1.95.0"
 TARGET = "x86_64-unknown-linux-gnu"
-CARGO_LOCK_SHA256 = "e10408f17898413c509c8f706449c280281a9d9270c79e5b950b27b286568079"
+CARGO_LOCK_SHA256 = "98fae862b0b897ff93a2be2be8e4f300c9e4c323d9dade3bcb8ad58a08e4e08a"
 MANIFEST_SHA256 = {
     "Cargo.toml": "0792a8633441ece5e18600ac3b95a0ffa6428e22f5d54a75f6d8fafef8f8a88e",
     "crates/js-agent-usage/Cargo.toml": "eb4f33ee86f779ec8745bcaf2419317e1dd8d97b148bad2fa2d8019b6726f147",
@@ -34,7 +34,7 @@ MANIFEST_SHA256 = {
     "crates/js-lease-server/Cargo.toml": "a2e5621d2027f758e388a707765b248553e848a810a2651c58dabff32d196dd8",
     "crates/js-logmint/Cargo.toml": "ec250325fd15ac39651d1c11e2389e29d287fe002f57b7cf3341887f2c472a1c",
     "crates/js-logstore/Cargo.toml": "b828c9a79f5d1d9584ff93ef57d3118a452cdeba97fda12511dc53fbd5d41f2d",
-    "crates/js-mac-first-install/Cargo.toml": "ac97d8b4a7ab0a3e6b4f579957c8842d9b40471fde3dcf9c388b86f27274874c",
+    "crates/js-mac-first-install/Cargo.toml": "a7d25c28d7b6cd1b8ba2aa43b5f783f1068a13bc5d1c309a54f35640bbd883c5",
     "crates/js-mac-pool/Cargo.toml": "5af1a707bec85b386bd850be2c33154e46e8b1115461105b2b4ab38e061a537d",
     "crates/js-mac-probe/Cargo.toml": "c253287c60104645d58a248e64211bad0530fe49ec59c0456251d8f968160c3f",
     "crates/js-mac-provision/Cargo.toml": "39574cd14e63026a0f8020e0b6b927f5a1ed81e13c537b2e546c5030bdff505f",
@@ -1453,9 +1453,9 @@ MEMBERS = {
             "roots": ["js-mac-first-install-0.1.0:8a076a0367"],
         },
         "test": {
-            "units": 5,
-            "graph_units": 5,
-            "roots": ["js-mac-first-install-0.1.0:4a500d631a", "js-mac-first-install-0.1.0:bca1075404", "js-mac-first-install-0.1.0:c926e877e1", "js-mac-first-install-0.1.0:fe910cddd6"],
+            "units": 4,
+            "graph_units": 4,
+            "roots": ["js-mac-first-install-0.1.0:4a500d631a", "js-mac-first-install-0.1.0:c926e877e1", "js-mac-first-install-0.1.0:fe910cddd6"],
         },
         "release": {
             "units": 1,
@@ -2048,9 +2048,9 @@ MEMBERS = {
             "roots": ["xtask-0.1.0:4ea27a7f43", "xtask-0.1.0:a29f44620a", "xtask-0.1.0:a9d6e50bd9", "xtask-0.1.0:dd9ef5a307"],
         },
         "test": {
-            "units": 521,
-            "graph_units": 521,
-            "roots": ["xtask-0.1.0:07c09718f1", "xtask-0.1.0:08b6088d0c", "xtask-0.1.0:13f0263370", "xtask-0.1.0:1411694fb2", "xtask-0.1.0:15f94518b0", "xtask-0.1.0:19d73bd178", "xtask-0.1.0:1b15d92b9d", "xtask-0.1.0:1f9293b827", "xtask-0.1.0:2055f116a1", "xtask-0.1.0:229e4d8a98", "xtask-0.1.0:2a20d044e3", "xtask-0.1.0:3a15116ae1", "xtask-0.1.0:3c0e663f67", "xtask-0.1.0:3c6147f93b", "xtask-0.1.0:401537c065", "xtask-0.1.0:43191dd832", "xtask-0.1.0:469e41db66", "xtask-0.1.0:48107da57b", "xtask-0.1.0:49500d3147", "xtask-0.1.0:498cefb418", "xtask-0.1.0:546f2ee418", "xtask-0.1.0:576574ed19", "xtask-0.1.0:5b0f203a6e", "xtask-0.1.0:5b76af5aa0", "xtask-0.1.0:5d7032a43f", "xtask-0.1.0:608129563a", "xtask-0.1.0:61591ef709", "xtask-0.1.0:6201457016", "xtask-0.1.0:62ecd40743", "xtask-0.1.0:66f65838fc", "xtask-0.1.0:69d36c5354", "xtask-0.1.0:6c26a73947", "xtask-0.1.0:7747a22bf6", "xtask-0.1.0:77e1c88e8d", "xtask-0.1.0:7db00e05f0", "xtask-0.1.0:7f1cd17ff1", "xtask-0.1.0:8212d73986", "xtask-0.1.0:8d7154bd7e", "xtask-0.1.0:9ec403b874", "xtask-0.1.0:9f10ba5132", "xtask-0.1.0:9f80df5a08", "xtask-0.1.0:a2d831651f", "xtask-0.1.0:a65ba91442", "xtask-0.1.0:a7706911dc", "xtask-0.1.0:a81a1ac47f", "xtask-0.1.0:a861b6c4d2", "xtask-0.1.0:ae20004d3c", "xtask-0.1.0:aefbee2889", "xtask-0.1.0:b0094ea4e8", "xtask-0.1.0:b1cc3d101f", "xtask-0.1.0:b3f1fd51f7", "xtask-0.1.0:b6ff15eec4", "xtask-0.1.0:c1c5bbaf5c", "xtask-0.1.0:c2ec7b81b2", "xtask-0.1.0:c6f6480b5c", "xtask-0.1.0:c7ad40f4f3", "xtask-0.1.0:c8daa84d5f", "xtask-0.1.0:ccfbe30956", "xtask-0.1.0:ce11c283a2", "xtask-0.1.0:d103db7de5", "xtask-0.1.0:d54e092a5e", "xtask-0.1.0:d78885ef47", "xtask-0.1.0:db98a075b3", "xtask-0.1.0:ddc2327f4c", "xtask-0.1.0:dec1971d18", "xtask-0.1.0:dff6ed5e72", "xtask-0.1.0:e1ad679557", "xtask-0.1.0:e2efb0313c", "xtask-0.1.0:e31d360e6f", "xtask-0.1.0:ec9799e52d", "xtask-0.1.0:f14e4c8d45", "xtask-0.1.0:f22880ce55", "xtask-0.1.0:f9734d6554", "xtask-0.1.0:fd4b266acb"],
+            "units": 520,
+            "graph_units": 520,
+            "roots": ["xtask-0.1.0:07c09718f1", "xtask-0.1.0:08b6088d0c", "xtask-0.1.0:13f0263370", "xtask-0.1.0:1411694fb2", "xtask-0.1.0:15f94518b0", "xtask-0.1.0:19d73bd178", "xtask-0.1.0:1b15d92b9d", "xtask-0.1.0:1f9293b827", "xtask-0.1.0:2055f116a1", "xtask-0.1.0:229e4d8a98", "xtask-0.1.0:2a20d044e3", "xtask-0.1.0:3a15116ae1", "xtask-0.1.0:3c0e663f67", "xtask-0.1.0:3c6147f93b", "xtask-0.1.0:401537c065", "xtask-0.1.0:43191dd832", "xtask-0.1.0:469e41db66", "xtask-0.1.0:48107da57b", "xtask-0.1.0:49500d3147", "xtask-0.1.0:498cefb418", "xtask-0.1.0:546f2ee418", "xtask-0.1.0:576574ed19", "xtask-0.1.0:5b0f203a6e", "xtask-0.1.0:5b76af5aa0", "xtask-0.1.0:5d7032a43f", "xtask-0.1.0:608129563a", "xtask-0.1.0:61591ef709", "xtask-0.1.0:6201457016", "xtask-0.1.0:62ecd40743", "xtask-0.1.0:66f65838fc", "xtask-0.1.0:69d36c5354", "xtask-0.1.0:6c26a73947", "xtask-0.1.0:7747a22bf6", "xtask-0.1.0:77e1c88e8d", "xtask-0.1.0:7db00e05f0", "xtask-0.1.0:7f1cd17ff1", "xtask-0.1.0:8212d73986", "xtask-0.1.0:9ec403b874", "xtask-0.1.0:9f10ba5132", "xtask-0.1.0:9f80df5a08", "xtask-0.1.0:a2d831651f", "xtask-0.1.0:a65ba91442", "xtask-0.1.0:a7706911dc", "xtask-0.1.0:a81a1ac47f", "xtask-0.1.0:a861b6c4d2", "xtask-0.1.0:ae20004d3c", "xtask-0.1.0:aefbee2889", "xtask-0.1.0:b0094ea4e8", "xtask-0.1.0:b1cc3d101f", "xtask-0.1.0:b3f1fd51f7", "xtask-0.1.0:b6ff15eec4", "xtask-0.1.0:c1c5bbaf5c", "xtask-0.1.0:c2ec7b81b2", "xtask-0.1.0:c6f6480b5c", "xtask-0.1.0:c7ad40f4f3", "xtask-0.1.0:c8daa84d5f", "xtask-0.1.0:ccfbe30956", "xtask-0.1.0:ce11c283a2", "xtask-0.1.0:d103db7de5", "xtask-0.1.0:d54e092a5e", "xtask-0.1.0:d78885ef47", "xtask-0.1.0:db98a075b3", "xtask-0.1.0:ddc2327f4c", "xtask-0.1.0:dec1971d18", "xtask-0.1.0:dff6ed5e72", "xtask-0.1.0:e1ad679557", "xtask-0.1.0:e2efb0313c", "xtask-0.1.0:e31d360e6f", "xtask-0.1.0:ec9799e52d", "xtask-0.1.0:f14e4c8d45", "xtask-0.1.0:f22880ce55", "xtask-0.1.0:f9734d6554", "xtask-0.1.0:fd4b266acb"],
         },
         "release": {
             "units": 436,
@@ -19688,24 +19688,6 @@ UNITS = {
         "deps": [],
         "path": "crates/js-mac-first-install",
         "test_flags": {"test": True, "doctest": True},
-    },
-    "js-mac-first-install-0.1.0:bca1075404": {
-        "crate": "js-mac-first-install",
-        "version": "0.1.0",
-        "source": "path",
-        "target_kind": ["example"],
-        "crate_types": ["bin"],
-        "target_name": "js-mac-package-blackbox",
-        "mode": "build",
-        "side": "target",
-        "edition": "2024",
-        "crate_root": "tests/bin/mac_package_blackbox.rs",
-        "features": [],
-        "cfgs": [],
-        "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},
-        "deps": [["js_mac_first_install", "js-mac-first-install-0.1.0:8a076a0367"]],
-        "path": "crates/js-mac-first-install",
-        "test_flags": {"test": False, "doctest": False},
     },
     "js-mac-first-install-0.1.0:c926e877e1": {
         "crate": "js-mac-first-install",
@@ -54691,24 +54673,6 @@ UNITS = {
         "deps": [["build_script_build", "xtask-0.1.0:7f9d1e7395"], ["clap", "clap-4.6.7:03cbcfdec4"], ["flate2", "flate2-1.1.10:51b6f5d898"], ["futures_util", "futures-util-0.3.34:7d41f13b7b"], ["hex", "hex-0.4.3:ca202ae025"], ["js_agent", "js-agent-0.1.0:5c7071dc4f"], ["js_api_gateway", "js-api-gateway-0.1.0:425450aff7"], ["js_bundle", "js-bundle-0.1.0:da2eeecc17"], ["js_bundle_cli", "js-bundle-cli-0.1.0:a4fc6f9c1f"], ["js_handover_check", "js-handover-check-0.1.0:971d1c6fa5"], ["js_lease_server", "js-lease-server-0.1.0:700745c947"], ["js_oci", "js-oci-0.1.0:c171fceacb"], ["js_proto", "js-proto-0.1.0:6a21dedd80"], ["js_testkit", "js-testkit-0.1.0:5d6709bd4e"], ["lzma_rs", "lzma-rs-0.3.0:88da3b3ddf"], ["md5", "md-5-0.11.0:11c1e2462a"], ["proc_macro2", "proc-macro2-1.0.107:dc846beb20"], ["prost", "prost-0.14.4:2f1b600f5a"], ["prost_types", "prost-types-0.14.4:7c3a45b3e5"], ["rustix", "rustix-1.1.6:c7c8b67664"], ["rustls", "rustls-0.23.46:f35c4ee457"], ["rustls_native_certs", "rustls-native-certs-0.8.5:7ecba3ef03"], ["ruzstd", "ruzstd-0.9.1:93b2442e49"], ["serde", "serde-1.0.229:66573f0a59"], ["serde_json", "serde_json-1.0.154:6c97e64580"], ["sha2", "sha2-0.11.1:d72af7f0d1"], ["syn", "syn-2.0.119:6f73543bc4"], ["tar", "tar-0.4.46:5d3c80a725"], ["thiserror", "thiserror-2.0.21:638746dfe3"], ["tokio", "tokio-1.54.1:eebd1b2eec"], ["toml", "toml-1.1.8+spec-1.1.0:599b431880"], ["tonic", "tonic-0.14.9:277ccfa573"], ["tonic_prost", "tonic-prost-0.14.9:6501253572"], ["ureq", "ureq-3.5.0:74e521ca8c"], ["xtask", "xtask-0.1.0:ec0e4e7d89"]],
         "path": "crates/xtask",
         "test_flags": {"test": False, "doctest": False},
-    },
-    "xtask-0.1.0:8d7154bd7e": {
-        "crate": "xtask",
-        "version": "0.1.0",
-        "source": "path",
-        "target_kind": ["test"],
-        "crate_types": ["bin"],
-        "target_name": "release_macos_pkg",
-        "mode": "test",
-        "side": "target",
-        "edition": "2024",
-        "crate_root": "tests/release_macos_pkg.rs",
-        "features": [],
-        "cfgs": [],
-        "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},
-        "deps": [["build_script_build", "xtask-0.1.0:cbaf2a8a40"], ["clap", "clap-4.6.7:e95053f2df"], ["flate2", "flate2-1.1.10:61f8aa4b36"], ["futures_util", "futures-util-0.3.34:ea2b566d25"], ["hex", "hex-0.4.3:40d02ced6b"], ["host_shim", "xtask-0.1.0:b07f9290c9"], ["js_agent", "js-agent-0.1.0:d938993bd1"], ["js_api_gateway", "js-api-gateway-0.1.0:d5f512f851"], ["js_bundle", "js-bundle-0.1.0:1a5be1f0d3"], ["js_bundle_cli", "js-bundle-cli-0.1.0:923cee46fa"], ["js_cli", "js-cli-0.1.0:052d423399"], ["js_client", "js-client-0.1.0:0ea0eea76c"], ["js_elastic", "js-elastic-0.1.0:f5cb0df93e"], ["js_handover_check", "js-handover-check-0.1.0:8ed19f1458"], ["js_lease_server", "js-lease-server-0.1.0:8a99fcd0ea"], ["js_mac_provision", "js-mac-provision-0.1.0:3ce2e22704"], ["js_mac_session", "js-mac-session-0.1.0:17d56b07f6"], ["js_oci", "js-oci-0.1.0:5fd94e0c88"], ["js_proto", "js-proto-0.1.0:ffcb359eee"], ["js_testkit", "js-testkit-0.1.0:bd641af2bb"], ["js_update_hook", "js-update-hook-0.1.0:544a006635"], ["lzma_rs", "lzma-rs-0.3.0:f546d9eb51"], ["md5", "md-5-0.11.0:d7ee057d9f"], ["proc_macro2", "proc-macro2-1.0.107:859b73239c"], ["prost", "prost-0.14.4:556740e45e"], ["prost_types", "prost-types-0.14.4:b32ff9ab4f"], ["protox", "protox-0.10.0:2b8306eff7"], ["rcgen", "rcgen-0.14.10:767927b3c8"], ["rustix", "rustix-1.1.6:041ffcb630"], ["rustls", "rustls-0.23.46:2b9128312b"], ["rustls_native_certs", "rustls-native-certs-0.8.5:b9b4747947"], ["ruzstd", "ruzstd-0.9.1:f9c5eb6094"], ["saphyr_parser", "saphyr-parser-0.1.2:38cdb9af93"], ["serde", "serde-1.0.229:e4b160defd"], ["serde_json", "serde_json-1.0.154:5f35ed99b8"], ["sha2", "sha2-0.11.1:dfcd53b417"], ["syn", "syn-2.0.119:549862ebfb"], ["tar", "tar-0.4.46:df4384e246"], ["thiserror", "thiserror-2.0.21:f04e19db16"], ["tokio", "tokio-1.54.1:0de551ed35"], ["toml", "toml-1.1.8+spec-1.1.0:2d632fd8df"], ["tonic", "tonic-0.14.9:7cc99a273f"], ["tonic_prost", "tonic-prost-0.14.9:3e7221b819"], ["ureq", "ureq-3.5.0:a538ad41fd"], ["xtask", "xtask-0.1.0:70414dedb0"], ["xtask", "xtask-0.1.0:9fab4bcbe4"], ["xtask_fake", "xtask-0.1.0:4d41f3f28d"]],
-        "path": "crates/xtask",
-        "test_flags": {"test": True, "doctest": False},
     },
     "xtask-0.1.0:9dbee861c3": {
         "crate": "xtask",

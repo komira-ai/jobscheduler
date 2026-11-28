@@ -1,12 +1,3 @@
 load("//:buildrules.bzl", "cargo_package")
 
-# What this package reads beyond what buildrules gives each of its units (a library src/ and
-# build.rs, a test target tests/), which a Buck2 action sees only when declared: the program
-# js-mac-package-blackbox has its root in tests/bin/ (off a Mac it is that file alone; on a Mac
-# it takes modules of tests/, which no farm action builds).
-cargo_package(
-    path = ".",
-    extra_srcs = [
-        "tests/bin/mac_package_blackbox.rs",
-    ],
-)
+cargo_package(path = ".")

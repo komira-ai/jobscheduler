@@ -1,0 +1,32 @@
+load("@buildrules//rules/blackbox:defs.bzl", "blackbox_test")
+load("@buildrules//rules/zig:zig.bzl", "zig_exe")
+
+# The black-box test of the update hook's `prepare` of the released js-agent .deb (driver.zig): an update whose agent would not start, because a mount
+# root the host's flags name is missing, is deferred `host_setup_missing` before anything is stopped; with the directory there, prepare goes on.
+# `buck2 test //blackbox/js-agent-prepare:test` runs it on the build farm (buildrules rules/blackbox/README.md). A release passes the package it is about
+# to publish in place of the pin: -c blackbox.js_agent_url=... -c blackbox.js_agent_sha256=... -c blackbox.js_agent_size=...
+
+# Ubuntu 24.04 (`noble-20260917`), the linux-amd64 manifest: the farm's one base image.
+UBUNTU = "docker://docker.io/library/ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b"
+
+zig_exe(
+    name = "driver",
+    src = "driver.zig",
+    zig = "buildrules//rules/pins:zig_next",
+)
+
+blackbox_test(
+    name = "test",
+    image = UBUNTU,
+    packages = [
+        {
+            # The newest release when this test was written; a release replaces it with its own .deb.
+            "url": "https://github.com/komira-ai/jobscheduler/releases/download/v0.1.500/js-agent_0.1.500_amd64.deb",
+            "sha256": "c95bb792052044ced8cbe762cdc95caa500bbc3370949c53eb3ee11960ec41f4",
+            "size": 7082446,
+            "candidate": "js_agent",
+        },
+    ],
+    driver = ":driver",
+    visibility = ["PUBLIC"],
+)

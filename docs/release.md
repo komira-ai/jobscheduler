@@ -696,33 +696,6 @@ The Linux binaries are statically linked against musl, for both architectures (`
 
 Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when they are built again on a hosted arm64 runner. The Linux archives of both architectures are held to this by the comparison in `publish`, as every archive is; for the Mac ones and the Linux arm64 ones it is watched on the first real release. `crates/xtask/tests/release_archive_compat.rs` checks the archiving half for the arm64 agent archive: the workflow's `tar` options and `gzip -n` make the same bytes from the same files, whatever the working directory and the files' own times.
 
-### The Mac package's black-box tests
-
-After `pkg-upload` has put the release's signed package in the package repository, `blackbox-macos`
-calls `.github/workflows/js-agent-macos-blackbox.yml`. It downloads the published package (and the
-package of the newest release below it that has one) with `cargo xtask release macos-pkg`, which
-holds each to its `SHA256SUMS`, and runs the program `js-mac-package-blackbox`
-(`crates/js-mac-first-install/tests/bin/mac_package_blackbox.rs`) as root, on a hosted Mac for each
-test. The program installs a package the way hostkeeper's daemon does (its installer, with the Mac's
-own signature check, its step runner and the update hook), on the flags a Mac of the farm runs with
-(`tests/mac_package_blackbox/farm-mac-flags`, their shape: no name, address or key of the farm),
-beside a stand-in of what tierstore gives a Mac (its account, its socket and put directories, and a
-disk image mounted on the trees root), and joins it to a lease server of this repository in its own
-process. Jobs pull the smoke bundle from the public registry, as on the farm.
-
-| Test | What runs | Passes when |
-|---|---|---|
-| J2 | the package's first install | the order succeeds; the host is live with the agent in a session at most 60 s after the agent's process is first seen; a job ends 0 at its first attempt |
-| J4 | the update from the previous release with the trees root missing (no volume, no directory), a job running | the update is deferred `host_setup_missing` at `prepare`; no `cutover` runs; the agent's process is the same at every look (every 250 ms) and the host keeps its session and version; the job ends 0 at its first attempt |
-| J3 | the same update with the mount served again | the order succeeds; `current` names the new version and `previous` the old; the host is live with the new agent in a session at most 120 s after the order's start; a job ends 0 |
-
-A hosted Mac cannot show whether a farm Mac's hostkeeper lists the release's signer (the test's
-signer list names the leaf the Mac's `pkgutil --check-signature` reports), tierstore itself, the
-farm's lease server and network, a user's own launchd session, or the farm's hardware. Nothing
-waits for the job yet: a failure is the run's red job. A manual run tests a branch's unsigned
-package: `gh workflow run js-agent-macos-blackbox.yml --ref <branch> -f version=X -f package-run=<id>`,
-with the id of a `js-agent-macos-pkg.yml` run that built version X.
-
 ## Downloading and verifying
 
 Needs the GitHub CLI (`gh`), signed in.

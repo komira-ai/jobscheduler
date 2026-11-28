@@ -91,9 +91,8 @@
 # needs `beta-macos-first-install` (and so `beta-macos-pkg`): a package job or a first install
 # that failed tells the farm nothing, Linux hosts and the control plane included. `publish` leaves
 # the archives out, and nothing else waits for the beta stage: not the Linux assets, the .debs, the
-# apt repository or gamma; `beta-macos`, `beta-macos-probe`, `beta-macos-isolation` and
-# `blackbox-macos` (js-agent-macos-blackbox.yml: the black-box tests of the signed package on
-# hosted Macs, after `pkg-upload`) hold back no deploy. A pull request runs none of it. The tag is made first of
+# apt repository or gamma; `beta-macos`, `beta-macos-probe` and `beta-macos-isolation` hold back
+# no deploy. A pull request runs none of it. The tag is made first of
 # those: `publish` makes a draft release, uploads the files built, attested and verified, and
 # publishes it in one call, which creates the tag. A failed run leaves no tag. A re-run of a failed
 # run continues the same draft and adds what is missing; a published release is never changed, a
@@ -681,22 +680,6 @@ jobs:
           APT_BUCKET: ${{ vars.APT_BUCKET }}
           APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
         run: tool/xtask channels descriptor write --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --work "$RUNNER_TEMP/descriptor"
-
-  # The black-box tests of the signed js-agent package of macOS (js-agent-macos-blackbox.yml): its
-  # first install (J2), and its update from the release before it with tierstore's mount missing
-  # (J4: refused at prepare, before any restart) and then served (J3), on hosted Macs, against the
-  # package `pkg-upload` put in the package repository; it runs only when `beta-macos-pkg` built
-  # and signed one and `pkg-upload` passed. Nothing waits for it yet: a failure is this run's
-  # red job.
-  blackbox-macos:
-    needs: [plan, beta-macos-pkg, pkg-upload]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.beta-macos-pkg.result == 'success' && needs.pkg-upload.result == 'success' }}
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/js-agent-macos-blackbox.yml
-    with:
-      version: ${{ needs.plan.outputs.version }}
 
   # Builds the `xtask` binary that gamma, cp-deploy-digest, pkg-upload and every apt read, index
   # and write job run. A job of its own so that the build, whose scripts run code from the locked dependency
