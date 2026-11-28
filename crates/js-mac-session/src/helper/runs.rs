@@ -112,7 +112,7 @@ fn ended_of(status: ExitStatus) -> Ended {
 }
 
 impl Helper {
-    /// Waits for `child`, a process `run` or `role-run` started, and records how it ended. A
+    /// Waits for `child`, a process `run` started, and records how it ended. A
     /// run of a lease with a deadline is ended by the helper when the deadline passes
     /// ([`Helper::hold_deadline`]) while this waits.
     ///

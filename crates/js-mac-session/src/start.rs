@@ -11,9 +11,9 @@ use std::io::Read as _;
 
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, Stat};
 
-use crate::autologin::SessionPaths;
-use crate::helper::{Helper, Host, ImageSettings, Settings};
-use crate::lease::{PoolSize, UidRange, VmUser};
+use crate::autologin::LoginPaths;
+use crate::helper::{Helper, Host, Settings};
+use crate::lease::{PoolSize, UidRange};
 use crate::ledger::Ledger;
 use crate::scan::{ScanFolder, ScanSettings};
 use crate::server;
@@ -59,52 +59,14 @@ pub struct Args {
     /// the installed software set pins it (for example `cdhash H"..."`).
     #[arg(long)]
     pub daemon_requirement: String,
-    /// The file the login window reads the auto-login password from.
+    /// The file the login window reads the auto-login password from; the boot reset
+    /// removes it.
     #[arg(long, default_value = "/etc/kcpassword")]
     pub kcpassword: PathBuf,
-    /// The login window's preferences domain, as `defaults` takes it; the session
-    /// switch sets and clears its `autoLoginUser`.
+    /// The login window's preferences domain, as `defaults` takes it; the boot reset
+    /// clears its `autoLoginUser`.
     #[arg(long, default_value = "/Library/Preferences/com.apple.loginwindow")]
     pub loginwindow: String,
-    /// The standing VM user's account name, on a Mac provisioned for VMs: the Mac rests
-    /// logged in as it (`session-idle`), and the `role-*` verbs act as it. It must not
-    /// be a lease user's name (`kbf-lease-...`), `root` or `_kbf`. Without it the Mac
-    /// rests at the login window and the `role-*` verbs are refused.
-    #[arg(long)]
-    pub vm_user: Option<VmUser>,
-    /// The directory of sealed guest base images and harvest output the image verbs
-    /// (`image-setup`, `image-harvest`) act in: only a name directly inside it. It must be
-    /// the helper's own (root's) and not writable by group or others; a sealed base in it
-    /// stays root's, so the VM user can read it through its group and never change it. It
-    /// may be reached through a link (`/var` is one); nothing below it may.
-    #[arg(long, default_value = "/var/db/kbf-vm/images")]
-    pub images_dir: PathBuf,
-    /// The directory the VM user builds a new bundle in (`kbf-vmm image base --out`) and
-    /// keeps clones in. `image-setup` takes a bundle by name from it and moves it into
-    /// the images directory, so it must be on the same volume.
-    #[arg(long, default_value = "/var/db/kbf-vm/staging")]
-    pub staging_dir: PathBuf,
-    /// The `kbf-vmm` the image verbs run, the only program they run. It must be a regular
-    /// file, the helper's own (root's) and writable by no one else; the path may go
-    /// through the kit's `current` link.
-    #[arg(long, default_value = "/usr/local/kbf/current/kbf-vmm")]
-    pub vmm: PathBuf,
-    /// The `kbf-guest` for macOS that `image-setup` has `kbf-vmm` copy onto the guest's
-    /// disk; the same ownership rule as `--vmm`.
-    #[arg(long, default_value = "/usr/local/kbf/current/kbf-guest")]
-    pub guest_binary: PathBuf,
-}
-
-impl Args {
-    /// The programs and the directory the image verbs use.
-    fn image_settings(&self) -> ImageSettings {
-        ImageSettings {
-            dir: self.images_dir.clone(),
-            staging: self.staging_dir.clone(),
-            vmm: self.vmm.clone(),
-            guest: self.guest_binary.clone(),
-        }
-    }
 }
 
 /// A bound socket and the helper behind it, ready to serve.
@@ -155,15 +117,11 @@ pub fn prepare(
         schedules,
         sweep,
         user_folders: PathBuf::from("/private/var/folders"),
-        session: SessionPaths {
-            intent: args.state_dir.join("session-intent"),
+        state_dir: args.state_dir.clone(),
+        login: LoginPaths {
             kcpassword: args.kcpassword.clone(),
-            vm_password: args.state_dir.join(crate::autologin::VM_PASSWORD_FILE),
-            vm_password_owner: 0,
             loginwindow: args.loginwindow.clone(),
         },
-        vm_user: args.vm_user.clone(),
-        image: args.image_settings(),
         scan: ScanSettings::in_state_dir(&args.state_dir, scan),
     };
     tracing::info!(

@@ -11,7 +11,6 @@ fn run_request() -> Request {
         lease: "1.2".to_owned(),
         argv: vec!["/usr/bin/true".to_owned()],
         env: vec![("A".to_owned(), "b".to_owned())],
-        session: Session::Background,
         limits: None,
         deadline_ms: None,
     }
@@ -317,114 +316,66 @@ fn the_wire_names_are_kebab_case() {
     assert_eq!(text, r#"{"verb":"user-create","lease":"1.1"}"#);
     let text = serde_json::to_string(&Reply::Deleted { existed: true }).unwrap();
     assert_eq!(text, r#"{"deleted":{"existed":true}}"#);
-    let text = serde_json::to_string(&Request::RebootDirty).unwrap();
-    assert_eq!(text, r#"{"verb":"reboot-dirty"}"#);
-    let classes = vec![("lease-users".to_owned(), 1)];
-    let text = serde_json::to_string(&Reply::Baselined { classes }).unwrap();
-    assert_eq!(text, r#"{"baselined":{"classes":[["lease-users",1]]}}"#);
 }
 
-/// Catches: role verbs that change the wire of the lease verbs, or whose names
-/// differ from the ones the daemon sends; and a `role-run` that needs an `env` an
-/// older sender leaves out.
-#[test]
-fn the_role_verbs_are_their_own_verbs() {
-    let text = serde_json::to_string(&Request::RoleSessionReady).unwrap();
-    assert_eq!(text, r#"{"verb":"role-session-ready"}"#);
-    let text = serde_json::to_string(&Request::RoleKillUid).unwrap();
-    assert_eq!(text, r#"{"verb":"role-kill-uid"}"#);
-    let reap = Request::RoleReap {
-        pgid: 4242,
-        start: 1_700_000_000_123_456,
-        boot: "B0".to_owned(),
-    };
-    let text = serde_json::to_string(&reap).unwrap();
-    assert_eq!(
-        text,
-        r#"{"verb":"role-reap","pgid":4242,"start":1700000000123456,"boot":"B0"}"#
-    );
-    assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), reap);
-    let run = Request::RoleRun {
-        argv: vec!["/usr/bin/true".to_owned()],
-        env: Vec::new(),
-    };
-    let text = serde_json::to_string(&run).unwrap();
-    assert_eq!(
-        text,
-        r#"{"verb":"role-run","argv":["/usr/bin/true"],"env":[]}"#
-    );
-    let bare = r#"{"verb":"role-run","argv":["/usr/bin/true"]}"#;
-    assert_eq!(serde_json::from_str::<Request>(bare).unwrap(), run);
-}
+/// The texts a release before sent for the verbs this helper no longer has (the GUI session
+/// switch, the standing VM user's verbs, the image verbs, `baseline` and `reboot-dirty`) and
+/// for a `run` in the GUI session, in the shapes the release before wrote them.
+const REMOVED: [&str; 12] = [
+    r#"{"verb":"session-ready","lease":"1.2"}"#,
+    r#"{"verb":"session-login","lease":"1.2"}"#,
+    r#"{"verb":"session-idle"}"#,
+    r#"{"verb":"role-run","argv":["/usr/bin/true"],"env":[]}"#,
+    r#"{"verb":"role-session-ready"}"#,
+    r#"{"verb":"role-kill-uid"}"#,
+    r#"{"verb":"role-reap","pgid":4242,"start":1700000000123456,"boot":"B0"}"#,
+    r#"{"verb":"image-setup","bundle":"/images/base"}"#,
+    r#"{"verb":"image-harvest","bundle":"/images/clone","out":"/images/out"}"#,
+    r#"{"verb":"baseline"}"#,
+    r#"{"verb":"reboot-dirty"}"#,
+    r#"{"verb":"run","lease":"1.2","argv":["/usr/bin/true"],"env":[],"session":"gui"}"#,
+];
 
-/// Catches: an image verb that can carry a program, an argument vector or a
-/// guest binary path from the caller (the helper must run only its own installed
-/// `js-vmm`, with argv it builds), or whose names differ from the daemon's.
+/// Asserts that each text of [`REMOVED`] is refused by this helper's decoder as an unknown
+/// verb or field, in the words a client of the release before reads as one the helper does
+/// not know (`unknown_to_helper`), and that a background `run` of the release before (no
+/// `session`) still reads as this release's request. Catches: a removed verb that reads as
+/// another verb, a GUI `run` that starts in the background, or a removal that also breaks
+/// the `run` a previous release sends.
 #[test]
-fn an_image_verb_carries_paths_and_nothing_to_run() {
-    let setup = Request::ImageSetup {
-        bundle: "/images/base".to_owned(),
-    };
-    let text = serde_json::to_string(&setup).unwrap();
-    assert_eq!(text, r#"{"verb":"image-setup","bundle":"/images/base"}"#);
-    assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), setup);
-    let harvest = Request::ImageHarvest {
-        bundle: "/images/clone".to_owned(),
-        out: "/images/out".to_owned(),
-    };
-    let text = serde_json::to_string(&harvest).unwrap();
-    assert_eq!(
-        text,
-        r#"{"verb":"image-harvest","bundle":"/images/clone","out":"/images/out"}"#
-    );
-    assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), harvest);
-    for hostile in [
-        r#"{"verb":"image-setup","bundle":"/images/b","program":"/bin/sh"}"#,
-        r#"{"verb":"image-setup","bundle":"/images/b","argv":["/bin/sh"]}"#,
-        r#"{"verb":"image-setup","bundle":"/images/b","guest-binary":"/tmp/g"}"#,
-        r#"{"verb":"image-harvest","bundle":"/images/b","out":"/images/o","args":[]}"#,
-    ] {
-        assert!(
-            serde_json::from_str::<Request>(hostile).is_err(),
-            "{hostile}"
-        );
+fn a_removed_verb_is_refused_as_unknown() {
+    for text in REMOVED {
+        let why = serde_json::from_str::<Request>(text).unwrap_err();
+        assert!(refusal_of(&why).unknown_to_helper(), "{text}: {why}");
     }
-    let text = serde_json::to_string(&Reply::Imaged {
-        report: "{}".to_owned(),
-    })
-    .unwrap();
-    assert_eq!(text, r#"{"imaged":{"report":"{}"}}"#);
-}
-
-/// Catches a `run` that changes on the wire for the daemons that predate the
-/// session target (a background run must still send, and read, no `session`), and a
-/// GUI run whose target is lost or misnamed.
-#[test]
-fn a_run_names_its_session_only_when_it_is_the_gui() {
-    let background = serde_json::to_string(&run_request()).unwrap();
-    assert!(!background.contains("session"), "{background}");
-    let gui = Request::Run {
-        lease: "1.2".to_owned(),
-        argv: vec!["/usr/bin/true".to_owned()],
-        env: vec![("A".to_owned(), "b".to_owned())],
-        session: Session::Gui,
-        limits: None,
-        deadline_ms: None,
-    };
-    let text = serde_json::to_string(&gui).unwrap();
-    assert!(text.ends_with(r#","session":"gui"}"#), "{text}");
-    assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), gui);
+    let background = r#"{"verb":"run","lease":"1.2","argv":["/usr/bin/true"],"env":[["A","b"]]}"#;
     assert_eq!(
-        serde_json::from_str::<Request>(&background).unwrap(),
+        serde_json::from_str::<Request>(background).unwrap(),
         run_request()
     );
-    let ready = serde_json::to_string(&Request::SessionReady {
-        lease: "1.2".to_owned(),
-    })
-    .unwrap();
-    assert_eq!(ready, r#"{"verb":"session-ready","lease":"1.2"}"#);
-    let answer = serde_json::to_string(&Reply::SessionReady { ready: true }).unwrap();
-    assert_eq!(answer, r#"{"session-ready":{"ready":true}}"#);
+    assert_eq!(serde_json::to_string(&run_request()).unwrap(), background);
+}
+
+/// Asserts that the boot reset's reply still carries `kept`, as `null`, and that a reply of
+/// a helper of the release before, which named a kept lease there, still reads. Catches: a
+/// `kept` dropped from the type, which makes this release's client refuse (it denies unknown
+/// fields) the reply of a helper of the release before.
+#[test]
+fn the_boot_reset_reply_keeps_its_kept_field() {
+    let reply = Reply::Reset {
+        kept: None,
+        deleted: vec!["1.2".to_owned()],
+    };
+    let text = serde_json::to_string(&reply).unwrap();
+    assert_eq!(text, r#"{"reset":{"kept":null,"deleted":["1.2"]}}"#);
+    let before = r#"{"reset":{"kept":"1.1","deleted":[]}}"#;
+    assert_eq!(
+        serde_json::from_str::<Reply>(before).unwrap(),
+        Reply::Reset {
+            kept: Some("1.1".to_owned()),
+            deleted: Vec::new(),
+        }
+    );
 }
 
 /// A helper and a daemon from before `watch`, `stop` and `run`'s `deadline_ms`: the request
@@ -486,7 +437,6 @@ fn the_new_shapes_are_refused_by_an_old_decoder_in_a_way_the_client_reads() {
         lease: "1.2".to_owned(),
         argv: vec!["/usr/bin/true".to_owned()],
         env: Vec::new(),
-        session: Session::Background,
         limits: None,
         deadline_ms: Some(65_000),
     };

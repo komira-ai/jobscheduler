@@ -26,7 +26,6 @@ use std::process::{Child, Command, Stdio};
 
 use js_mac_provision::pfctl::{Pfctl as _, SystemPfctl};
 use js_mac_session::disclaim::{Kept, Program, responsible_pid};
-use js_mac_session::proto::Session;
 use js_mac_session::spawn::{self, Spawn};
 
 use crate::support::Scratch;
@@ -67,8 +66,8 @@ impl Job {
     }
 }
 
-/// Starts `argv` the way the helper's `run` does, as the user running the tests, in the
-/// background session, with the environment `env` asked for and `cwd` as the lease
+/// Starts `argv` the way the helper's `run` does, as the user running the tests, with the
+/// environment `env` asked for and `cwd` as the lease
 /// directory.
 fn start(cwd: &Path, argv: &[&str], env: &[(&str, &str)]) -> std::io::Result<Job> {
     let (stdin, feed) = std::io::pipe().unwrap();
@@ -87,7 +86,6 @@ fn start(cwd: &Path, argv: &[&str], env: &[(&str, &str)]) -> std::io::Result<Job
         stdout: out_end.into(),
         stderr: null(),
         cwd: std::fs::File::open(cwd).unwrap().into(),
-        session: Session::Background,
         limits: None,
     })?;
     Ok(Job {

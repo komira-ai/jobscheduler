@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::autologin::CommandOutput;
-use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord};
+use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, SHELL, UserRecord};
 
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
@@ -58,35 +58,15 @@ pub(crate) struct State {
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
     /// "delete_user", "user_record", "restore_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
-    /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
-    /// "term_group").
+    /// "command", "account", "term_group").
     pub(crate) fail: BTreeSet<&'static str>,
     /// What `command` answers, by the command's text (`program arg ...`). A command
-    /// with no answer succeeds and prints nothing, except `fdesetup isactive`, which
-    /// prints `false` (FileVault off), and `defaults read`, which fails as `defaults`
-    /// does for a key that is not set.
+    /// with no answer succeeds and prints nothing, except `defaults read`, which fails as
+    /// `defaults` does for a key that is not set.
     pub(crate) answers: BTreeMap<String, CommandOutput>,
-    /// A file each `command` reads, logging what it holds: shows what the intent record
-    /// said when each program ran.
-    pub(crate) intent: Option<PathBuf>,
-    /// What `boot_session` answers; `boot-2` when unset.
-    pub(crate) boot: Option<String>,
     /// Runs with each command's text before it is answered: a change on the host
     /// between two of the helper's steps.
     pub(crate) on_command: Option<Hook>,
-    /// Whether `chflags` on the fake host has the effect `uchg` has: a file with the flag
-    /// cannot be unlinked, and neither can a directory that holds one. Modelled by taking
-    /// the write permission off the parent of each flagged path until `nouchg`.
-    pub(crate) enforce_uchg: bool,
-    /// The paths `chflags` has set `uchg` on.
-    pub(crate) immutable: BTreeSet<PathBuf>,
-    /// The process table `processes` shows (for `role-reap`).
-    pub(crate) table: Vec<Process>,
-    /// How many more `processes` calls succeed before every one fails; `None` for no
-    /// such limit.
-    pub(crate) tables_ok: Option<usize>,
-    /// How many more `kill_group` calls leave their group alive.
-    pub(crate) stubborn_groups: usize,
     /// How far the fake clock has moved past [`NOW`].
     pub(crate) advanced: Duration,
     /// How many times the clock has been read: a test waits on it for another thread to
@@ -183,34 +163,6 @@ impl State {
             success: false,
             stdout: String::new(),
             stderr: format!("ipcrm: {}: Operation not permitted\n", args[1]),
-        }
-    }
-
-    /// The effect of a successful `chflags -h uchg|nouchg <paths>` when `enforce_uchg` is
-    /// on: the parent of every path with the flag loses its write permission (so nothing
-    /// in it can be unlinked, and a flagged directory cannot be removed from its parent)
-    /// until the last flag under it is cleared.
-    fn chflags(&mut self, args: &[&str]) {
-        let flag = args[1];
-        for path in &args[2..] {
-            self.set_flag(PathBuf::from(path), flag == "uchg");
-        }
-    }
-
-    /// Sets or clears `uchg` on `path` (and its effect, when `enforce_uchg` is on).
-    fn set_flag(&mut self, path: PathBuf, on: bool) {
-        use std::os::unix::fs::PermissionsExt as _;
-        if on {
-            self.immutable.insert(path.clone());
-        } else {
-            self.immutable.remove(&path);
-        }
-        if self.enforce_uchg {
-            let parent = path.parent().unwrap();
-            let held = self.immutable.iter().any(|p| p.parent() == Some(parent));
-            let mode = std::fs::metadata(parent).unwrap().permissions().mode();
-            let mode = if held { mode & !0o222 } else { mode | 0o200 };
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(mode)).unwrap();
         }
     }
 }
@@ -516,14 +468,7 @@ impl Host for FakeHost {
             .chain(args.iter().copied())
             .collect::<Vec<_>>()
             .join(" ");
-        let seen = match &self.state().intent {
-            Some(file) => match std::fs::read_to_string(file) {
-                Ok(held) => format!(" (intent {})", held.trim_end()),
-                Err(_) => " (no intent)".to_owned(),
-            },
-            None => String::new(),
-        };
-        self.call("command", format!("command {text}{seen}"))?;
+        self.call("command", format!("command {text}"))?;
         let mut state = self.state();
         if let Some(hook) = &state.on_command {
             hook(&text);
@@ -538,11 +483,6 @@ impl Host for FakeHost {
             None if program == crate::helper::IPCRM => state.ipcrm(args),
             // The helper runs it only as `-o checkmember -m <name> admin`.
             None if program == crate::helper::DSEDITGROUP => state.checkmember(args[3]),
-            None if text == "/usr/bin/fdesetup isactive" => CommandOutput {
-                success: false,
-                stdout: "false\n".to_owned(),
-                stderr: String::new(),
-            },
             None if text.starts_with("/usr/bin/defaults read ") => CommandOutput {
                 success: false,
                 stdout: String::new(),
@@ -553,9 +493,6 @@ impl Host for FakeHost {
                 ..CommandOutput::default()
             },
         };
-        if output.success && program == crate::helper::CHFLAGS {
-            state.chflags(args);
-        }
         Ok(output)
     }
 
@@ -565,75 +502,6 @@ impl Host for FakeHost {
             uid: user.uid,
             gid: user.gid,
         }))
-    }
-
-    /// The password is `pw-<name>`.
-    fn reset_password(&self, name: &str) -> io::Result<String> {
-        self.call("reset_password", format!("reset_password {name}"))?;
-        Ok(format!("pw-{name}"))
-    }
-
-    /// A real copy of the bytes into a new file (mode 0644, owned by the test).
-    fn clone_file(
-        &self,
-        src: std::os::fd::BorrowedFd<'_>,
-        dir: std::os::fd::BorrowedFd<'_>,
-        name: &str,
-    ) -> io::Result<()> {
-        self.call("clone_file", format!("clone_file {name}"))?;
-        let flags = rustix::fs::OFlags::WRONLY
-            | rustix::fs::OFlags::CREATE
-            | rustix::fs::OFlags::EXCL
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC;
-        let to = rustix::fs::openat(dir, name, flags, rustix::fs::Mode::from_raw_mode(0o644))?;
-        let mut from = std::fs::File::from(src.try_clone_to_owned()?);
-        io::copy(&mut from, &mut std::fs::File::from(to))?;
-        // A clone of a file with `uchg` has it too.
-        let (source, target) = (fd_path(&src), fd_path(&dir).join(name));
-        let mut state = self.state();
-        if state.immutable.contains(&source) {
-            state.set_flag(target, true);
-        }
-        Ok(())
-    }
-
-    fn clear_user_flags(&self, file: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
-        self.call("clear_user_flags", "clear_user_flags".to_owned())?;
-        self.state().set_flag(fd_path(&file), false);
-        Ok(())
-    }
-
-    fn boot_session(&self) -> io::Result<String> {
-        self.call("boot_session", "boot_session".to_owned())?;
-        Ok(self
-            .state()
-            .boot
-            .clone()
-            .unwrap_or_else(|| "boot-2".to_owned()))
-    }
-
-    fn processes(&self) -> io::Result<Vec<Process>> {
-        self.call("processes", "processes".to_owned())?;
-        let mut state = self.state();
-        if let Some(left) = &mut state.tables_ok {
-            if *left == 0 {
-                return Err(io::Error::other("processes ran out"));
-            }
-            *left -= 1;
-        }
-        Ok(state.table.clone())
-    }
-
-    fn kill_group(&self, pgid: i32) -> io::Result<()> {
-        self.call("kill_group", format!("kill_group {pgid}"))?;
-        let mut state = self.state();
-        if state.stubborn_groups > 0 {
-            state.stubborn_groups -= 1;
-        } else {
-            state.table.retain(|process| process.pgid != pgid);
-        }
-        Ok(())
     }
 
     fn term_group(&self, pgid: i32) -> io::Result<()> {
@@ -656,22 +524,6 @@ impl Host for FakeHost {
             state.pauses < PAUSES,
             "{PAUSES} pauses: a wait without a bound"
         );
-    }
-}
-
-/// The path an open descriptor names: `/proc` on Linux, `F_GETPATH` on macOS (which
-/// answers the path with its links resolved; [`scratch`] is already resolved).
-fn fd_path(fd: &impl std::os::fd::AsFd) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        let path = rustix::fs::getpath(fd).unwrap();
-        PathBuf::from(std::ffi::OsStr::from_bytes(path.as_bytes()))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use std::os::fd::AsRawFd as _;
-        std::fs::read_link(format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd())).unwrap()
     }
 }
 

@@ -13,15 +13,14 @@
 //! action needs a shell.
 //!
 //! The leak scan runs for real over the runner's own folders, Background Task Management
-//! and directory: a baseline through a baseline window the tests open, a clean scan, a
-//! lease user it must report, and a clean scan once every lease user is gone.
-//! `reboot-dirty` is only ever sent right after a scan that said `clean`, when it must
-//! be refused: after a dirty one it would reboot the runner.
+//! and directory: against a baseline the tests record through the library, as a release
+//! with a `baseline` verb recorded it (the helper records none), a clean scan, a lease user
+//! it must report, and a clean scan once every lease user is gone.
 //!
 //! One helper serves every test, started by the first test to run, over the state a
-//! power cut mid-session leaves. What must come first (the boot reset before anything
-//! is served, the baseline before any lease user exists) is done then and kept for the
-//! tests that read it. Every other test makes its own leases (term = a number of its
+//! power cut leaves. What must come first (the boot reset before anything is served, the
+//! baseline before any lease user exists) is done then and kept for the tests that read
+//! it. Every other test makes its own leases (term = a number of its
 //! own), ends them, and ends them also when it fails, so one red test does not fail the
 //! others. The helper's pool holds one user per uid of the range (`kbf-lease-pool-<n>`,
 //! uid [`FIRST_UID`] + n), made by its first boot reset; every lease gets a pool user's
@@ -316,7 +315,7 @@ fn signed_copy(name: &str, identifier: Option<&str>) -> PathBuf {
 }
 
 /// What the tests that must come first saw, in this order, on the helper's first start:
-/// the boot reset, then the baseline.
+/// the boot reset, then the scan against the baseline recorded then.
 struct FirstContact {
     /// `kill-uid` before the boot reset.
     before_reset: Out,
@@ -324,27 +323,20 @@ struct FirstContact {
     reset: Out,
     /// `defaults read` of the login window's `autoLoginUser` after it.
     auto_login: Out,
-    /// The intent record and kcpassword, where they survived the reset.
+    /// The kcpassword, where it survived the reset.
     survived: Vec<String>,
     reset_again: Out,
     /// `scan` with no baseline recorded.
     scan_unrecorded: Out,
-    /// `baseline` with no window.
-    baseline_closed: Out,
-    /// This boot's `kern.bootsessionuuid`.
-    boot: String,
-    /// `baseline` with a window opened in this boot.
-    baseline_this_boot: Out,
-    /// `baseline` with a window opened in an earlier boot.
-    baseline: Out,
+    /// How many items each class of the baseline recorded then holds.
+    recorded: Vec<(String, usize)>,
     /// Background Task Management entries, `sfltool dumpbtm` read right after it.
     btm: usize,
     /// Entries in `/Library/LaunchAgents` and `/Library/LaunchDaemons` then.
     agents: usize,
     daemons: usize,
-    /// The scan right after the baseline, and `reboot-dirty` after it if it said clean.
+    /// The scan right after the baseline.
     scan: Out,
-    reboot_dirty: Option<Out>,
 }
 
 /// The helper and its callers, set up once.
@@ -422,12 +414,10 @@ impl Mac {
             first: FirstContact::empty(),
         };
 
-        println!("== a power cut mid-session, as the boot finds it");
-        // Auto-login names a lease user, and an intent record names a lease the server
-        // no longer holds.
+        println!("== a power cut, as the boot finds it");
+        // Auto-login names a lease user.
         fs::create_dir_all(STATE).expect("make the state directory");
         set_mode(STATE, 0o700);
-        write_root(&intent(), "9.9\n");
         succeeds(
             "/usr/bin/defaults",
             &[
@@ -576,22 +566,15 @@ impl Mac {
             "/usr/bin/defaults",
             &["read", &loginwindow(), "autoLoginUser"],
         );
-        let survived = [autologin_cipher_path(), intent()]
+        let survived = [autologin_cipher_path()]
             .into_iter()
             .filter(|path| exists(path))
             .collect();
         let reset_again = self.client(&["reset", SOCKET]);
 
-        println!("== first contact: the baseline, only in its window");
+        println!("== first contact: the scan, before and after a baseline is recorded");
         let scan_unrecorded = self.client(&["scan", SOCKET]);
-        let baseline_closed = self.client(&["baseline", SOCKET]);
-        let boot = succeeds("/usr/sbin/sysctl", &["-n", "kern.bootsessionuuid"]);
-        assert!(!boot.is_empty(), "no kern.bootsessionuuid");
-        write_root(&window(), &format!("{boot}\n"));
-        let baseline_this_boot = self.client(&["baseline", SOCKET]);
-        // As an apply in an earlier boot leaves it.
-        write_root(&window(), "ci-earlier-boot\n");
-        let baseline = self.client(&["baseline", SOCKET]);
+        let recorded = record_baseline();
         // Each count read independently, right away: the parser and the folder walk
         // must read what is there.
         let dump = quiet("/usr/bin/sfltool", &["dumpbtm"]);
@@ -601,9 +584,6 @@ impl Mac {
         let agents = entries("/Library/LaunchAgents");
         let daemons = entries("/Library/LaunchDaemons");
         let scan = self.client(&["scan", SOCKET]);
-        // Never after a dirty scan: it would reboot the runner.
-        let reboot_dirty =
-            (scan.ok() && scan.said() == "clean").then(|| self.client(&["reboot-dirty", SOCKET]));
         FirstContact {
             before_reset,
             reset,
@@ -611,15 +591,11 @@ impl Mac {
             survived,
             reset_again,
             scan_unrecorded,
-            baseline_closed,
-            boot,
-            baseline_this_boot,
-            baseline,
+            recorded,
             btm,
             agents,
             daemons,
             scan,
-            reboot_dirty,
         }
     }
 }
@@ -638,15 +614,11 @@ impl FirstContact {
             survived: Vec::new(),
             reset_again: none(),
             scan_unrecorded: none(),
-            baseline_closed: none(),
-            boot: String::new(),
-            baseline_this_boot: none(),
-            baseline: none(),
+            recorded: Vec::new(),
             btm: 0,
             agents: 0,
             daemons: 0,
             scan: none(),
-            reboot_dirty: None,
         }
     }
 }
@@ -659,12 +631,66 @@ fn is_btm_entry(line: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn intent() -> String {
-    format!("{STATE}/session-intent")
+/// Records the leak scan's baseline as a release with a `baseline` verb recorded it, through
+/// the library on this Mac: the header, then each item the scan collects now (the pool's
+/// users, all free before any lease, left out), in the helper's state directory, root's.
+/// Every item must be readable. Returns how many items each class holds.
+#[cfg(target_os = "macos")]
+fn record_baseline() -> Vec<(String, usize)> {
+    use js_mac_session::autologin::LoginPaths;
+    use js_mac_session::helper::Settings;
+    use js_mac_session::lease::{PoolSize, UidRange};
+    use js_mac_session::scan::{self, ScanFolder, ScanSettings};
+    use js_mac_session::sweep::SweepPlan;
+    let range = UidRange::new(FIRST_UID, LAST_UID).expect("the lease range");
+    let settings = Settings {
+        range,
+        pool: PoolSize::new(LAST_UID - FIRST_UID + 1).expect("the pool size"),
+        gid: 20,
+        homes: PathBuf::from("/Users"),
+        schedules: SweepPlan::macos_schedules(),
+        sweep: SweepPlan::macos(),
+        user_folders: PathBuf::from("/private/var/folders"),
+        state_dir: PathBuf::from(STATE),
+        login: LoginPaths {
+            kcpassword: PathBuf::from(autologin_cipher_path()),
+            loginwindow: loginwindow(),
+        },
+        scan: ScanSettings::in_state_dir(Path::new(STATE), ScanFolder::macos()),
+    };
+    let own: std::collections::BTreeSet<u32> = range.uids().collect();
+    let snapshot = scan::collect(&js_mac_session::macos::MacHost, &settings, &own);
+    assert!(
+        snapshot.errors.is_empty(),
+        "the baseline would be incomplete: {:?}",
+        snapshot.errors
+    );
+    let mut text = format!("{}\n", scan::BASELINE_HEADER);
+    let mut counts = std::collections::BTreeMap::new();
+    for class in [
+        "auto-login",
+        "background-tasks",
+        "launch-agents",
+        "launch-daemons",
+        "lease-users",
+        "login-items",
+    ] {
+        counts.insert(class.to_owned(), 0);
+    }
+    for item in &snapshot.items {
+        text.push_str(item);
+        text.push('\n');
+        let class = item.split(' ').next().unwrap_or_default();
+        *counts.entry(class.to_owned()).or_insert(0) += 1;
+    }
+    write_root(&settings.scan.baseline.display().to_string(), &text);
+    counts.into_iter().collect()
 }
 
-fn window() -> String {
-    format!("{STATE}/baseline-window")
+/// There is no Mac to record a baseline on: the tests stop at their first line here.
+#[cfg(not(target_os = "macos"))]
+fn record_baseline() -> Vec<(String, usize)> {
+    Vec::new()
 }
 
 /// Where the tests have the helper keep the auto-login cipher (its `--kcpassword`).
@@ -672,8 +698,8 @@ fn autologin_cipher_path() -> String {
     format!("{SCRATCH}/autologin-cipher")
 }
 
-/// The session switch's files are the tests' own, never the runner's login window: the
-/// boot reset clears auto-login, and nothing here may restart the runner.
+/// The login window's files are the tests' own, never the runner's: the boot reset clears
+/// auto-login, and nothing here may change the runner's.
 fn loginwindow() -> String {
     format!("{SCRATCH}/loginwindow")
 }
@@ -750,9 +776,8 @@ impl<F: FnMut()> Drop for OnPanic<F> {
     }
 }
 
-/// Removes the session switch's files: a failing test must not leave a lease held.
-fn clear_session() {
-    let _ = fs::remove_file(intent());
+/// Clears the auto-login a test set: a failing test must not leave it for the next.
+fn clear_auto_login() {
     let _ = fs::remove_file(autologin_cipher_path());
     root(
         "/usr/bin/defaults",

@@ -63,9 +63,9 @@
 //! does not recognise is run by `/bin/sh`, and the answer when none runs is `EACCES` if
 //! one was refused so, `ENOENT` otherwise. The program is then its own responsible process:
 //! TCC judges it by its own code signature. Its children answer for it, as any process's
-//! do. [`exec`] does the same for a process that executes a program in its own place (the
-//! helper's `as-user` mode, the last step of a run in a GUI session), in the environment
-//! that process has.
+//! do. [`exec`] does the same for a process that executes a program in its own place
+//! (`js-agent`'s run of itself again over its own process), in the environment that process
+//! has.
 //!
 //! Everything the child uses is made before the fork, because between `fork` and `exec`
 //! the child may not allocate. That is why the program and its arguments are fixed when

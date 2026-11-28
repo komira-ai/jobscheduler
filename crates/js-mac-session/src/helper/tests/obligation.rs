@@ -1,14 +1,12 @@
 //! The edges of `kill-uid`'s GUI-session decision and its attempt loop: a GUI teardown
 //! that failed stays owed across a retry, a restart of the helper and a direct delete; a
-//! session that only the intent record, a later look, or an unreadable process name
-//! shows; a process named like the login window with no session; processes and domains
-//! that both remain; recovery on the last allowed attempt; and a process table that
-//! cannot be read.
+//! session that only a later look, or an unreadable process name, shows; a process named
+//! like the login window with no session; processes and domains that both remain;
+//! recovery on the last allowed attempt; and a process table that cannot be read.
 
 use std::collections::VecDeque;
 
 use super::*;
-use crate::autologin::{Intent, write_intent};
 
 /// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
 /// the uid only once its user is deleted and the pool's slot made.
@@ -116,26 +114,14 @@ fn a_failed_gui_teardown_stays_owed_across_a_restart() {
     assert!(rig.host.state().domains.is_empty());
 }
 
-/// Catches a GUI session missed because it is not seen at the first look: one that the
-/// intent record names (the login window logs in only that user, so a login may be on
-/// its way); one whose login completes after the first look, during the first pass;
-/// and one that completes between the passes. Each has `gui/<uid>` booted out and
+/// Catches a GUI session missed because it is not seen at the first look: one whose
+/// login completes after the first look, during the first pass; and one that completes
+/// between the passes. Each has `gui/<uid>` booted out and
 /// judged, from the attempt after it was seen on, and discharged once it is gone.
 #[test]
 fn a_session_seen_after_the_first_look_is_torn_down_too() {
     let (rig, uid) = one("owed-later", "63.1");
     let gui = format!("bootout gui/{uid}");
-    write_intent(
-        &rig.dir.join("session-intent"),
-        Intent::Lease(LeaseId::new(63, 1)),
-    )
-    .unwrap();
-    assert_eq!(rig.helper.kill_uid("63.1"), Ok(()));
-    let calls = log(&rig);
-    assert_eq!(count(&calls, &gui), 2, "{calls:#?}");
-    assert!(!owed(&rig, uid));
-    crate::autologin::remove(&rig.dir.join("session-intent")).unwrap();
-
     // At the first attempt's look, then at the second pass's: each time the next
     // attempt boots out `gui/<uid>`.
     for (after, want) in [(1, 2), (2, 1)] {
@@ -336,16 +322,9 @@ fn a_gui_teardown_record_that_cannot_be_kept_refuses_the_teardown() {
     std::os::unix::fs::symlink(rig.dir.join("elsewhere"), &record).unwrap();
     refusal(rig.helper.kill_uid("68.1"));
     refusal(rig.helper.user_delete("68.1").map(drop));
-    assert!(!log(&rig).iter().any(|c| c.starts_with("kill_all")));
-    // Refused too when the intent record names the lease (a session is decided without
-    // the record): the link is not replaced.
-    let intent = rig.dir.join("session-intent");
-    write_intent(&intent, Intent::Lease(LeaseId::new(68, 1))).unwrap();
-    refusal(rig.helper.kill_uid("68.1"));
     assert!(record.symlink_metadata().unwrap().file_type().is_symlink());
     assert!(!rig.dir.join("elsewhere").exists());
     assert!(!log(&rig).iter().any(|c| c.starts_with("kill_all")));
-    crate::autologin::remove(&intent).unwrap();
     std::fs::remove_file(&record).unwrap();
 
     // A directory: read as owed, but neither written nor removed.
@@ -369,8 +348,8 @@ fn entries(rig: &Rig) -> std::collections::BTreeSet<String> {
 }
 
 /// Catches a GUI teardown record that a previous release could trip on: it reads only the
-/// files it names in the state directory (the ledger, the intent record, the scan's
-/// baseline and window), never lists it. With a record left by a failed GUI teardown, the
+/// files it names in the state directory (the ledger, the scan's baseline and the
+/// files of the verbs it had), never lists it. With a record left by a failed GUI teardown, the
 /// ledger holds exactly the records of the previous release's format, and the state
 /// directory differs from the one a failed teardown without a session leaves only by the
 /// empty record. (`previous_release.rs` runs the previous release's own ledger on it.)
@@ -398,7 +377,6 @@ fn the_gui_teardown_record_changes_no_file_a_previous_release_reads() {
         std::fs::read(&ledger).unwrap(),
         std::fs::read(plain.dir.join("ledger")).unwrap()
     );
-    assert!(!gui.dir.join("session-intent").exists());
 }
 
 /// Catches a stale record (a previous release, rolled back to, completed a teardown and

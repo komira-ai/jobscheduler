@@ -2,7 +2,7 @@ use std::io::Read as _;
 use std::os::fd::OwnedFd;
 
 use super::*;
-use crate::autologin::SessionPaths;
+use crate::autologin::LoginPaths;
 use crate::testing::{FakeHost, act_argv, pool_of, scratch, trace};
 
 pub(super) fn me() -> u32 {
@@ -36,16 +36,6 @@ pub(super) fn rig_with(
     range: UidRange,
     dir: Option<std::sync::Arc<js_testkit::dir::TestDir>>,
 ) -> Rig {
-    rig_vm_with(name, range, dir, None)
-}
-
-/// [`rig_with`] on a Mac whose VM user is `vm_user`, if any.
-pub(super) fn rig_vm_with(
-    name: &str,
-    range: UidRange,
-    dir: Option<std::sync::Arc<js_testkit::dir::TestDir>>,
-    vm_user: Option<&str>,
-) -> Rig {
     trace();
     let dir = dir.unwrap_or_else(|| std::sync::Arc::new(scratch(&format!("helper-{name}"))));
     let homes = dir.join("Users");
@@ -65,10 +55,9 @@ pub(super) fn rig_vm_with(
             owned: vec![dir.join("Shared")],
         },
         user_folders: dir.join("folders"),
-        session: SessionPaths::under(&dir),
+        state_dir: dir.path().to_path_buf(),
+        login: LoginPaths::under(&dir),
         scan: crate::scan::ScanSettings::under(&dir),
-        image: crate::helper::ImageSettings::under(&dir),
-        vm_user: vm_user.map(|name| crate::lease::VmUser::new(name).unwrap()),
     };
     let ledger = Ledger::open(&dir.join("ledger")).unwrap();
     let helper = Helper::new(Box::new(host.clone()), settings, ledger);
@@ -324,20 +313,19 @@ fn run_refuses_a_bad_request() {
 }
 
 /// Catches: a limit that is zero or past its cap reaching the start (zero would forbid
-/// every write, and a huge value is `RLIM_INFINITY`), limits accepted for a GUI run, where
-/// they would bind the wrong process, and a limited run that does not start.
+/// every write, and a huge value is `RLIM_INFINITY`), and a limited run that does not
+/// start.
 #[test]
 fn run_refuses_bad_limits_and_starts_a_limited_run() {
     let rig = rig("run-limits", 2);
     rig.helper.user_create("8.2").unwrap();
     let true_ = || vec!["/usr/bin/true".to_owned()];
-    let run = |limits: Limits, session: Session| {
+    let run = |limits: Limits| {
         rig.helper.run_limited(
             "8.2",
             true_(),
             Vec::new(),
             fds(rig.dir.path()),
-            session,
             Some(limits),
         )
     };
@@ -363,18 +351,10 @@ fn run_refuses_bad_limits_and_starts_a_limited_run() {
             ..good
         },
     ] {
-        let error = run(bad, Session::Background).unwrap_err();
+        let error = run(bad).unwrap_err();
         assert!(error.contains("limit"), "{bad:?}: {error}");
     }
-    let error = run(good, Session::Gui).unwrap_err();
-    assert!(error.contains("GUI"), "{error}");
-    assert!(
-        run(good, Session::Background)
-            .unwrap()
-            .wait()
-            .unwrap()
-            .success()
-    );
+    assert!(run(good).unwrap().wait().unwrap().success());
 }
 
 /// Catches: deleting a user whose processes still run (S4.2: refused while kill-uid
@@ -562,7 +542,7 @@ fn requests_are_routed_and_stray_descriptors_refused() {
     assert_eq!(
         stray,
         Reply::Refused {
-            reason: "only run and role-run take descriptors".to_owned()
+            reason: "only run takes descriptors".to_owned()
         }
     );
     assert_eq!(
@@ -573,7 +553,6 @@ fn requests_are_routed_and_stray_descriptors_refused() {
         lease: lease(),
         argv: vec!["/usr/bin/true".to_owned()],
         env: Vec::new(),
-        session: crate::proto::Session::Background,
         limits: None,
         deadline_ms: None,
     };
@@ -790,151 +769,6 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
             .filter(|c| c.starts_with("kill_all"))
             .count();
         assert_eq!(kills, 2, "killed before and after the failed sweep");
-    }
-}
-
-/// Catches a GUI run (or a readiness answer) for a lease whose user is not the one
-/// `session-login` logged in, a GUI run started before launchd has the user's
-/// `gui/<uid>` domain (the defect "run before gui/<uid> exists": the action would start
-/// outside the session, with no window server), and a readiness answer that does not
-/// follow the domain.
-#[test]
-fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
-    let rig = rig("gui", 3);
-    let uid = rig.helper.user_create("9.1").unwrap();
-    rig.helper.user_create("9.2").unwrap();
-    let true_ = || vec!["/usr/bin/true".to_owned()];
-    let gui = |lease: &str| {
-        rig.helper
-            .run_in(
-                lease,
-                true_(),
-                Vec::new(),
-                fds(rig.dir.path()),
-                Session::Gui,
-            )
-            .unwrap_err()
-    };
-    let not_held = "does not hold the GUI session; session-login first";
-    assert!(
-        rig.helper
-            .session_ready("9.1")
-            .unwrap_err()
-            .contains(not_held)
-    );
-    assert!(gui("9.1").contains(not_held));
-
-    rig.helper.session_login("9.1").unwrap();
-    log(&rig);
-    assert_eq!(rig.helper.session_ready("9.1"), Ok(false));
-    assert_eq!(log(&rig), [format!("launchctl print gui/{uid}")]);
-    let error = gui("9.1");
-    assert!(
-        error.starts_with(&format!("gui/{uid} does not exist")),
-        "{error}"
-    );
-    assert!(
-        rig.helper
-            .session_ready("9.2")
-            .unwrap_err()
-            .contains(not_held)
-    );
-
-    rig.host.state().domains.insert(format!("gui/{uid}"));
-    let reply = rig.helper.handle(
-        Request::SessionReady {
-            lease: "9.1".to_owned(),
-        },
-        Vec::new(),
-    );
-    assert!(
-        matches!(reply, Outcome::Reply(Reply::SessionReady { ready: true })),
-        "{reply:?}"
-    );
-    // Off macOS the session is up but there is nothing to start in it.
-    #[cfg(not(target_os = "macos"))]
-    assert!(gui("9.1").contains("a GUI session exists only on macOS"));
-
-    rig.host.state().fail.insert("launchctl print");
-    let error = rig.helper.session_ready("9.1").unwrap_err();
-    assert!(error.contains("asking launchd for gui/"), "{error}");
-    assert!(
-        rig.helper
-            .session_ready("9.x")
-            .unwrap_err()
-            .contains("not <term>.<seq>")
-    );
-}
-
-fn readiness_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
-    launchctl_print_answer(&PrintAnswer {
-        code,
-        stdout: String::new(),
-        stderr: stderr.to_owned(),
-    })
-}
-
-/// Asserts that a readiness check takes only `launchctl print`'s documented answers: exit 0 is a domain
-/// that exists; exit 112 (what macOS 26 answers for the `gui/<uid>` of a user that never
-/// logged in, its text here as it was printed) or 113, each with "Could not find
-/// domain", one that does not; every other answer (a refusal, another exit with the same
-/// words, 112 or 113 without them, a signal) is an error naming what launchctl said. It
-/// catches launchd's not-found answer read as a failure, and a failed look at launchd
-/// (125 included) read as a session that is down, which would make the session switch
-/// log the VM user in again over a live session.
-#[test]
-fn only_launchds_not_found_answer_is_absence() {
-    assert!(readiness_answer(Some(0), "").unwrap());
-    for (code, stderr) in [
-        (
-            112,
-            "Bad request.\nCould not find domain for user gui: 59125\n",
-        ),
-        (
-            112,
-            "Bad request.\nCould not find domain for user user: 501\n",
-        ),
-        (113, "Could not find domain for user: 501\n"),
-    ] {
-        assert!(
-            !readiness_answer(Some(code), stderr).unwrap(),
-            "{code} {stderr:?}"
-        );
-    }
-    for (code, stderr, want) in [
-        (
-            Some(1),
-            "Operation not permitted\n",
-            "launchctl print exited 1: Operation not permitted",
-        ),
-        (
-            Some(1),
-            "Could not find domain for user gui: 501\n",
-            "launchctl print exited 1: Could not find domain for user gui: 501",
-        ),
-        (
-            Some(112),
-            "Bad request.\n",
-            "launchctl print exited 112: Bad request.",
-        ),
-        (
-            Some(113),
-            "Bad request.\n",
-            "launchctl print exited 113: Bad request.",
-        ),
-        (Some(5), "", "launchctl print exited 5: "),
-        (
-            Some(125),
-            "Could not print domain: 125: Domain does not support specified action\n",
-            "launchctl print exited 125: Could not print domain: 125: Domain does not support \
-             specified action",
-        ),
-        (None, "", "launchctl print was ended by a signal: "),
-    ] {
-        assert_eq!(
-            readiness_answer(code, stderr).unwrap_err().to_string(),
-            want
-        );
     }
 }
 

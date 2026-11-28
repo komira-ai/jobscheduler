@@ -20,9 +20,8 @@
 //! unmanaged process ([`holds_nothing`]).
 //!
 //! The order the helper's header describes: `kill-uid` decides whether the uid may have
-//! a GUI login session (the intent record names it, it owns a `loginwindow` process or
-//! one whose name cannot be read, or an earlier teardown left its GUI domain owed; a
-//! pool user has none of these), then kills and boots out its user domain (and its GUI
+//! a GUI login session (it owns a `loginwindow` process or one whose name cannot be
+//! read, or an earlier teardown left its GUI domain owed; a pool user has neither), then kills and boots out its user domain (and its GUI
 //! domain, only with a session), until neither a process nor a domain is left. A GUI
 //! domain is owed, in a record in the helper's state directory, from the first look
 //! that sees the session until a teardown judges the domain gone, so neither a retry
@@ -42,7 +41,6 @@ use js_types::LeaseId;
 use super::folders::{self, NotAnEntry};
 use super::pool::Settled;
 use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED, PrintAnswer};
-use crate::autologin::{Intent, read_intent};
 use crate::lease::{Dotted, parse_lease};
 use crate::ledger::Ledger;
 use crate::sweep::{Swept, owned_entries, remove_owned, sweep};
@@ -51,8 +49,8 @@ use crate::sweep::{Swept, owned_entries, remove_owned, sweep};
 /// reads.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TeardownError {
-    /// The lease cannot be acted on (its id, its state in the ledger, the session
-    /// switch's intent record), as the helper's other checks word it.
+    /// The lease cannot be acted on (its id, its state in the ledger), as the helper's
+    /// other checks word it.
     #[error("{0}")]
     Refused(String),
     /// The kill could not be sent.
@@ -63,15 +61,13 @@ pub(crate) enum TeardownError {
     Listing { uid: u32, source: io::Error },
     /// The outcome of `kill-uid` did not hold after its last attempt: processes of the
     /// uid, or launchd domains that still print (each with why it could not be told
-    /// gone, or why its last bootout failed), or both.
-    /// `lease` is whether the uid is a lease's (quarantined by the ledger) or the VM
-    /// user's.
-    #[error("{}", outlived(*.uid, .left, .stayed, *.lease))]
+    /// gone, or why its last bootout failed), or both. The uid is a lease's, quarantined
+    /// by the ledger.
+    #[error("{}", outlived(*.uid, .left, .stayed))]
     Outlived {
         uid: u32,
         left: Vec<LiveProcess>,
         stayed: Vec<String>,
-        lease: bool,
     },
     /// The record that the uid's GUI domain is still owed a teardown could not be read,
     /// written or removed.
@@ -163,10 +159,8 @@ fn remaining(uid: u32, when: &str, left: &[LiveProcess]) -> String {
 }
 
 /// The text of [`TeardownError::Outlived`]: what remains of `uid` after the last attempt
-/// (the processes `left`, the domains that `stayed`), and what happens to the uid: a
-/// lease's (`lease`) is quarantined; the VM user's stays as it is, for `role-kill-uid`
-/// to be repeated.
-fn outlived(uid: u32, left: &[LiveProcess], stayed: &[String], lease: bool) -> String {
+/// (the processes `left`, the domains that `stayed`), and that the uid is quarantined.
+fn outlived(uid: u32, left: &[LiveProcess], stayed: &[String]) -> String {
     let when = format!("after {KILL_ROUNDS} attempts");
     let mut parts = Vec::new();
     if !left.is_empty() {
@@ -178,11 +172,10 @@ fn outlived(uid: u32, left: &[LiveProcess], stayed: &[String], lease: bool) -> S
             stayed.join(", ")
         ));
     }
-    let then = match lease {
-        true => format!("uid {uid} is quarantined: no other lease gets it until a delete succeeds"),
-        false => "role-kill-uid can be repeated".to_owned(),
-    };
-    format!("{}; {then}", parts.join("; "))
+    format!(
+        "{}; uid {uid} is quarantined: no other lease gets it until a delete succeeds",
+        parts.join("; ")
+    )
 }
 
 /// The command name of the process the login window runs as the user of each GUI login
@@ -261,10 +254,9 @@ fn kept(lease: LeaseId, uid: u32, why: &TeardownError) {
 
 impl Helper {
     /// `kill-uid <lease>`: looks, before anything is killed, whether the uid may have a
-    /// GUI login session: the session switch's intent record names the lease (the login
-    /// window logs in only the user it names), the uid owns a `loginwindow` process (or
-    /// one whose name cannot be read), or an earlier teardown left its GUI domain owed
-    /// ([`Self::gui_owed`]). A pool user has none of these, so its `gui/<uid>` is never
+    /// GUI login session: the uid owns a `loginwindow` process (or one whose name cannot
+    /// be read), or an earlier teardown left its GUI domain owed ([`Self::gui_owed`]). A
+    /// pool user has neither of these, so its `gui/<uid>` is never
     /// asked about. A session seen at a later look of the processes counts from the next
     /// attempt on. Then, for at most
     /// [`KILL_ROUNDS`] attempts, kills every process of the uid and boots out its user
@@ -294,41 +286,21 @@ impl Helper {
             .lease_user(ledger, lease)
             .map_err(TeardownError::Refused)?;
         let uid = user.uid;
-        let intended = read_intent(&self.settings.session.intent)
-            .map_err(TeardownError::Refused)?
-            == Some(Intent::Lease(lease));
-        self.kill_account(&user.name, uid, intended)
-            .map_err(|why| match why {
-                TeardownError::Outlived {
-                    uid, left, stayed, ..
-                } => TeardownError::Outlived {
-                    uid,
-                    left,
-                    stayed,
-                    lease: true,
-                },
-                other => other,
-            })
+        self.kill_account(&user.name, uid)
             .inspect_err(|why| kept(lease, uid, why))?;
         tracing::info!(lease = %Dotted(lease), uid, "no process of the lease user is left");
         Ok(())
     }
 
     /// Kills every process of `uid` and boots out its domains, as [`Self::kill_uid`]
-    /// describes, for the account `name`; `intended` is whether the session switch's
-    /// intent record names the account.
-    pub(super) fn kill_account(
-        &self,
-        name: &str,
-        uid: u32,
-        intended: bool,
-    ) -> Result<(), TeardownError> {
+    /// describes, for the account `name`.
+    pub(super) fn kill_account(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
         // Looked at before the kill, which ends the session's `loginwindow`.
         // The record is read first, whatever else shows a session: a link there is refused
         // before anything replaces it.
         let owed = self.gui_owed(uid)?;
         let mut gui = false;
-        if owed || intended || session_seen(&self.processes(uid)?) {
+        if owed || session_seen(&self.processes(uid)?) {
             self.owe_gui(uid)?;
             gui = true;
         }
@@ -369,22 +341,14 @@ impl Helper {
             }
             self.host.pause();
         }
-        Err(TeardownError::Outlived {
-            uid,
-            left,
-            stayed,
-            lease: false,
-        })
+        Err(TeardownError::Outlived { uid, left, stayed })
     }
 
-    /// Where the record that `uid`'s GUI domain is owed a teardown is kept: beside the
-    /// session switch's intent record, in the helper's state directory, so it outlives a
-    /// failed teardown and a restart of the helper.
+    /// Where the record that `uid`'s GUI domain is owed a teardown is kept: in the
+    /// helper's state directory, so it outlives a failed teardown and a restart of the
+    /// helper.
     fn gui_record(&self, uid: u32) -> PathBuf {
-        self.settings
-            .session
-            .intent
-            .with_file_name(format!("gui-teardown.{uid}"))
+        self.settings.state_dir.join(format!("gui-teardown.{uid}"))
     }
 
     /// Whether `uid`'s GUI domain is owed a teardown: one that saw a GUI session of the
@@ -434,8 +398,7 @@ impl Helper {
 
     /// Whether launchd prints `domain` ([`printed`]), as the teardown judges it: a
     /// domain wrongly read as gone is caught by the look at the processes, so any exit
-    /// status but 0 is gone, and so is an empty domain. The readiness checks read `launchctl print` more strictly
-    /// ([`Self::domain_exists`]).
+    /// status but 0 is gone, and so is an empty domain.
     ///
     /// # Errors
     /// `launchctl` could not be run, or a signal ended it.
@@ -508,12 +471,8 @@ impl Helper {
     /// is named in the refusal. The ledger lock is held throughout, so a refused delete
     /// holds back the other verbs for up to about five seconds per look.
     ///
-    /// Refused while the session switch's intent record names the lease: its user is
-    /// the one the login window logs in.
-    ///
     /// # Errors
-    /// Why it was refused: the intent record names the lease or cannot be read, the
-    /// uid's `DARWIN_USER_DIR` could not be asked or is not an entry of the per-user
+    /// Why it was refused: the uid's `DARWIN_USER_DIR` could not be asked or is not an entry of the per-user
     /// folders, a process or a domain of the uid remains, the GUI teardown record could not
     /// be read or removed, or the sweep or the deletion failed (the lease stays live, its uid held, so the delete can be
     /// repeated).
@@ -522,12 +481,6 @@ impl Helper {
         let mut ledger = self.lock();
         if ledger.get(lease).is_some_and(|entry| entry.deleted) {
             return Ok(false);
-        }
-        if read_intent(&self.settings.session.intent)? == Some(Intent::Lease(lease)) {
-            return Err(format!(
-                "lease {} holds the GUI session (auto-login); session-idle first",
-                Dotted(lease)
-            ));
         }
         Ok(self.end_locked(&mut ledger, lease)?)
     }

@@ -6,8 +6,7 @@
 //! [`Reply::Refused`], and hangs up). The client's request is then one frame, a
 //! [`Call`] that carries that nonce, so a request written before the helper's check
 //! cannot pass for one written after it (S4.3). `run` attaches four descriptors to it
-//! (`SCM_RIGHTS`): stdin, stdout, stderr and the lease directory, in that order, and so
-//! does `role-run`. The
+//! (`SCM_RIGHTS`): stdin, stdout, stderr and the lease directory, in that order. The
 //! helper answers with one frame, except that a started `run` answers
 //! [`Reply::Started`] and then, when the process exits, [`Reply::Exited`].
 
@@ -35,9 +34,6 @@ pub const RUN_FDS: usize = 4;
 pub const SCAN_LINES: usize = 20;
 /// The most bytes of one entry of a [`Reply::Scanned`] list; a longer one is cut.
 pub const SCAN_LINE_BYTES: usize = 300;
-
-/// The most bytes of `js-vmm`'s report an image verb's reply carries.
-pub const IMAGE_REPORT_BYTES: usize = 16 * 1024;
 
 /// The receive buffer for ancillary data. On Linux, room for one more descriptor than a
 /// request may carry: the kernel cuts what does not fit, says so (`MSG_CTRUNC`), and
@@ -75,8 +71,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant: Option<String>,
     },
-    /// Start a process as the lease's user, with the attached descriptors; in its GUI
-    /// session when `session` is `gui`.
+    /// Start a process as the lease's user, outside any login session, with the attached
+    /// descriptors. A request that names a `session` (the GUI session of a release before)
+    /// is refused as an unknown field.
     Run {
         /// The lease, as `<term>.<seq>`.
         lease: String,
@@ -85,11 +82,8 @@ pub enum Request {
         /// The environment the process gets, as (name, value) pairs.
         #[serde(default)]
         env: Vec<(String, String)>,
-        /// Where the process starts.
-        #[serde(default, skip_serializing_if = "Session::is_background")]
-        session: Session,
         /// The file-size and process limits the helper sets on the process before it
-        /// starts it; none for no limits. Refused in the GUI session.
+        /// starts it; none for no limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limits: Option<Limits>,
         /// The run's own deadline, in milliseconds after it starts: once it passes and the
@@ -118,11 +112,6 @@ pub enum Request {
         /// How long the process has to end after the `SIGTERM`, in milliseconds.
         grace_ms: u64,
     },
-    /// Whether the lease user's GUI session (`gui/<uid>`) is up, after `session-login`.
-    SessionReady {
-        /// The lease, as `<term>.<seq>`.
-        lease: String,
-    },
     /// End every process of the lease's uid.
     KillUid {
         /// The lease, as `<term>.<seq>`.
@@ -135,62 +124,6 @@ pub enum Request {
         /// The lease, as `<term>.<seq>`.
         lease: String,
     },
-    /// Auto-login into the lease's user, then a userspace restart.
-    SessionLogin {
-        /// The lease, as `<term>.<seq>`.
-        lease: String,
-    },
-    /// Rest the Mac, then a userspace restart: at the standing VM user when the helper
-    /// has one (`--vm-user`), else at the login window (auto-login cleared).
-    SessionIdle,
-    /// Start `js-vmm vm-run --spec <file>` as the standing VM user in its GUI session,
-    /// with the same four descriptors as `run`. Refused unless the argument vector is
-    /// exactly the helper's configured `js-vmm`, `vm-run`, `--spec` and a regular file
-    /// inside the images directory reached through no link, the VM user's `gui/<uid>`
-    /// domain is up and no lease holds the session.
-    RoleRun {
-        /// The argument vector, which must be exactly the allowed one (see above).
-        argv: Vec<String>,
-        /// The environment, which must be empty.
-        #[serde(default)]
-        env: Vec<(String, String)>,
-    },
-    /// Whether the standing VM user's GUI session (`gui/<uid>`) is up. False while a
-    /// lease holds the session.
-    RoleSessionReady,
-    /// End every process of the standing VM user (its session with them).
-    RoleKillUid,
-    /// End the process group a `role-run` started and nothing else: `pgid` is the pid
-    /// `Started` reported, `start` that process's start time and `boot` the boot session
-    /// it ran in. The helper kills the group only while that process still leads it, is
-    /// the VM user's, and has this start time in this boot.
-    RoleReap {
-        /// The process group to end: the pid `Started` reported.
-        pgid: i32,
-        /// The start time of the process that leads the group.
-        start: u64,
-        /// The boot session the process ran in.
-        boot: String,
-    },
-    /// As root, take the base image bundle `bundle` (a path directly inside the staging
-    /// directory), move it into the images directory, write the guest's first-boot files
-    /// into it (`js-vmm image setup`) and seal it: root's, mode 0750/0640 with the VM
-    /// user's group, `uchg`. There is no program and no argument here: the helper runs its
-    /// own installed `js-vmm`.
-    ImageSetup {
-        /// The base image bundle, a path directly inside the staging directory.
-        bundle: String,
-    },
-    /// As root, copy the diagnostics allowlist out of the stopped guest bundle `bundle`
-    /// (directly inside the staging or the images directory) into the new directory `out`
-    /// (directly inside the images directory) (`js-vmm image harvest`); the helper makes
-    /// `out`, root's and mode 0700.
-    ImageHarvest {
-        /// The stopped guest bundle, directly inside the staging or the images directory.
-        bundle: String,
-        /// The new directory to copy into, directly inside the images directory.
-        out: String,
-    },
     /// The boot reset, before the daemon's `Hello`: `held` are the leases the server
     /// still holds for this node.
     BootReset {
@@ -200,10 +133,6 @@ pub enum Request {
     },
     /// The leak scan against the recorded baseline.
     Scan,
-    /// Record the leak scan's baseline, in its window.
-    Baseline,
-    /// Reboot, after the helper's own scan came back dirty.
-    RebootDirty,
     /// Make the pool's missing users and replace its broken ones; the users the ledger
     /// holds are kept as they are.
     PoolCreate,
@@ -213,26 +142,6 @@ pub enum Request {
     /// before the boot reset, as it reads nothing of the pool; a helper from before the
     /// verb refuses it as unknown.
     FullDiskAccess,
-}
-
-/// Where `run` starts a process.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Session {
-    /// Outside any login session: the system's launchd domain, as the helper runs.
-    #[default]
-    Background,
-    /// In the lease user's GUI (Aqua) session, `gui/<uid>`, through `launchctl asuser`:
-    /// the session `session-login` started. Refused while the session is not up.
-    Gui,
-}
-
-impl Session {
-    /// Whether this is [`Session::Background`], which a request leaves out.
-    #[must_use]
-    pub const fn is_background(&self) -> bool {
-        matches!(self, Self::Background)
-    }
 }
 
 /// What the helper answers.
@@ -269,18 +178,11 @@ pub enum Reply {
         /// Whether there was a user record to delete.
         existed: bool,
     },
-    /// The session switch is set and a userspace restart was asked for; the restart
-    /// may end the connection before this arrives.
-    Restarting,
-    /// Whether the lease user's GUI session is up.
-    SessionReady {
-        /// Whether the GUI session is up.
-        ready: bool,
-    },
-    /// The boot reset is done: the lease whose session it kept, and the leases whose
-    /// users it deleted.
+    /// The boot reset is done: the leases whose users it deleted.
     Reset {
-        /// The lease whose session was kept, as `<term>.<seq>`.
+        /// Always none: no lease keeps a session over a boot reset now. Still sent, as
+        /// `null`, so the reply reads in a release before, which named here the lease whose
+        /// GUI session it kept.
         kept: Option<String>,
         /// The leases whose users were deleted.
         deleted: Vec<String>,
@@ -297,17 +199,6 @@ pub enum Reply {
         removed: Vec<String>,
         /// Items that could not be read.
         errors: Vec<String>,
-    },
-    /// The baseline is recorded: how many items each class holds.
-    Baselined {
-        /// Each class of items and how many it holds.
-        classes: Vec<(String, usize)>,
-    },
-    /// An image verb ran: what `js-vmm` printed (its JSON report), cut to
-    /// [`IMAGE_REPORT_BYTES`].
-    Imaged {
-        /// The report, as the VMM printed it.
-        report: String,
     },
     /// The state of the pool, after `pool-create` or for `pool-status`.
     Pool(Box<PoolState>),

@@ -8,32 +8,25 @@
 //! ```text
 //! client create <socket> <lease>         prints the uid
 //! client run <socket> <lease> <dir> <argv>...   prints "exit <code>" or "signal <n>"
-//! client run-gui <socket> <lease> <dir> <argv>...   the same, in the GUI session
 //! client run-quiet <socket> <lease> <dir> <argv>...   as run, with the action's
 //!                                                      stdout and stderr /dev/null
-//! client session-ready <socket> <lease>    prints "true" or "false"
 //! client kill <socket> <lease>
 //! client delete <socket> <lease>           prints "existed" or "absent"
-//! client reset <socket> [held lease]...     prints "kept <lease|none> deleted <leases>"
+//! client reset <socket> [held lease]...     prints "deleted <leases>"
 //! client scan <socket>                     prints "clean" or "dirty", then "+ <added>",
 //!                                                      "- <removed>" and "! <error>" lines
-//! client baseline <socket>                 prints "<class> <items>" lines
-//! client reboot-dirty <socket>             reboots the Mac if the last scan was dirty
 //! client connect-then-exec <socket> <program> <args>...
 //! client write-then-exec <socket> <lease> <program> <args>...
 //! client replies                           prints the replies on KBF_CI_FD
 //! client exec-probe                        prints audit tokens across an exec
-//! client spawn <gui|background> <uid> <gid> <user> <dir> <argv>...
+//! client spawn <uid> <gid> <user> <dir> <argv>...
 //!                                                       prints "exit <code>"
 //! client groups                             prints this process's groups
 //! ```
 //!
 //! `spawn` starts `<argv>` as `js-mac-session`'s `run` does (`spawn::spawn`), with
-//! stdout and stderr this process's, without the helper's socket or ledger: run as root,
-//! it shows where a process lands in each session, for a uid that has a GUI session
-//! (the runner's own) where no lease user has one. In the GUI session it executes this
-//! binary in the `as-user` mode, as the helper executes itself, so this binary also
-//! answers `as-user` (`js_mac_session::macos::gui::as_user`).
+//! stdout and stderr this process's, without the helper's socket or ledger: run as root
+//! from a LaunchDaemon, it shows where a process lands.
 //!
 //! The attack S4.3 names, connecting as one binary and then becoming the genuine one,
 //! in two forms:
@@ -61,21 +54,11 @@ mod macos {
     use std::process::Command;
 
     use js_mac_session::client::{self, Client, ClientError};
-    use js_mac_session::proto::{self, Reply, Request, Session};
+    use js_mac_session::proto::{self, Reply, Request};
     use js_mac_session::spawn::Spawn;
 
     /// Answers as the client, and returns the exit status.
     pub fn main() -> i32 {
-        let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-        if let Some((mode, rest)) = raw.split_first()
-            && mode == js_mac_session::macos::gui::AS_USER
-        {
-            // It returns only on failure, with the reason on stderr (exit 126 for a
-            // refusal, 127 for a failed exec); an `ExitCode` has no raw value to pass
-            // on, so both exit 126 here.
-            let _failed = js_mac_session::macos::gui::as_user(rest);
-            return 126;
-        }
         let args: Vec<String> = std::env::args().skip(1).collect();
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match run(&words) {
@@ -97,21 +80,7 @@ mod macos {
                 let uid = Client::new(socket).user_create(lease)?;
                 println!("{uid}");
             }
-            ["session-ready", socket, lease] => {
-                println!("{}", Client::new(socket).session_ready(lease)?);
-            }
-            [
-                verb @ ("run" | "run-gui" | "run-quiet"),
-                socket,
-                lease,
-                dir,
-                argv @ ..,
-            ] => {
-                let session = if *verb == "run-gui" {
-                    Session::Gui
-                } else {
-                    Session::Background
-                };
+            [verb @ ("run" | "run-quiet"), socket, lease, dir, argv @ ..] => {
                 let dir = std::fs::File::open(dir).map_err(ClientError::Io)?;
                 let null = std::fs::File::open("/dev/null").map_err(ClientError::Io)?;
                 let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
@@ -123,9 +92,7 @@ mod macos {
                 } else {
                     [null.as_fd(), stdout.as_fd(), stderr.as_fd(), dir.as_fd()]
                 };
-                let exit = Client::new(socket)
-                    .run_in(lease, &argv, &[], fds, session)?
-                    .wait()?;
+                let exit = Client::new(socket).run(lease, &argv, &[], fds)?.wait()?;
                 match (exit.code, exit.signal) {
                     (Some(code), _) => println!("exit {code}"),
                     (_, Some(signal)) => println!("signal {signal}"),
@@ -134,9 +101,8 @@ mod macos {
             }
             ["reset", socket, held @ ..] => {
                 let held: Vec<String> = held.iter().map(|&a| a.to_owned()).collect();
-                let (kept, deleted) = Client::new(socket).boot_reset(&held)?;
-                let kept = kept.as_deref().unwrap_or("none");
-                println!("kept {kept} deleted {}", deleted.join(","));
+                let deleted = Client::new(socket).boot_reset(&held)?;
+                println!("deleted {}", deleted.join(","));
             }
             ["scan", socket] => {
                 let scanned = Client::new(socket).scan()?;
@@ -151,12 +117,6 @@ mod macos {
                     println!("! {error}");
                 }
             }
-            ["baseline", socket] => {
-                for (class, items) in Client::new(socket).baseline()? {
-                    println!("{class} {items}");
-                }
-            }
-            ["reboot-dirty", socket] => Client::new(socket).reboot_dirty()?,
             ["kill", socket, lease] => {
                 let stream = match inherited() {
                     Some(stream) => stream,
@@ -198,11 +158,7 @@ mod macos {
                 let named: Vec<String> = groups[..n].iter().map(ToString::to_string).collect();
                 println!("{}", named.join(" "));
             }
-            ["spawn", session, uid, gid, user, dir, argv @ ..] => {
-                let session = match *session {
-                    "gui" => Session::Gui,
-                    _ => Session::Background,
-                };
+            ["spawn", uid, gid, user, dir, argv @ ..] => {
                 let open = |path: &str| std::fs::File::open(path).map_err(ClientError::Io);
                 let fd = |file: std::fs::File| -> std::os::fd::OwnedFd { file.into() };
                 let dup = |fd: std::os::fd::BorrowedFd<'_>| {
@@ -219,7 +175,6 @@ mod macos {
                     stdout: dup(std::io::stdout().as_fd())?,
                     stderr: dup(std::io::stderr().as_fd())?,
                     cwd: fd(open(dir)?),
-                    session,
                     limits: None,
                 };
                 let status = js_mac_session::spawn::spawn(spawn)

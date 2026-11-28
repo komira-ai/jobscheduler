@@ -47,7 +47,7 @@ helper has made its socket, or before the pf job has loaded the anchor, ends wit
 seconds later. So the first one or two starts after a boot may fail and the host says its hello
 within about a minute; this is expected and needs nothing.
 
-The helper's boot reset (`crates/js-mac-session/src/helper/switch.rs`, `boot_reset`) ends every
+The helper's boot reset (`crates/js-mac-session/src/helper/boot_reset.rs`, `boot_reset`) ends every
 lease its ledger holds, resets the pool users a lease left and makes the pool's missing users. A
 job that ran when the Mac stopped has no process after the boot: the agent finds its run gone
 (`crates/js-agent/src/native/adopt.rs`), ends it and tells the server.
@@ -74,8 +74,8 @@ retry policy says.
   the root helper makes and spawns; nothing of it needs a user logged in at the console or a GUI
   session, and the daemons run as root from boot. The helper clears auto-login in its boot reset
   (`defaults delete /Library/Preferences/com.apple.loginwindow autoLoginUser` and the removal of
-  `/etc/kcpassword`, `crates/js-mac-session/src/helper/switch.rs`, `boot_reset`), because the
-  session-switching modes it carries use them; the agent asks for that reset when it starts
+  `/etc/kcpassword`, `crates/js-mac-session/src/helper/boot_reset.rs`, `boot_reset`), so a Mac
+  of the pool never logs a user in at its start; the agent asks for that reset when it starts
   against a helper that has not made it yet, so once after every start of the helper. Do not set
   auto-login on a Mac of the pool: it is removed after the next restart. A user who is logged in
   at the console does no harm.
